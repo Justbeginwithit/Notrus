@@ -115,7 +115,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
     implementation("androidx.biometric:biometric:1.1.0")
-    implementation("com.google.android.material:material:1.12.0")
+    implementation("com.google.android.material:material:1.13.0")
     implementation("org.signal:libsignal-client:$signalVersion")
     implementation("org.signal:libsignal-android:$signalVersion")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
