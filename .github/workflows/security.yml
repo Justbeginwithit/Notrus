@@ -1,0 +1,95 @@
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  macos-security:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Secret scan
+        run: node scripts/scan-secrets.mjs
+
+      - name: Protocol core tests
+        run: cargo test --manifest-path native/protocol-core/Cargo.toml
+
+      - name: Mac checkpoint tests
+        run: zsh scripts/test-mac-app.sh
+
+      - name: Package app
+        run: zsh scripts/package-mac-app.sh
+
+      - name: Generate SBOM
+        run: node scripts/generate-sbom.mjs
+
+      - name: Start relay
+        run: |
+          PORT=3010 node server.js > /tmp/notrus-relay.log 2>&1 &
+          echo $! > /tmp/notrus-relay.pid
+          sleep 2
+
+      - name: Runtime security proofs
+        env:
+          NOTRUS_METADATA_RELAY_ORIGIN: http://127.0.0.1:3010
+          NOTRUS_CONTENT_RELAY_ORIGIN: http://127.0.0.1:3010
+          NOTRUS_ADVERSARIAL_RELAY_ORIGIN: http://127.0.0.1:3010
+        run: |
+          npm run test:client-surfaces
+          npm run test:metadata-boundary
+          npm run test:content-boundary
+          npm run test:adversarial-inputs
+          npm run test:abuse-controls
+          npm run test:device-membership
+
+      - name: Stop relay
+        if: always()
+        run: |
+          if [ -f /tmp/notrus-relay.pid ]; then
+            kill "$(cat /tmp/notrus-relay.pid)" || true
+          fi
+
+  android-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build Android client
+        run: zsh scripts/build-android-app.sh
+
+      - name: Android unit tests
+        run: |
+          cd native/android/NotrusAndroid
+          ./gradlew testDebugUnitTest
+
+      - name: Package Android client
+        run: zsh scripts/package-android-app.sh

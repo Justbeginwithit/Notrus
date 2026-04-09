@@ -1,0 +1,14 @@
+node_modules
+data/store.json
+data/witness-store.json
+data/transparency-signing-key.json
+.secrets/
+dist
+.DS_Store
+.build/
+**/.build/
+**/target/
+**/.gradle/
+**/build/
+native/android/NotrusAndroid/local.properties
+native/android/NotrusAndroid/.idea/
