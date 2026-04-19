@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="sharedpref" path="notrus_vault.xml" />
+    <exclude domain="sharedpref" path="notrus_security_state.xml" />
+    <exclude domain="database" path="." />
+    <exclude domain="file" path="." />
+</full-backup-content>
