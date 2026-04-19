@@ -1,6 +1,6 @@
 # Notrus
 
-Notrus is a native-first encrypted messenger project with:
+Notrus is a self-hostable, native-first encrypted messenger project with:
 
 - a relay that stores ciphertext, attachment blobs, transparency data, device records, and abuse-control state
 - a native macOS client in [`native/macos/NotrusMac`](native/macos/NotrusMac)
