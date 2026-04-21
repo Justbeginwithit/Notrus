@@ -33,12 +33,15 @@ Read before use:
 - [DISCLAIMER.md](DISCLAIMER.md)
 - [LEGAL.md](LEGAL.md)
 - [SECURITY.md](SECURITY.md)
+- [RELEASE_NOTES.md](RELEASE_NOTES.md)
+- [ROADMAP.md](ROADMAP.md)
 - [LICENSE](LICENSE)
 
 ## What Notrus Uses
 
 - official Signal protocol components through `libsignal-protocol` for direct messaging
 - OpenMLS for RFC 9420 MLS group messaging
+- a standards-thread compatible group fanout transport (per-recipient Signal sealing inside `mls-rfc9420-v1` delivery) for client interoperability when native MLS state is unavailable
 - TLS 1.3 for client-to-relay transport when HTTPS is configured
 - Ed25519 transparency signing for relay key-directory events
 - SwiftUI for the native macOS client
@@ -55,6 +58,8 @@ Notrus is not affiliated with or endorsed by any of those projects or vendors. S
 - Android app: [`native/android/NotrusAndroid/README.md`](native/android/NotrusAndroid/README.md)
 - Standards core: [`native/protocol-core/README.md`](native/protocol-core/README.md)
 - Security release notes: [`SECURITY_RELEASE.md`](SECURITY_RELEASE.md)
+- Release notes: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
+- Roadmap: [`ROADMAP.md`](ROADMAP.md)
 
 ## Quick Start
 
@@ -81,18 +86,19 @@ Build/package both native clients:
 
 ```bash
 npm run build:protocol-core
-npm run package:clients
+npm run package:android-app
+npm run package:mac-app
 ```
 
 Artifacts:
 
-- `dist/NotrusMac.app`
-- `dist/NotrusMac.zip`
-- `dist/NotrusMac-0.2.0-alpha2.zip`
-- `dist/android/NotrusAndroid-debug.apk`
-- `dist/android/NotrusAndroid-release.apk`
-- `dist/android/NotrusAndroid-0.2.0-alpha2-debug.apk`
-- `dist/android/NotrusAndroid-0.2.0-alpha2-release.apk`
+- `dist/Notrus.app`
+- `dist/Notrus.zip`
+- `dist/Notrus-0.2.0-alpha2.zip`
+- `dist/android/Notrus-debug.apk`
+- `dist/android/Notrus-release.apk`
+- `dist/android/Notrus-0.2.0-alpha2-debug.apk`
+- `dist/android/Notrus-0.2.0-alpha2-release.apk`
 
 ## Current Product Boundary
 
@@ -123,8 +129,9 @@ Both native clients also expose an optional privacy mode that adds short random 
 Current native-client boundary:
 
 - direct chats work across macOS and Android
-- macOS has the strongest current product surface
-- Android parity for advanced group behavior is still incomplete
+- encrypted mailbox attachments on the standards direct path work on both native clients
+- standards-group messaging works across macOS and Android through native MLS or compatible fanout transport, depending on client state
+- both clients can read and send compatible standards-group traffic on the current relay policy path
 
 ## Recovery And Device Movement
 
@@ -146,6 +153,10 @@ npm run test:content-boundary
 npm run test:adversarial-inputs
 npm run test:abuse-controls
 npm run test:device-membership
+npm run test:attestation-service
+npm run test:attestation-enforcement
+npm run test:release-governance
+npm run test:security-suite
 ```
 
 Native checks:
@@ -161,12 +172,15 @@ cd native/android/NotrusAndroid && ./gradlew testDebugUnitTest connectedDebugAnd
 - Threat model: [THREAT_MODEL.md](THREAT_MODEL.md)
 - Security model: [SECURITY.md](SECURITY.md)
 - Security checklist: [SECURITY_CHECKLIST.md](SECURITY_CHECKLIST.md)
+- Stable release checklist: [STABLE_RELEASE_CHECKLIST.md](STABLE_RELEASE_CHECKLIST.md)
 - Crypto contract: [CRYPTO_SPEC.md](CRYPTO_SPEC.md)
 - Protocol migration: [PROTOCOL_MIGRATION.md](PROTOCOL_MIGRATION.md)
 - Metadata policy: [METADATA_POLICY.md](METADATA_POLICY.md)
 - Device model: [DEVICE_MODEL.md](DEVICE_MODEL.md)
 - Integrity policy: [INTEGRITY_POLICY.md](INTEGRITY_POLICY.md)
 - Release security: [SECURITY_RELEASE.md](SECURITY_RELEASE.md)
+- Release notes: [RELEASE_NOTES.md](RELEASE_NOTES.md)
+- Product roadmap: [ROADMAP.md](ROADMAP.md)
 
 ## Non-Affiliation And Legal
 

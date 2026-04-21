@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -119,6 +120,25 @@ async function waitForHealth(origin, pathname = "/api/health") {
   throw new Error(`Timed out waiting for ${origin}${pathname}.`);
 }
 
+async function reservePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}
+
 async function generateAndroidAttestationFixture(tempDir, { deviceId, storageMode }) {
   const leafConfig = `
 [req]
@@ -211,21 +231,25 @@ keyUsage=digitalSignature
   };
 }
 
-async function main() {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "notrus-attestation-enforcement-"));
-  const relayPort = 3025;
-  const attestationPort = 3525;
-  const relayOrigin = `http://127.0.0.1:${relayPort}`;
-  const attestationOrigin = `http://127.0.0.1:${attestationPort}`;
+function buildIntegrityHeader(payload) {
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
+}
 
-  const attestationServer = startAttestationServer({ host: "127.0.0.1", port: attestationPort });
+async function withRelay({
+  attestationOrigin,
+  environment,
+  relayOrigin,
+  relayPort,
+  tempDir,
+  testFn,
+}) {
   const relay = spawn(process.execPath, ["server.js"], {
     cwd: process.cwd(),
     env: {
       ...process.env,
+      ...environment,
       NOTRUS_ATTESTATION_ORIGIN: attestationOrigin,
-      NOTRUS_DATA_DIR: path.join(tempDir, "relay-data"),
-      NOTRUS_REQUIRE_ANDROID_ATTESTATION: "true",
+      NOTRUS_DATA_DIR: path.join(tempDir, `relay-data-${relayPort}`),
       NOTRUS_PROTOCOL_POLICY: "require-standards",
       HOST: "127.0.0.1",
       PORT: String(relayPort),
@@ -234,78 +258,312 @@ async function main() {
   });
 
   try {
-    await waitForHealth(attestationOrigin, "/api/attestation/health");
     const health = await waitForHealth(relayOrigin, "/api/health");
-    if (health.attestation?.configured !== true || health.attestation?.required !== true) {
-      throw new Error("Relay health did not advertise required Android attestation.");
-    }
-
-    const validDeviceId = "android-device-valid";
-    const validFixture = await generateAndroidAttestationFixture(tempDir, {
-      deviceId: validDeviceId,
-      storageMode: "strongbox-device-key",
-    });
-    const validRegistration = await request(relayOrigin, "/api/register", {
-      method: "POST",
-      body: identityPayload({
-        userId: "attestation-user-valid",
-        username: "attestationvalid",
-        displayName: "Attestation Valid",
-        device: {
-          attestation: validFixture.attestation,
-          createdAt: isoNow(),
-          id: validDeviceId,
-          label: "Pixel Test",
-          platform: "android",
-          publicJwk: validFixture.publicJwk,
-          riskLevel: "low",
-          storageMode: "strongbox-device-key",
-        },
-      }),
-      headers: {
-        "X-Notrus-Device-Id": validDeviceId,
-      },
-    });
-    if (validRegistration.statusCode !== 200) {
-      throw new Error(`Valid Android attestation registration failed with HTTP ${validRegistration.statusCode}.`);
-    }
-
-    const invalidDeviceId = "android-device-invalid";
-    const invalidFixture = await generateAndroidAttestationFixture(tempDir, {
-      deviceId: invalidDeviceId,
-      storageMode: "strongbox-device-key",
-    });
-    invalidFixture.attestation.proofSignature =
-      invalidFixture.attestation.proofSignature.slice(0, -4) + "AAAA";
-    const invalidRegistration = await request(relayOrigin, "/api/register", {
-      method: "POST",
-      body: identityPayload({
-        userId: "attestation-user-invalid",
-        username: "attestationinvalid",
-        displayName: "Attestation Invalid",
-        device: {
-          attestation: invalidFixture.attestation,
-          createdAt: isoNow(),
-          id: invalidDeviceId,
-          label: "Tampered Pixel Test",
-          platform: "android",
-          publicJwk: invalidFixture.publicJwk,
-          riskLevel: "medium",
-          storageMode: "strongbox-device-key",
-        },
-      }),
-      headers: {
-        "X-Notrus-Device-Id": invalidDeviceId,
-      },
-    });
-    if (invalidRegistration.statusCode !== 403) {
-      throw new Error(`Tampered Android attestation should be rejected, got HTTP ${invalidRegistration.statusCode}.`);
-    }
-
-    console.log("attestation-enforcement: relay required Android attestation, accepted a verified device proof, and rejected a tampered one");
+    await testFn(health);
   } finally {
-    attestationServer.close();
-    relay.kill("SIGTERM");
+    if (!relay.killed) {
+      relay.kill("SIGTERM");
+    }
+    await new Promise((resolve) => relay.once("exit", resolve));
+  }
+}
+
+async function runAndroidKeyAttestationScenario({ attestationOrigin, relayOrigin, relayPort, tempDir }) {
+  await withRelay({
+    attestationOrigin,
+    environment: {
+      NOTRUS_REQUIRE_ANDROID_ATTESTATION: "true",
+    },
+    relayOrigin,
+    relayPort,
+    tempDir,
+    testFn: async (health) => {
+      if (health.attestation?.configured !== true || health.attestation?.required !== true) {
+        throw new Error("Relay health did not advertise required Android key attestation.");
+      }
+
+      const validDeviceId = "android-device-valid";
+      const validFixture = await generateAndroidAttestationFixture(tempDir, {
+        deviceId: validDeviceId,
+        storageMode: "strongbox-device-key",
+      });
+      const validRegistration = await request(relayOrigin, "/api/register", {
+        method: "POST",
+        body: identityPayload({
+          userId: "attestation-user-valid",
+          username: "attestationvalid",
+          displayName: "Attestation Valid",
+          device: {
+            attestation: validFixture.attestation,
+            createdAt: isoNow(),
+            id: validDeviceId,
+            label: "Pixel Test",
+            platform: "android",
+            publicJwk: validFixture.publicJwk,
+            riskLevel: "low",
+            storageMode: "strongbox-device-key",
+          },
+        }),
+        headers: {
+          "X-Notrus-Device-Id": validDeviceId,
+        },
+      });
+      if (validRegistration.statusCode !== 200) {
+        throw new Error(
+          `Valid Android attestation registration failed with HTTP ${validRegistration.statusCode}: ${JSON.stringify(validRegistration.body)}`
+        );
+      }
+
+      const invalidDeviceId = "android-device-invalid";
+      const invalidFixture = await generateAndroidAttestationFixture(tempDir, {
+        deviceId: invalidDeviceId,
+        storageMode: "strongbox-device-key",
+      });
+      invalidFixture.attestation.proofSignature = `${invalidFixture.attestation.proofSignature.slice(0, -4)}AAAA`;
+      const invalidRegistration = await request(relayOrigin, "/api/register", {
+        method: "POST",
+        body: identityPayload({
+          userId: "attestation-user-invalid",
+          username: "attestationinvalid",
+          displayName: "Attestation Invalid",
+          device: {
+            attestation: invalidFixture.attestation,
+            createdAt: isoNow(),
+            id: invalidDeviceId,
+            label: "Tampered Pixel Test",
+            platform: "android",
+            publicJwk: invalidFixture.publicJwk,
+            riskLevel: "medium",
+            storageMode: "strongbox-device-key",
+          },
+        }),
+        headers: {
+          "X-Notrus-Device-Id": invalidDeviceId,
+        },
+      });
+      if (invalidRegistration.statusCode !== 403) {
+        throw new Error(
+          `Tampered Android attestation should be rejected, got HTTP ${invalidRegistration.statusCode}: ${JSON.stringify(invalidRegistration.body)}`
+        );
+      }
+    },
+  });
+}
+
+async function runAppleDeviceCheckScenario({ attestationOrigin, relayOrigin, relayPort, tempDir }) {
+  await withRelay({
+    attestationOrigin,
+    environment: {
+      NOTRUS_REQUIRE_APPLE_DEVICECHECK: "true",
+    },
+    relayOrigin,
+    relayPort,
+    tempDir,
+    testFn: async (health) => {
+      if (health.attestation?.appleDeviceCheckRequired !== true) {
+        throw new Error("Relay health did not advertise required Apple DeviceCheck verification.");
+      }
+
+      const validDeviceId = "mac-device-valid";
+      const validRegistration = await request(relayOrigin, "/api/register", {
+        method: "POST",
+        body: identityPayload({
+          userId: "devicecheck-user-valid",
+          username: "devicecheckvalid",
+          displayName: "DeviceCheck Valid",
+          device: {
+            createdAt: isoNow(),
+            id: validDeviceId,
+            label: "Mac Test",
+            platform: "macos",
+            publicJwk: generateJwk(),
+            riskLevel: "low",
+            storageMode: "keychain-device-key",
+          },
+        }),
+        headers: {
+          "X-Notrus-Device-Id": validDeviceId,
+          "X-Notrus-Integrity": buildIntegrityHeader({
+            bundleIdentifier: "com.notrus.mac",
+            codeSignatureStatus: "valid",
+            deviceCheckStatus: "token-issued",
+            deviceCheckToken: "mock-devicecheck-token-valid-1",
+            deviceCheckTokenPresented: true,
+            generatedAt: isoNow(),
+            riskLevel: "low",
+          }),
+        },
+      });
+      if (validRegistration.statusCode !== 200) {
+        throw new Error(
+          `Valid Apple DeviceCheck registration failed with HTTP ${validRegistration.statusCode}: ${JSON.stringify(validRegistration.body)}`
+        );
+      }
+
+      const invalidDeviceId = "mac-device-invalid";
+      const invalidRegistration = await request(relayOrigin, "/api/register", {
+        method: "POST",
+        body: identityPayload({
+          userId: "devicecheck-user-invalid",
+          username: "devicecheckinvalid",
+          displayName: "DeviceCheck Invalid",
+          device: {
+            createdAt: isoNow(),
+            id: invalidDeviceId,
+            label: "Mac Invalid Test",
+            platform: "macos",
+            publicJwk: generateJwk(),
+            riskLevel: "medium",
+            storageMode: "keychain-device-key",
+          },
+        }),
+        headers: {
+          "X-Notrus-Device-Id": invalidDeviceId,
+          "X-Notrus-Integrity": buildIntegrityHeader({
+            bundleIdentifier: "com.notrus.mac",
+            codeSignatureStatus: "valid",
+            deviceCheckStatus: "token-issued",
+            deviceCheckToken: "bad-token",
+            deviceCheckTokenPresented: true,
+            generatedAt: isoNow(),
+            riskLevel: "low",
+          }),
+        },
+      });
+      if (invalidRegistration.statusCode !== 403) {
+        throw new Error(
+          `Invalid Apple DeviceCheck token should be rejected, got HTTP ${invalidRegistration.statusCode}: ${JSON.stringify(invalidRegistration.body)}`
+        );
+      }
+    },
+  });
+}
+
+async function runAndroidPlayIntegrityScenario({ attestationOrigin, relayOrigin, relayPort, tempDir }) {
+  await withRelay({
+    attestationOrigin,
+    environment: {
+      NOTRUS_REQUIRE_ANDROID_PLAY_INTEGRITY: "true",
+    },
+    relayOrigin,
+    relayPort,
+    tempDir,
+    testFn: async (health) => {
+      if (health.attestation?.androidPlayIntegrityRequired !== true) {
+        throw new Error("Relay health did not advertise required Android Play Integrity verification.");
+      }
+
+      const validDeviceId = "android-play-valid";
+      const validRegistration = await request(relayOrigin, "/api/register", {
+        method: "POST",
+        body: identityPayload({
+          userId: "playintegrity-user-valid",
+          username: "playintegrityvalid",
+          displayName: "Play Integrity Valid",
+          device: {
+            createdAt: isoNow(),
+            id: validDeviceId,
+            label: "Android PI Test",
+            platform: "android",
+            publicJwk: generateJwk(),
+            riskLevel: "low",
+            storageMode: "strongbox-device-key",
+          },
+        }),
+        headers: {
+          "X-Notrus-Device-Id": validDeviceId,
+          "X-Notrus-Integrity": buildIntegrityHeader({
+            bundleIdentifier: "com.notrus.android",
+            codeSignatureStatus: "valid",
+            deviceCheckStatus: "keystore-attestation-ready",
+            playIntegrityToken: "mock-play-integrity-token-valid-1",
+            playIntegrityTokenPresented: true,
+            generatedAt: isoNow(),
+            riskLevel: "low",
+          }),
+        },
+      });
+      if (validRegistration.statusCode !== 200) {
+        throw new Error(
+          `Valid Play Integrity registration failed with HTTP ${validRegistration.statusCode}: ${JSON.stringify(validRegistration.body)}`
+        );
+      }
+
+      const invalidDeviceId = "android-play-invalid";
+      const invalidRegistration = await request(relayOrigin, "/api/register", {
+        method: "POST",
+        body: identityPayload({
+          userId: "playintegrity-user-invalid",
+          username: "playintegrityinvalid",
+          displayName: "Play Integrity Invalid",
+          device: {
+            createdAt: isoNow(),
+            id: invalidDeviceId,
+            label: "Android PI Invalid",
+            platform: "android",
+            publicJwk: generateJwk(),
+            riskLevel: "medium",
+            storageMode: "strongbox-device-key",
+          },
+        }),
+        headers: {
+          "X-Notrus-Device-Id": invalidDeviceId,
+          "X-Notrus-Integrity": buildIntegrityHeader({
+            bundleIdentifier: "com.notrus.android",
+            codeSignatureStatus: "valid",
+            deviceCheckStatus: "keystore-attestation-ready",
+            playIntegrityToken: "bad-token",
+            playIntegrityTokenPresented: true,
+            generatedAt: isoNow(),
+            riskLevel: "medium",
+          }),
+        },
+      });
+      if (invalidRegistration.statusCode !== 403) {
+        throw new Error(
+          `Invalid Play Integrity token should be rejected, got HTTP ${invalidRegistration.statusCode}: ${JSON.stringify(invalidRegistration.body)}`
+        );
+      }
+    },
+  });
+}
+
+async function main() {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "notrus-attestation-enforcement-"));
+  const attestationPort = await reservePort();
+  const androidKeyPort = await reservePort();
+  const appleDeviceCheckPort = await reservePort();
+  const androidPlayIntegrityPort = await reservePort();
+  const attestationOrigin = `http://127.0.0.1:${attestationPort}`;
+  const attestationServer = startAttestationServer({ host: "127.0.0.1", port: attestationPort });
+
+  try {
+    await waitForHealth(attestationOrigin, "/api/attestation/health");
+
+    await runAndroidKeyAttestationScenario({
+      attestationOrigin,
+      relayOrigin: `http://127.0.0.1:${androidKeyPort}`,
+      relayPort: androidKeyPort,
+      tempDir,
+    });
+    await runAppleDeviceCheckScenario({
+      attestationOrigin,
+      relayOrigin: `http://127.0.0.1:${appleDeviceCheckPort}`,
+      relayPort: appleDeviceCheckPort,
+      tempDir,
+    });
+    await runAndroidPlayIntegrityScenario({
+      attestationOrigin,
+      relayOrigin: `http://127.0.0.1:${androidPlayIntegrityPort}`,
+      relayPort: androidPlayIntegrityPort,
+      tempDir,
+    });
+
+    console.log(
+      "attestation-enforcement: relay enforcement passed for Android key attestation, Apple DeviceCheck, and Android Play Integrity token verification"
+    );
+  } finally {
+    await new Promise((resolve) => attestationServer.close(resolve));
     await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {});
   }
 }

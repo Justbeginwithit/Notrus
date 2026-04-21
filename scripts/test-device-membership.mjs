@@ -145,6 +145,10 @@ function request(pathname, { method = "GET", headers = {}, body = null } = {}) {
   });
 }
 
+function isAccessDenied(statusCode) {
+  return statusCode === 401 || statusCode === 403;
+}
+
 async function waitForHealth() {
   for (let attempt = 0; attempt < 60; attempt += 1) {
     try {
@@ -209,22 +213,39 @@ async function main() {
     const deviceOne = createDevice("MacBook Pro");
     const deviceTwo = createDevice("Pixel 9 Pro");
 
-    await request("/api/register", {
+    const registerOne = await request("/api/register", {
       method: "POST",
       headers: { "X-Notrus-Device-Id": deviceOne.descriptor.id },
       body: { ...alice.payload, device: deviceOne.descriptor },
     });
+    if (registerOne.statusCode !== 200) {
+      throw new Error(`Primary device registration failed with HTTP ${registerOne.statusCode}.`);
+    }
+    const sessionOne = registerOne.body?.session?.token;
+    if (typeof sessionOne !== "string" || sessionOne.length < 20) {
+      throw new Error("Primary device registration did not return a usable session token.");
+    }
 
-    await request("/api/register", {
+    const registerTwo = await request("/api/register", {
       method: "POST",
       headers: { "X-Notrus-Device-Id": deviceTwo.descriptor.id },
       body: { ...alice.payload, device: deviceTwo.descriptor },
     });
+    if (registerTwo.statusCode !== 200) {
+      throw new Error(`Secondary device registration failed with HTTP ${registerTwo.statusCode}.`);
+    }
+    const sessionTwo = registerTwo.body?.session?.token;
+    if (typeof sessionTwo !== "string" || sessionTwo.length < 20) {
+      throw new Error("Secondary device registration did not return a usable session token.");
+    }
 
-    await request("/api/register", {
+    const registerBob = await request("/api/register", {
       method: "POST",
       body: bob.payload,
     });
+    if (registerBob.statusCode !== 200) {
+      throw new Error(`Peer registration failed with HTTP ${registerBob.statusCode}.`);
+    }
 
     const threadId = `device-thread-${suffix}`;
     const threadResponse = await request("/api/threads", {
@@ -246,14 +267,21 @@ async function main() {
       throw new Error(`Thread creation failed with HTTP ${threadResponse.statusCode}.`);
     }
 
-    const syncOne = await request(`/api/sync?userId=${alice.payload.userId}`, {
-      headers: { "X-Notrus-Device-Id": deviceOne.descriptor.id },
+    const securityDevices = await request("/api/security/devices", {
+      headers: { Authorization: `Bearer ${sessionOne}` },
+    });
+    if (securityDevices.statusCode !== 200) {
+      throw new Error(`Security devices snapshot failed with HTTP ${securityDevices.statusCode}.`);
+    }
+    if ((securityDevices.body.devices ?? []).length !== 2) {
+      throw new Error(`Expected 2 linked devices, found ${(securityDevices.body.devices ?? []).length}.`);
+    }
+
+    const syncOne = await request("/api/sync/state", {
+      headers: { Authorization: `Bearer ${sessionOne}` },
     });
     if (syncOne.statusCode !== 200) {
       throw new Error(`Device-one sync failed with HTTP ${syncOne.statusCode}.`);
-    }
-    if ((syncOne.body.devices ?? []).length !== 2) {
-      throw new Error(`Expected 2 linked devices, found ${(syncOne.body.devices ?? []).length}.`);
     }
     if ((syncOne.body.threads?.[0]?.participantIds ?? []).length !== 2) {
       throw new Error("Thread membership was conflated with linked-device membership.");
@@ -283,11 +311,18 @@ async function main() {
       throw new Error(`Device revoke failed with HTTP ${revoke.statusCode}.`);
     }
 
-    const revokedSync = await request(`/api/sync?userId=${alice.payload.userId}`, {
-      headers: { "X-Notrus-Device-Id": deviceTwo.descriptor.id },
+    const revokedDevices = await request("/api/security/devices", {
+      headers: { Authorization: `Bearer ${sessionTwo}` },
     });
-    if (revokedSync.statusCode !== 403) {
-      throw new Error(`Revoked device should be denied sync with HTTP 403, got ${revokedSync.statusCode}.`);
+    if (!isAccessDenied(revokedDevices.statusCode)) {
+      throw new Error(`Revoked device should be denied security-devices with HTTP 401/403, got ${revokedDevices.statusCode}.`);
+    }
+
+    const revokedSync = await request("/api/sync/state", {
+      headers: { Authorization: `Bearer ${sessionTwo}` },
+    });
+    if (!isAccessDenied(revokedSync.statusCode)) {
+      throw new Error(`Revoked device should be denied sync with HTTP 401/403, got ${revokedSync.statusCode}.`);
     }
 
     console.log("device-membership: linked devices stayed separate from thread membership, revocation required a device signature, and revoked devices lost sync access");

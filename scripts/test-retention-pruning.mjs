@@ -135,6 +135,7 @@ function startRelay({ port, storePath, secretDir }) {
       ...process.env,
       PORT: String(port),
       HOST: "127.0.0.1",
+      NOTRUS_ENABLE_DEVELOPMENT_COMPAT_ROUTES: "true",
       NOTRUS_STORE_PATH: storePath,
       NOTRUS_SECRET_DIR: secretDir,
       MESSAGE_RETENTION_MS: "1000",
@@ -182,7 +183,7 @@ async function main() {
   try {
     await waitForHealth(origin);
 
-    await requestJson(origin, "/api/register", {
+    const aliceRegistration = await requestJson(origin, "/api/register", {
       method: "POST",
       headers: { "X-Notrus-Device-Id": alice.device.id },
       body: alice,
@@ -238,6 +239,7 @@ async function main() {
 
     await requestJson(origin, "/api/reports", {
       method: "POST",
+      headers: { Authorization: `Bearer ${aliceRegistration.session.token}` },
       body: {
         createdAt: isoNow(),
         messageIds: [messageId],

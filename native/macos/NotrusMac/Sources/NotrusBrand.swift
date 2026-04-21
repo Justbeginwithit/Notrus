@@ -26,7 +26,7 @@ struct NotrusLogoMark: View {
 }
 
 struct NotrusBrandLockup: View {
-    var title: String = "Notrus Mac"
+    var title: String = "Notrus"
     var subtitle: String? = "Native secure messaging"
     var compact: Bool = false
 
@@ -102,28 +102,28 @@ enum NotrusBrandAssets {
             height: shieldHeight
         )
         let shieldPath = NSBezierPath()
-        let top = NSPoint(x: shieldRect.midX, y: shieldRect.minY)
-        let rightShoulder = NSPoint(x: shieldRect.maxX, y: shieldRect.minY + shieldRect.height * 0.19)
-        let rightGate = NSPoint(x: shieldRect.maxX, y: shieldRect.minY + shieldRect.height * 0.46)
-        let tip = NSPoint(x: shieldRect.midX, y: shieldRect.maxY)
-        let leftGate = NSPoint(x: shieldRect.minX, y: shieldRect.minY + shieldRect.height * 0.46)
-        let leftShoulder = NSPoint(x: shieldRect.minX, y: shieldRect.minY + shieldRect.height * 0.19)
+        let top = NSPoint(x: shieldRect.midX, y: shieldRect.maxY)
+        let rightShoulder = NSPoint(x: shieldRect.maxX, y: shieldRect.minY + shieldRect.height * 0.81)
+        let rightGate = NSPoint(x: shieldRect.maxX, y: shieldRect.minY + shieldRect.height * 0.54)
+        let tip = NSPoint(x: shieldRect.midX, y: shieldRect.minY)
+        let leftGate = NSPoint(x: shieldRect.minX, y: shieldRect.minY + shieldRect.height * 0.54)
+        let leftShoulder = NSPoint(x: shieldRect.minX, y: shieldRect.minY + shieldRect.height * 0.81)
         shieldPath.move(to: top)
-        shieldPath.line(to: NSPoint(x: shieldRect.maxX * 0.94 + shieldRect.minX * 0.06, y: shieldRect.minY + shieldRect.height * 0.08))
+        shieldPath.line(to: NSPoint(x: shieldRect.maxX * 0.94 + shieldRect.minX * 0.06, y: shieldRect.minY + shieldRect.height * 0.92))
         shieldPath.line(to: rightShoulder)
         shieldPath.line(to: rightGate)
         shieldPath.curve(
             to: tip,
-            controlPoint1: NSPoint(x: shieldRect.maxX, y: shieldRect.minY + shieldRect.height * 0.72),
-            controlPoint2: NSPoint(x: shieldRect.midX + shieldRect.width * 0.18, y: shieldRect.maxY)
+            controlPoint1: NSPoint(x: shieldRect.maxX, y: shieldRect.minY + shieldRect.height * 0.28),
+            controlPoint2: NSPoint(x: shieldRect.midX + shieldRect.width * 0.18, y: shieldRect.minY)
         )
         shieldPath.curve(
             to: leftGate,
-            controlPoint1: NSPoint(x: shieldRect.midX - shieldRect.width * 0.18, y: shieldRect.maxY),
-            controlPoint2: NSPoint(x: shieldRect.minX, y: shieldRect.minY + shieldRect.height * 0.72)
+            controlPoint1: NSPoint(x: shieldRect.midX - shieldRect.width * 0.18, y: shieldRect.minY),
+            controlPoint2: NSPoint(x: shieldRect.minX, y: shieldRect.minY + shieldRect.height * 0.28)
         )
         shieldPath.line(to: leftShoulder)
-        shieldPath.line(to: NSPoint(x: shieldRect.minX + shieldRect.width * 0.06, y: shieldRect.minY + shieldRect.height * 0.08))
+        shieldPath.line(to: NSPoint(x: shieldRect.minX + shieldRect.width * 0.06, y: shieldRect.minY + shieldRect.height * 0.92))
         shieldPath.close()
         NSColor(srgbRed: 8.0 / 255.0, green: 21.0 / 255.0, blue: 29.0 / 255.0, alpha: 1).setFill()
         shieldPath.fill()

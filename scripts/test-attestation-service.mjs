@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { verifyAndroidAttestation } from "../attestation.js";
+import { verifyAndroidAttestation, verifyAndroidPlayIntegrity, verifyAppleDeviceCheck } from "../attestation.js";
 
 const execFileAsync = promisify(execFile);
 const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "notrus-attestation-test-"));
@@ -113,6 +113,18 @@ try {
   });
   assert.equal(badResult.verified, false);
   assert.equal(badResult.status, "invalid");
+
+  const appleResult = await verifyAppleDeviceCheck({
+    bundleIdentifier: "com.notrus.mac",
+    deviceCheckToken: "mock-devicecheck-token-valid-1",
+  });
+  assert.equal(appleResult.verified, true);
+
+  const playResult = await verifyAndroidPlayIntegrity({
+    bundleIdentifier: "com.notrus.android",
+    playIntegrityToken: "mock-play-integrity-token-valid-1",
+  });
+  assert.equal(playResult.verified, true);
 
   console.log("Attestation service proofs passed.");
 } finally {

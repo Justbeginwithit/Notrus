@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 
-const relayOrigin = process.env.NOTRUS_PRIVACY_RELAY_ORIGIN ?? "http://127.0.0.1:3060";
+const relayOrigin = process.env.NOTRUS_PRIVACY_RELAY_ORIGIN ?? "http://127.0.0.1:3000";
 
 function isoNow() {
   return new Date().toISOString();

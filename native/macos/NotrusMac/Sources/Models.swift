@@ -1277,7 +1277,10 @@ struct ClientIntegrityReport: Codable, Hashable {
     let bundleIdentifier: String
     let codeSignatureStatus: String
     let deviceCheckStatus: String
+    let deviceCheckToken: String?
     let deviceCheckTokenPresented: Bool
+    let playIntegrityToken: String?
+    let playIntegrityTokenPresented: Bool
     let generatedAt: String
     let note: String?
     let riskLevel: String

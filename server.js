@@ -44,6 +44,9 @@ const HTTPS_KEY_FILE = process.env.HTTPS_KEY_FILE ?? "";
 const HTTPS_CERT_FILE = process.env.HTTPS_CERT_FILE ?? "";
 const ATTESTATION_ORIGIN = env("NOTRUS_ATTESTATION_ORIGIN")?.trim() ?? "";
 const REQUIRE_ANDROID_ATTESTATION = env("NOTRUS_REQUIRE_ANDROID_ATTESTATION") === "true";
+const REQUIRE_ANDROID_PLAY_INTEGRITY = env("NOTRUS_REQUIRE_ANDROID_PLAY_INTEGRITY") === "true";
+const REQUIRE_APPLE_DEVICECHECK = env("NOTRUS_REQUIRE_APPLE_DEVICECHECK") === "true";
+const ENABLE_LEGACY_API_ROUTES = env("NOTRUS_ENABLE_LEGACY_API") === "true" || process.env.NODE_ENV !== "production";
 const TRUST_PROXY = process.env.TRUST_PROXY === "true";
 const CLIENT_ORIGINS = (process.env.CLIENT_ORIGIN ?? "*")
   .split(",")
@@ -128,6 +131,45 @@ const CONTACT_HANDLE_INDEX = new Map();
 const MAILBOX_ROUTING = new Map();
 const MAILBOX_CAPABILITIES = new Map();
 const MAILBOX_CAPABILITY_INDEX = new Map();
+const SNAKE_ASSETS = new Map([
+  [
+    "/snake",
+    {
+      contentSecurityPolicy: "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self'",
+      contentType: "text/html; charset=utf-8",
+      filePath: path.join(__dirname, "snake", "index.html"),
+    },
+  ],
+  [
+    "/snake/",
+    {
+      contentSecurityPolicy: "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self'",
+      contentType: "text/html; charset=utf-8",
+      filePath: path.join(__dirname, "snake", "index.html"),
+    },
+  ],
+  [
+    "/snake/app.js",
+    {
+      contentType: "text/javascript; charset=utf-8",
+      filePath: path.join(__dirname, "snake", "app.js"),
+    },
+  ],
+  [
+    "/snake/game.js",
+    {
+      contentType: "text/javascript; charset=utf-8",
+      filePath: path.join(__dirname, "snake", "game.js"),
+    },
+  ],
+  [
+    "/snake/styles.css",
+    {
+      contentType: "text/css; charset=utf-8",
+      filePath: path.join(__dirname, "snake", "styles.css"),
+    },
+  ],
+]);
 let persistQueue = Promise.resolve();
 let store = await loadStore();
 const TRANSPARENCY_SIGNER = await loadOrCreateTransparencySigner();
@@ -498,7 +540,42 @@ function requireSessionCapability(request, response) {
     return null;
   }
 
+  const user = store.users[session.userId];
+  if (!user || user.deactivatedAt) {
+    SESSION_CAPABILITIES.delete(token);
+    sendError(request, response, 401, "The current relay account is no longer active.");
+    return null;
+  }
+
+  if (session.deviceId) {
+    const device = findUserDevice(user, session.deviceId);
+    if (!device) {
+      SESSION_CAPABILITIES.delete(token);
+      sendError(request, response, 403, "That device is not linked to this account.");
+      return null;
+    }
+    if (device.revokedAt) {
+      SESSION_CAPABILITIES.delete(token);
+      sendError(request, response, 403, "That linked device has been revoked.");
+      return null;
+    }
+  }
+
   return session;
+}
+
+function ensureLegacyRouteEnabled(request, response, routeName) {
+  if (ENABLE_LEGACY_API_ROUTES) {
+    return true;
+  }
+
+  sendError(
+    request,
+    response,
+    410,
+    `${routeName} is disabled on production relays. Use the opaque-routing API surface instead.`
+  );
+  return false;
 }
 
 function issueContactHandle({ viewerUserId, targetUserId }) {
@@ -865,6 +942,36 @@ function sendText(response, statusCode, message) {
   response.end(message);
 }
 
+async function sendStaticAsset(request, response, pathname) {
+  const asset = SNAKE_ASSETS.get(pathname);
+  if (!asset) {
+    return false;
+  }
+
+  try {
+    const contents = await fs.readFile(asset.filePath);
+    setSharedHeaders(response);
+    if (asset.contentSecurityPolicy) {
+      response.setHeader("Content-Security-Policy", asset.contentSecurityPolicy);
+    }
+    response.writeHead(200, {
+      "Cache-Control": "no-store",
+      "Content-Length": Buffer.byteLength(contents),
+      "Content-Type": asset.contentType,
+    });
+    if (request.method === "HEAD") {
+      response.end();
+      return true;
+    }
+    response.end(contents);
+    return true;
+  } catch (error) {
+    console.error("Failed to serve static asset:", asset.filePath, error);
+    sendText(response, 500, "Unable to load the requested asset.");
+    return true;
+  }
+}
+
 function isNonEmptyString(value, maxLength = 500) {
   return typeof value === "string" && value.trim().length > 0 && value.trim().length <= maxLength;
 }
@@ -1224,6 +1331,10 @@ function sanitizeIntegrityObservation(observation) {
   const riskLevel = isNonEmptyString(observation.riskLevel, 40) ? observation.riskLevel.trim() : null;
   const generatedAt = isNonEmptyString(observation.generatedAt, 60) ? observation.generatedAt.trim() : null;
   const note = isNonEmptyString(observation.note, 300) ? observation.note.trim() : null;
+  const deviceCheckTokenPresented =
+    observation.deviceCheckTokenPresented === true || isNonEmptyString(observation.deviceCheckToken, 16_000);
+  const playIntegrityTokenPresented =
+    observation.playIntegrityTokenPresented === true || isNonEmptyString(observation.playIntegrityToken, 16_000);
 
   if (!bundleIdentifier || !codeSignatureStatus || !deviceCheckStatus || !riskLevel || !generatedAt) {
     return null;
@@ -1233,10 +1344,33 @@ function sanitizeIntegrityObservation(observation) {
     bundleIdentifier,
     codeSignatureStatus,
     deviceCheckStatus,
-    deviceCheckTokenPresented: observation.deviceCheckTokenPresented === true,
+    deviceCheckTokenPresented,
     generatedAt,
     note,
+    playIntegrityTokenPresented,
     riskLevel,
+  };
+}
+
+function sanitizeIntegrityProofTokens(observation) {
+  if (!observation || typeof observation !== "object") {
+    return null;
+  }
+
+  const deviceCheckToken = isNonEmptyString(observation.deviceCheckToken, 16_000)
+    ? observation.deviceCheckToken.trim()
+    : null;
+  const playIntegrityToken = isNonEmptyString(observation.playIntegrityToken, 16_000)
+    ? observation.playIntegrityToken.trim()
+    : null;
+
+  if (!deviceCheckToken && !playIntegrityToken) {
+    return null;
+  }
+
+  return {
+    deviceCheckToken,
+    playIntegrityToken,
   };
 }
 
@@ -1311,18 +1445,67 @@ function sanitizeDeviceAttestationPayload(attestation) {
 }
 
 async function verifyAndroidAttestationWithService(attestation) {
-  if (!ATTESTATION_ORIGIN || !attestation) {
+  if (!attestation) {
     return null;
   }
 
+  return verifyAttestationWithService("/api/attestation/android/verify", attestation);
+}
+
+async function verifyAppleDeviceCheckWithService({
+  bundleIdentifier,
+  deviceCheckToken,
+  deviceId = null,
+  generatedAt = null,
+}) {
+  if (!deviceCheckToken) {
+    return null;
+  }
+
+  return verifyAttestationWithService("/api/attestation/apple/devicecheck/verify", {
+    bundleIdentifier,
+    deviceCheckToken,
+    deviceId,
+    generatedAt,
+  });
+}
+
+async function verifyAndroidPlayIntegrityWithService({
+  bundleIdentifier,
+  deviceId = null,
+  generatedAt = null,
+  playIntegrityToken,
+}) {
+  if (!playIntegrityToken) {
+    return null;
+  }
+
+  return verifyAttestationWithService("/api/attestation/android/play-integrity/verify", {
+    bundleIdentifier,
+    deviceId,
+    generatedAt,
+    playIntegrityToken,
+  });
+}
+
+async function verifyAttestationWithService(pathname, payload) {
+  if (!ATTESTATION_ORIGIN) {
+    return {
+      note: "Attestation verification service was not configured on this relay.",
+      status: "unverified",
+      verified: false,
+      verifiedAt: new Date().toISOString(),
+    };
+  }
+
   try {
-    const response = await fetch(new URL("/api/attestation/android/verify", ATTESTATION_ORIGIN), {
+    const response = await fetch(new URL(pathname, ATTESTATION_ORIGIN), {
       method: "POST",
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(attestation),
+      body: JSON.stringify(payload),
     });
     if (!response.ok) {
       return {
@@ -1333,21 +1516,55 @@ async function verifyAndroidAttestationWithService(attestation) {
       };
     }
 
-    const payload = await response.json();
+    const decodedPayload = await response.json();
     return {
-      note: isNonEmptyString(payload.note, 300) ? payload.note.trim() : null,
-      status: isNonEmptyString(payload.status, 60) ? payload.status.trim() : "unverified",
-      verified: payload.verified === true,
-      verifiedAt: isNonEmptyString(payload.verifiedAt, 60) ? payload.verifiedAt.trim() : new Date().toISOString(),
+      note: isNonEmptyString(decodedPayload.note, 300) ? decodedPayload.note.trim() : null,
+      status: isNonEmptyString(decodedPayload.status, 60) ? decodedPayload.status.trim() : "unverified",
+      verified: decodedPayload.verified === true,
+      verifiedAt: isNonEmptyString(decodedPayload.verifiedAt, 60)
+        ? decodedPayload.verifiedAt.trim()
+        : new Date().toISOString(),
     };
-  } catch {
+  } catch (error) {
+    const detail = isNonEmptyString(error?.message, 200) ? error.message.trim() : null;
     return {
-      note: "Attestation verification service was unreachable.",
+      note: detail
+        ? `Attestation verification service was unreachable. ${detail}`
+        : "Attestation verification service was unreachable.",
       status: "unverified",
       verified: false,
       verifiedAt: new Date().toISOString(),
     };
   }
+}
+
+function mergeVerificationSummaries(summaries) {
+  const filtered = summaries.filter(Boolean);
+  if (filtered.length === 0) {
+    return null;
+  }
+
+  const verified = filtered.every((summary) => summary.verified === true);
+  const status = filtered
+    .map((summary) => (isNonEmptyString(summary.status, 60) ? summary.status.trim() : null))
+    .filter(Boolean)
+    .join("+")
+    .slice(0, 60) || "unverified";
+  const note = filtered
+    .map((summary) => (isNonEmptyString(summary.note, 300) ? summary.note.trim() : null))
+    .filter(Boolean)
+    .join(" | ")
+    .slice(0, 300) || null;
+  const verifiedAt = filtered
+    .map((summary) => (isNonEmptyString(summary.verifiedAt, 60) ? summary.verifiedAt.trim() : null))
+    .find(Boolean) ?? new Date().toISOString();
+
+  return {
+    note,
+    status,
+    verified,
+    verifiedAt,
+  };
 }
 
 function sanitizeDeviceEventRecord(event) {
@@ -2094,6 +2311,31 @@ function invalidateUserEphemeralState(userId) {
   }
 }
 
+function invalidateDeviceSessionCapabilities(userId, deviceId) {
+  if (!isNonEmptyString(userId, 120) || !isNonEmptyString(deviceId, 120)) {
+    return;
+  }
+
+  for (const [token, session] of SESSION_CAPABILITIES.entries()) {
+    if (session?.userId === userId && session?.deviceId === deviceId) {
+      SESSION_CAPABILITIES.delete(token);
+    }
+  }
+}
+
+function invalidateUserMailboxCapabilities(userId) {
+  if (!isNonEmptyString(userId, 120)) {
+    return;
+  }
+
+  for (const [token, record] of MAILBOX_CAPABILITIES.entries()) {
+    if (record?.userId === userId) {
+      MAILBOX_CAPABILITIES.delete(token);
+      MAILBOX_CAPABILITY_INDEX.delete(`${record?.threadId ?? ""}:${record?.userId ?? ""}`);
+    }
+  }
+}
+
 function deactivateUserAccount(user, now) {
   const priorUsername = user.username;
   const tombstoneUsername = `deleted-${user.id.slice(0, 8)}`;
@@ -2271,7 +2513,9 @@ async function handleRegister(request, response) {
   const ip = privacyPreservingRateLimitKey(getRequestIp(request));
   const instanceKey = getRequestInstanceKey(request);
   const requestDeviceId = getRequestDeviceId(request);
-  const integrityObservation = sanitizeIntegrityObservation(parseIntegrityReportHeader(request));
+  const rawIntegrityObservation = parseIntegrityReportHeader(request);
+  const integrityObservation = sanitizeIntegrityObservation(rawIntegrityObservation);
+  const integrityProofTokens = sanitizeIntegrityProofTokens(rawIntegrityObservation);
 
   if (!requireProofOfWork(request, response, "register", integrityObservation)) {
     return;
@@ -2371,22 +2615,67 @@ async function handleRegister(request, response) {
     return;
   }
 
-  let attestationSummary = null;
+  const verificationSummaries = [];
   if (deviceEnrollment?.platform === "android") {
-    if (ATTESTATION_ORIGIN && deviceAttestation) {
-      attestationSummary = await verifyAndroidAttestationWithService(deviceAttestation);
+    const androidKeyAttestationSummary = await verifyAndroidAttestationWithService(deviceAttestation);
+    if (androidKeyAttestationSummary) {
+      verificationSummaries.push(androidKeyAttestationSummary);
     }
 
-    if (REQUIRE_ANDROID_ATTESTATION && attestationSummary?.verified !== true) {
+    if (REQUIRE_ANDROID_ATTESTATION && androidKeyAttestationSummary?.verified !== true) {
       sendError(
         request,
         response,
         403,
-        attestationSummary?.note ?? "Android registrations on this relay must pass separate attestation verification."
+        androidKeyAttestationSummary?.note ?? "Android registrations on this relay must pass separate attestation verification."
+      );
+      return;
+    }
+
+    const playIntegritySummary = await verifyAndroidPlayIntegrityWithService({
+      bundleIdentifier: integrityObservation?.bundleIdentifier ?? null,
+      deviceId: deviceEnrollment.id,
+      generatedAt: integrityObservation?.generatedAt ?? null,
+      playIntegrityToken: integrityProofTokens?.playIntegrityToken ?? null,
+    });
+    if (playIntegritySummary) {
+      verificationSummaries.push(playIntegritySummary);
+    }
+
+    if (REQUIRE_ANDROID_PLAY_INTEGRITY && playIntegritySummary?.verified !== true) {
+      sendError(
+        request,
+        response,
+        403,
+        playIntegritySummary?.note ?? "Android registrations on this relay must pass Play Integrity verification."
       );
       return;
     }
   }
+
+  if (deviceEnrollment?.platform === "macos") {
+    const deviceCheckSummary = await verifyAppleDeviceCheckWithService({
+      bundleIdentifier: integrityObservation?.bundleIdentifier ?? null,
+      deviceCheckToken: integrityProofTokens?.deviceCheckToken ?? null,
+      deviceId: deviceEnrollment.id,
+      generatedAt: integrityObservation?.generatedAt ?? null,
+    });
+    if (deviceCheckSummary) {
+      verificationSummaries.push(deviceCheckSummary);
+    }
+
+    if (REQUIRE_APPLE_DEVICECHECK && deviceCheckSummary?.verified !== true) {
+      sendError(
+        request,
+        response,
+        403,
+        deviceCheckSummary?.note ?? "macOS registrations on this relay must pass DeviceCheck verification."
+      );
+      return;
+    }
+  }
+
+  const attestationSummary = mergeVerificationSummaries(verificationSummaries);
 
   const now = new Date().toISOString();
   let userRecord = null;
@@ -2690,6 +2979,11 @@ async function handleDirectorySearch(request, response, url) {
 }
 
 async function handleReportAbuse(request, response) {
+  const session = requireSessionCapability(request, response);
+  if (!session) {
+    return;
+  }
+
   const ip = privacyPreservingRateLimitKey(getRequestIp(request));
   const integrityObservation = sanitizeIntegrityObservation(parseIntegrityReportHeader(request));
 
@@ -2698,14 +2992,19 @@ async function handleReportAbuse(request, response) {
   }
 
   const body = await readJsonBody(request);
-  const reporterId = isNonEmptyString(body.reporterId, 120) ? body.reporterId.trim() : "";
+  const reporterId = isNonEmptyString(body.reporterId, 120) ? body.reporterId.trim() : session.userId;
   const targetUserId = isNonEmptyString(body.targetUserId, 120) ? body.targetUserId.trim() : "";
   const createdAt = isNonEmptyString(body.createdAt, 60) ? body.createdAt.trim() : "";
   const reason = isNonEmptyString(body.reason, 80) ? body.reason.trim() : "";
   const threadId = isNonEmptyString(body.threadId, 160) ? body.threadId.trim() : null;
   const messageIds = dedupeStringArray(body.messageIds, 120).slice(0, 20);
 
-  if (!reporterId || !store.users[reporterId]) {
+  if (reporterId !== session.userId) {
+    sendError(request, response, 403, "Reports must be submitted by the authenticated relay user.");
+    return;
+  }
+
+  if (!store.users[reporterId]) {
     sendError(request, response, 404, "The reporting user is unknown.");
     return;
   }
@@ -2825,6 +3124,8 @@ async function handleRevokeDevice(request, response) {
   const revokedAt = new Date().toISOString();
   targetDevice.revokedAt = revokedAt;
   targetDevice.updatedAt = revokedAt;
+  invalidateDeviceSessionCapabilities(userId, targetDeviceId);
+  invalidateUserMailboxCapabilities(userId);
   recordDeviceEvent(user, {
     actorDeviceId: signerDeviceId,
     createdAt: revokedAt,
@@ -3709,6 +4010,10 @@ async function requestListener(request, response) {
     const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
     const { pathname } = url;
 
+    if ((request.method === "GET" || request.method === "HEAD") && (await sendStaticAsset(request, response, pathname))) {
+      return;
+    }
+
     if (request.method === "OPTIONS" && (pathname === "/events" || pathname.startsWith("/api/"))) {
       setApiHeaders(request, response);
       response.writeHead(204, {
@@ -3749,6 +4054,9 @@ async function requestListener(request, response) {
         },
         integritySignals: integrityRiskSummary(),
         attestation: {
+          androidKeyAttestationRequired: REQUIRE_ANDROID_ATTESTATION,
+          androidPlayIntegrityRequired: REQUIRE_ANDROID_PLAY_INTEGRITY,
+          appleDeviceCheckRequired: REQUIRE_APPLE_DEVICECHECK,
           configured: Boolean(ATTESTATION_ORIGIN),
           required: REQUIRE_ANDROID_ATTESTATION,
         },
@@ -3757,6 +4065,7 @@ async function requestListener(request, response) {
           powRequiredForRemoteUntrustedClients: true,
         },
         privacy: {
+          legacyRoutesEnabled: ENABLE_LEGACY_API_ROUTES,
           mailboxRouting: "opaque-routing-v1",
           routineRequestShape: "capability-token + mailbox handle + encrypted blob",
           sessionBootstrap: "registration/bootstrap only",
@@ -3838,11 +4147,17 @@ async function requestListener(request, response) {
     }
 
     if (request.method === "GET" && pathname === "/api/sync") {
+      if (!ensureLegacyRouteEnabled(request, response, "/api/sync")) {
+        return;
+      }
       await handleSync(request, response, url);
       return;
     }
 
     if (request.method === "POST" && pathname === "/api/threads") {
+      if (!ensureLegacyRouteEnabled(request, response, "/api/threads")) {
+        return;
+      }
       await handleCreateThread(request, response);
       return;
     }

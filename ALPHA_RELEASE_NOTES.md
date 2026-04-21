@@ -1,6 +1,10 @@
-# Notrus 0.2.0 Alpha 2
+# Notrus 0.2.0 Alpha 2 Notes
 
-This is the second clean Notrus alpha release line and the first Android visual-upgrade release.
+The active pre-release tag for this line is:
+
+- `v0.2.0-alpha2-refresh2`
+
+This tag consolidates the Alpha 2 refresh cycle into one current release surface.
 
 ## Included
 
@@ -9,6 +13,13 @@ This is the second clean Notrus alpha release line and the first Android visual-
 - relay
 - witness
 - standards protocol core
+
+## Refresh 2 Additions
+
+- standalone packaged app naming normalized to `Notrus`
+- Android adaptive icon foreground geometry re-centered for cleaner rendering across launcher masks
+- macOS app icon orientation corrected
+- macOS UI brand mark orientation corrected
 
 ## Visual Upgrade
 

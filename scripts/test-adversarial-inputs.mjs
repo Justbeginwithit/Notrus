@@ -1,112 +1,86 @@
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import http from "node:http";
-import https from "node:https";
-
-const relayOrigin = process.env.NOTRUS_ADVERSARIAL_RELAY_ORIGIN ?? "http://127.0.0.1:3000";
-const relayUrl = new URL(relayOrigin);
+import { withManagedRelay } from "./managed-relay.mjs";
 
 function isoNow() {
   return new Date().toISOString();
 }
 
-function hex(buffer) {
-  return Buffer.from(buffer).toString("hex");
+function randomBase64(bytes = 32) {
+  return randomBytes(bytes).toString("base64");
 }
 
-function generateJwk() {
+function generatePublicJwk() {
   const { publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-  const jwk = publicKey.export({ format: "jwk" });
-  return {
-    crv: jwk.crv,
-    kty: jwk.kty,
-    x: jwk.x,
-    y: jwk.y,
-  };
+  return publicKey.export({ format: "jwk" });
 }
 
-function fakeSignalBundle() {
-  const bytes = () => randomBytes(32).toString("base64");
+function signalBundle() {
   return {
     deviceId: 1,
-    identityKey: bytes(),
+    identityKey: randomBase64(),
     kyberPreKeyId: 1,
-    kyberPreKeyPublic: bytes(),
-    kyberPreKeySignature: bytes(),
+    kyberPreKeyPublic: randomBase64(),
+    kyberPreKeySignature: randomBase64(),
     preKeyId: 1,
-    preKeyPublic: bytes(),
-    registrationId: 42,
+    preKeyPublic: randomBase64(),
+    registrationId: 1001,
     signedPreKeyId: 1,
-    signedPreKeyPublic: bytes(),
-    signedPreKeySignature: bytes(),
+    signedPreKeyPublic: randomBase64(),
+    signedPreKeySignature: randomBase64(),
   };
 }
 
-function identityPayload({ userId, username, displayName }) {
+function identity(username) {
   return {
-    displayName,
-    encryptionPublicJwk: generateJwk(),
-    fingerprint: hex(randomBytes(16)),
-    mlsKeyPackage: null,
-    prekeyCreatedAt: isoNow(),
-    prekeyFingerprint: hex(randomBytes(16)),
-    prekeyPublicJwk: generateJwk(),
-    prekeySignature: randomBytes(64).toString("base64"),
-    recoveryFingerprint: hex(randomBytes(16)),
-    recoveryPublicJwk: generateJwk(),
-    signalBundle: fakeSignalBundle(),
-    signingPublicJwk: generateJwk(),
-    userId,
+    userId: `user-${randomBytes(8).toString("hex")}`,
     username,
+    displayName: username,
+    fingerprint: randomBytes(16).toString("hex"),
+    recoveryFingerprint: randomBytes(16).toString("hex"),
+    recoveryPublicJwk: generatePublicJwk(),
+    signingPublicJwk: generatePublicJwk(),
+    encryptionPublicJwk: generatePublicJwk(),
+    prekeyCreatedAt: isoNow(),
+    prekeyFingerprint: randomBytes(16).toString("hex"),
+    prekeyPublicJwk: generatePublicJwk(),
+    prekeySignature: randomBase64(),
+    signalBundle: signalBundle(),
+    device: {
+      createdAt: isoNow(),
+      id: `device-${randomBytes(6).toString("hex")}`,
+      label: `${username}-device`,
+      platform: "test",
+      publicJwk: generatePublicJwk(),
+      riskLevel: "low",
+      storageMode: "device-only",
+    },
   };
 }
 
-function request(pathname, { method = "GET", headers = {}, body = null } = {}) {
-  const url = new URL(pathname, relayUrl);
-  const client = url.protocol === "https:" ? https : http;
-  const payload =
-    typeof body === "string" || Buffer.isBuffer(body)
-      ? Buffer.from(body)
-      : body == null
-        ? null
-        : Buffer.from(JSON.stringify(body), "utf8");
-
-  return new Promise((resolve, reject) => {
-    const req = client.request(
-      url,
-      {
-        method,
-        headers: payload
-          ? {
-              "Content-Length": String(payload.length),
-              "Content-Type": headers["Content-Type"] ?? "application/json",
-              ...headers,
-            }
-          : headers,
-      },
-      (response) => {
-        const chunks = [];
-        response.on("data", (chunk) => chunks.push(chunk));
-        response.on("end", () => {
-          const raw = Buffer.concat(chunks).toString("utf8");
-          let decoded = raw;
-          try {
-            decoded = raw ? JSON.parse(raw) : {};
-          } catch {
-            decoded = raw;
-          }
-          resolve({
-            body: decoded,
-            statusCode: response.statusCode ?? 0,
-          });
-        });
-      }
-    );
-    req.on("error", reject);
-    if (payload) {
-      req.write(payload);
-    }
-    req.end();
+async function request(origin, pathname, { method = "GET", token = null, headers = {}, body = null } = {}) {
+  const hasBody = body !== null && body !== undefined;
+  const payload = typeof body === "string" || Buffer.isBuffer(body) ? body : hasBody ? JSON.stringify(body) : undefined;
+  const response = await fetch(new URL(pathname, origin), {
+    method,
+    headers: {
+      Accept: "application/json",
+      ...(hasBody ? { "Content-Type": "application/json" } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...headers,
+    },
+    body: payload,
   });
+  const raw = await response.text();
+  let decoded = raw;
+  try {
+    decoded = raw ? JSON.parse(raw) : {};
+  } catch {
+    // Keep raw body for malformed non-JSON responses.
+  }
+  return {
+    body: decoded,
+    statusCode: response.status,
+  };
 }
 
 function expectStatus(label, actual, expectedStatuses) {
@@ -115,26 +89,25 @@ function expectStatus(label, actual, expectedStatuses) {
   }
 }
 
-async function main() {
+async function run({ origin }) {
   const suffix = randomBytes(4).toString("hex");
-  const alice = identityPayload({
-    userId: `adversarial-alice-${suffix}`,
-    username: `advalice${suffix}`,
-    displayName: "Adversarial Alice",
-  });
-  const bob = identityPayload({
-    userId: `adversarial-bob-${suffix}`,
-    username: `advbob${suffix}`,
-    displayName: "Adversarial Bob",
-  });
-  const threadId = `adversarial-thread-${suffix}`;
+  const alice = identity(`advalice${suffix}`);
+  const bob = identity(`advbob${suffix}`);
 
-  expectStatus("register alice", await request("/api/register", { method: "POST", body: alice }), [200]);
-  expectStatus("register bob", await request("/api/register", { method: "POST", body: bob }), [200]);
+  const aliceRegistration = await request(origin, "/api/bootstrap/register", {
+    method: "POST",
+    body: alice,
+  });
+  expectStatus("register alice", aliceRegistration, [200]);
+  const bobRegistration = await request(origin, "/api/bootstrap/register", {
+    method: "POST",
+    body: bob,
+  });
+  expectStatus("register bob", bobRegistration, [200]);
 
   expectStatus(
     "malformed json",
-    await request("/api/register", {
+    await request(origin, "/api/bootstrap/register", {
       method: "POST",
       body: "{\"displayName\":",
       headers: { "Content-Type": "application/json" },
@@ -144,23 +117,31 @@ async function main() {
 
   expectStatus(
     "wrong-type register",
-    await request("/api/register", {
+    await request(origin, "/api/bootstrap/register", {
       method: "POST",
       body: { userId: 42, username: ["bad"], displayName: true },
     }),
     [400, 429]
   );
 
+  const search = await request(origin, `/api/directory/search?q=${encodeURIComponent(bob.username)}`, {
+    token: aliceRegistration.body.session.token,
+  });
+  expectStatus("directory search", search, [200]);
+  const bobResult = search.body.results.find((candidate) => candidate.username === bob.username);
+  if (!bobResult?.contactHandle) {
+    throw new Error("Directory search did not return Bob's contact handle.");
+  }
+
   expectStatus(
     "invalid thread create",
-    await request("/api/threads", {
+    await request(origin, "/api/routing/threads", {
       method: "POST",
+      token: aliceRegistration.body.session.token,
       body: {
         createdAt: isoNow(),
-        createdBy: alice.userId,
-        envelopes: [],
-        id: threadId,
-        participantIds: [alice.userId],
+        id: `adversarial-invalid-thread-${suffix}`,
+        participantHandles: [],
         protocol: "signal-pqxdh-double-ratchet-v1",
         title: "",
       },
@@ -168,39 +149,40 @@ async function main() {
     [400]
   );
 
-  expectStatus(
-    "valid thread create",
-    await request("/api/threads", {
-      method: "POST",
-      body: {
-        createdAt: isoNow(),
-        createdBy: alice.userId,
-        envelopes: [],
-        groupState: null,
-        id: threadId,
-        initialRatchetPublicJwk: null,
-        mlsBootstrap: null,
-        participantIds: [alice.userId, bob.userId],
-        protocol: "signal-pqxdh-double-ratchet-v1",
-        title: "",
-      },
-    }),
-    [200, 201]
-  );
+  const validThread = await request(origin, "/api/routing/threads", {
+    method: "POST",
+    token: aliceRegistration.body.session.token,
+    body: {
+      createdAt: isoNow(),
+      id: `adversarial-thread-${suffix}`,
+      participantHandles: [bobResult.contactHandle],
+      protocol: "signal-pqxdh-double-ratchet-v1",
+      title: "",
+    },
+  });
+  expectStatus("valid thread create", validThread, [200, 201]);
+
+  const sync = await request(origin, "/api/sync/state", {
+    token: aliceRegistration.body.session.token,
+  });
+  expectStatus("sync", sync, [200]);
+  const thread = sync.body.threads.find((candidate) => candidate.id === validThread.body.threadId);
+  if (!thread?.mailboxHandle || !thread?.deliveryCapability) {
+    throw new Error("Sync did not return mailbox routing state.");
+  }
 
   expectStatus(
     "invalid attachment",
-    await request(`/api/threads/${threadId}/attachments`, {
+    await request(origin, `/api/mailboxes/${thread.mailboxHandle}/attachments`, {
       method: "POST",
+      token: thread.deliveryCapability,
       body: {
         byteLength: -1,
         ciphertext: "x",
         createdAt: isoNow(),
         id: `attachment-${suffix}`,
         iv: "bad",
-        senderId: alice.userId,
         sha256: "bad",
-        threadId,
       },
     }),
     [400]
@@ -208,8 +190,9 @@ async function main() {
 
   expectStatus(
     "invalid report target thread mismatch",
-    await request("/api/reports", {
+    await request(origin, "/api/reports", {
       method: "POST",
+      token: aliceRegistration.body.session.token,
       body: {
         createdAt: isoNow(),
         messageIds: ["message-1"],
@@ -224,48 +207,60 @@ async function main() {
 
   expectStatus(
     "valid minimal report",
-    await request("/api/reports", {
+    await request(origin, "/api/reports", {
       method: "POST",
+      token: aliceRegistration.body.session.token,
       body: {
         createdAt: isoNow(),
         messageIds: ["message-1", "message-2"],
         reason: "abuse-or-spam",
         reporterId: alice.userId,
         targetUserId: bob.userId,
-        threadId,
+        threadId: validThread.body.threadId,
       },
     }),
     [200]
   );
 
   for (let index = 0; index < 25; index += 1) {
-    const mutated = Buffer.from(randomBytes(24)).toString("base64");
-    const response = await request("/api/reports", {
+    const mutated = randomBase64(24);
+    const response = await request(origin, "/api/reports", {
       method: "POST",
+      token: aliceRegistration.body.session.token,
       body: {
         createdAt: index % 2 === 0 ? isoNow() : mutated,
         messageIds: Array.from({ length: 4 }, () => mutated),
         reason: index % 3 === 0 ? "abuse-or-spam" : mutated,
         reporterId: index % 4 === 0 ? alice.userId : mutated,
         targetUserId: bob.userId,
-        threadId: index % 5 === 0 ? threadId : mutated,
+        threadId: index % 5 === 0 ? validThread.body.threadId : mutated,
       },
     });
-    if (![200, 400, 404, 429].includes(response.statusCode)) {
+    if (![200, 400, 403, 404, 429].includes(response.statusCode)) {
       throw new Error(`mutated report ${index} returned unexpected HTTP ${response.statusCode}`);
     }
   }
 
-  const health = await request("/api/health");
+  const health = await request(origin, "/api/health");
   expectStatus("health", health, [200]);
   if (!health.body?.ok) {
-    throw new Error("relay health degraded after adversarial inputs");
+    throw new Error("Relay health degraded after adversarial inputs.");
+  }
+
+  if (!bobRegistration.body.session?.token) {
+    throw new Error("Bob registration did not issue a session token.");
   }
 
   console.log("adversarial-inputs: malformed and mutated relay requests stayed bounded without crashing the relay");
 }
 
-main().catch((error) => {
+withManagedRelay(
+  {
+    envOriginName: "NOTRUS_ADVERSARIAL_RELAY_ORIGIN",
+    port: Number(process.env.NOTRUS_ADVERSARIAL_INPUTS_PORT || 3067),
+  },
+  run
+).catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });

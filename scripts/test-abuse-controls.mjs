@@ -209,6 +209,7 @@ async function startRelay() {
     cwd: rootDir,
     env: {
       ...process.env,
+      NOTRUS_ENABLE_DEVELOPMENT_COMPAT_ROUTES: "true",
       PORT: String(relayPort),
       TRUST_PROXY: "true",
     },
@@ -342,7 +343,7 @@ async function main() {
       throw new Error(`Remote thread creation with proof-of-work failed with HTTP ${threadResponse.statusCode}.`);
     }
 
-    const reportChallenge = await request("/api/reports", {
+    const unauthenticatedReport = await requestWithPow("/api/reports", {
       method: "POST",
       headers: remoteHeaders,
       body: {
@@ -354,13 +355,33 @@ async function main() {
         threadId: `abuse-thread-${suffix}`,
       },
     });
+    if (unauthenticatedReport.statusCode !== 401) {
+      throw new Error(`Remote abuse report without a session should require authentication, got HTTP ${unauthenticatedReport.statusCode}.`);
+    }
+
+    const reportHeaders = {
+      ...remoteHeaders,
+      Authorization: `Bearer ${challengedRegister.body.session.token}`,
+    };
+    const reportChallenge = await request("/api/reports", {
+      method: "POST",
+      headers: reportHeaders,
+      body: {
+        createdAt: isoNow(),
+        messageIds: ["message-1"],
+        reason: "abuse-or-spam",
+        reporterId: alice.userId,
+        targetUserId: bob.userId,
+        threadId: `abuse-thread-${suffix}`,
+      },
+    });
     if (reportChallenge.statusCode !== 428) {
-      throw new Error(`Remote abuse report should require proof-of-work, got HTTP ${reportChallenge.statusCode}.`);
+      throw new Error(`Authenticated remote abuse report should require proof-of-work, got HTTP ${reportChallenge.statusCode}.`);
     }
 
     const reportResponse = await requestWithPow("/api/reports", {
       method: "POST",
-      headers: remoteHeaders,
+      headers: reportHeaders,
       body: {
         createdAt: isoNow(),
         messageIds: ["message-1"],

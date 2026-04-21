@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_PATH="${1:-$ROOT_DIR/dist/NotrusMac.app}"
-ZIP_PATH="$ROOT_DIR/dist/NotrusMac.zip"
+APP_PATH="${1:-$ROOT_DIR/dist/Notrus.app}"
+ZIP_PATH="$ROOT_DIR/dist/Notrus.zip"
 NOTARY_PROFILE="${NOTRUS_NOTARY_PROFILE:-}"
 
 if [[ -z "$NOTARY_PROFILE" ]]; then
@@ -22,5 +22,5 @@ xcrun notarytool submit "$ZIP_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
 xcrun stapler staple "$APP_PATH"
 
 if command -v shasum >/dev/null 2>&1; then
-  shasum -a 256 "$ZIP_PATH" > "$ROOT_DIR/dist/NotrusMac.zip.sha256"
+  shasum -a 256 "$ZIP_PATH" > "$ROOT_DIR/dist/Notrus.zip.sha256"
 fi

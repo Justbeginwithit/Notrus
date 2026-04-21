@@ -8,13 +8,15 @@ enum DeviceRiskSignals {
         let codeSignatureStatus = evaluateCodeSignature()
 
         var deviceCheckStatus = "unsupported"
+        var deviceCheckToken: String?
         var deviceCheckTokenPresented = false
         var note: String?
 
         if #available(macOS 10.15, *), DCDevice.current.isSupported {
             do {
-                _ = try await DCDevice.current.generateToken()
+                let token = try await DCDevice.current.generateToken()
                 deviceCheckStatus = "token-issued"
+                deviceCheckToken = token.base64EncodedString()
                 deviceCheckTokenPresented = true
             } catch {
                 deviceCheckStatus = "token-error"
@@ -36,7 +38,10 @@ enum DeviceRiskSignals {
             bundleIdentifier: bundleIdentifier,
             codeSignatureStatus: codeSignatureStatus,
             deviceCheckStatus: deviceCheckStatus,
+            deviceCheckToken: deviceCheckToken,
             deviceCheckTokenPresented: deviceCheckTokenPresented,
+            playIntegrityToken: nil,
+            playIntegrityTokenPresented: false,
             generatedAt: NotrusCrypto.isoNow(),
             note: note,
             riskLevel: riskLevel

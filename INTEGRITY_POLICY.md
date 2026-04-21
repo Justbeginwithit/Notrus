@@ -36,5 +36,6 @@ Notrus treats client integrity as a coarse risk signal for abuse resistance and 
 
 ## Honest boundary
 
-- Notrus does not currently perform full vendor-backed attestation verification for Apple or Google
-- integrity is still useful for rate limiting, device listing, and visible security posture, but not as a root of trust
+- Notrus now supports relay-side Android key-attestation verification, Apple DeviceCheck verification, and Android Play Integrity token verification through the separate attestation service.
+- Production use of vendor attestation still depends on operator-managed credentials and service configuration.
+- Integrity remains a risk signal and abuse-control input, not a root of trust for message plaintext.

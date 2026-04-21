@@ -3,11 +3,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PACKAGE_PATH="$ROOT_DIR/native/macos/NotrusMac"
-APP_PATH="$ROOT_DIR/dist/NotrusMac.app"
-ZIP_PATH="$ROOT_DIR/dist/NotrusMac.zip"
+APP_PATH="$ROOT_DIR/dist/Notrus.app"
+ZIP_PATH="$ROOT_DIR/dist/Notrus.zip"
 APP_VERSION="${NOTRUS_MAC_VERSION:-0.2.0}"
 RELEASE_LABEL="${NOTRUS_RELEASE_LABEL:-alpha2}"
-VERSIONED_ZIP_PATH="$ROOT_DIR/dist/NotrusMac-$APP_VERSION-$RELEASE_LABEL.zip"
+VERSIONED_ZIP_PATH="$ROOT_DIR/dist/Notrus-$APP_VERSION-$RELEASE_LABEL.zip"
 CONFIGURATION="${NOTRUS_MAC_CONFIGURATION:-debug}"
 PROTOCOL_HELPER_PATH="$ROOT_DIR/native/protocol-core/target/release/notrus-protocol-core"
 CODESIGN_IDENTITY="${NOTRUS_CODESIGN_IDENTITY:--}"
@@ -17,9 +17,18 @@ RELEASE_MODE="${NOTRUS_RELEASE_MODE:-local}"
 BUILD_NUMBER="${NOTRUS_BUILD_NUMBER:-$(date +%Y%m%d%H%M%S)}"
 ICONSET_DIR=""
 LOCAL_VERIFICATION_PLIST_VALUE="<false/>"
+FALLBACK_REPO_ICON_PATH="$ROOT_DIR/config/macos/AppIcon.icns"
+FALLBACK_SYSTEM_ICON_PATH="/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericApplicationIcon.icns"
+RELEASE_APPROVALS_PATH="${NOTRUS_RELEASE_APPROVALS_PATH:-$ROOT_DIR/config/release/approvals.json}"
 
 if [[ "$RELEASE_MODE" != "production" ]]; then
   LOCAL_VERIFICATION_PLIST_VALUE="<true/>"
+fi
+
+if [[ "$RELEASE_MODE" == "production" ]]; then
+  NOTRUS_RELEASE_MODE="$RELEASE_MODE" \
+  NOTRUS_RELEASE_APPROVALS_PATH="$RELEASE_APPROVALS_PATH" \
+  node "$ROOT_DIR/scripts/verify-release-governance.mjs"
 fi
 
 zsh "$ROOT_DIR/scripts/build-mac-app.sh"
@@ -35,8 +44,8 @@ fi
 rm -rf \
   "$APP_PATH" \
   "$ZIP_PATH" \
-  "$ROOT_DIR/dist/NotrusMac.app.sha256" \
-  "$ROOT_DIR/dist/NotrusMac.zip.sha256" \
+  "$ROOT_DIR/dist/Notrus.app.sha256" \
+  "$ROOT_DIR/dist/Notrus.zip.sha256" \
   "$VERSIONED_ZIP_PATH" \
   "$VERSIONED_ZIP_PATH.sha256"
 mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources" "$APP_PATH/Contents/Helpers"
@@ -44,8 +53,8 @@ mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources" "$APP_PATH/Co
 ICONSET_DIR="$(mktemp -d "$ROOT_DIR/.build/tmp/notrus-iconset.XXXXXX.iconset")"
 trap '[[ -n "$ICONSET_DIR" ]] && rm -rf "$ICONSET_DIR"' EXIT
 
-cp "$BINARY_PATH" "$APP_PATH/Contents/MacOS/NotrusMac"
-chmod +x "$APP_PATH/Contents/MacOS/NotrusMac"
+cp "$BINARY_PATH" "$APP_PATH/Contents/MacOS/Notrus"
+chmod +x "$APP_PATH/Contents/MacOS/Notrus"
 
 if [[ -x "$PROTOCOL_HELPER_PATH" ]]; then
   cp "$PROTOCOL_HELPER_PATH" "$APP_PATH/Contents/Helpers/notrus-protocol-core"
@@ -60,7 +69,18 @@ else
 fi
 
 swift "$ROOT_DIR/scripts/render-mac-icon.swift" "$ICONSET_DIR"
-iconutil -c icns "$ICONSET_DIR" -o "$APP_PATH/Contents/Resources/AppIcon.icns"
+if ! iconutil -c icns "$ICONSET_DIR" -o "$APP_PATH/Contents/Resources/AppIcon.icns"; then
+  if [[ -f "$FALLBACK_REPO_ICON_PATH" ]]; then
+    cp "$FALLBACK_REPO_ICON_PATH" "$APP_PATH/Contents/Resources/AppIcon.icns"
+    echo "iconutil rejected the generated iconset; used fallback repo icon at $FALLBACK_REPO_ICON_PATH"
+  elif [[ -f "$FALLBACK_SYSTEM_ICON_PATH" ]]; then
+    cp "$FALLBACK_SYSTEM_ICON_PATH" "$APP_PATH/Contents/Resources/AppIcon.icns"
+    echo "iconutil rejected the generated iconset; used fallback system icon at $FALLBACK_SYSTEM_ICON_PATH"
+  else
+    echo "iconutil failed and no fallback AppIcon.icns was available." >&2
+    exit 1
+  fi
+fi
 
 cat > "$APP_PATH/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -70,9 +90,9 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleExecutable</key>
-  <string>NotrusMac</string>
+  <string>Notrus</string>
   <key>CFBundleDisplayName</key>
-  <string>Notrus Mac</string>
+  <string>Notrus</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleIconName</key>
@@ -82,7 +102,7 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>NotrusMac</string>
+  <string>Notrus</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -172,9 +192,9 @@ if [[ -n "$NOTARY_PROFILE" && "$CODESIGN_IDENTITY" != "-" ]]; then
 fi
 
 if command -v shasum >/dev/null 2>&1; then
-  shasum -a 256 "$APP_PATH/Contents/MacOS/NotrusMac" > "$ROOT_DIR/dist/NotrusMac.app.sha256"
+  shasum -a 256 "$APP_PATH/Contents/MacOS/Notrus" > "$ROOT_DIR/dist/Notrus.app.sha256"
   if [[ -f "$ZIP_PATH" ]]; then
-    shasum -a 256 "$ZIP_PATH" > "$ROOT_DIR/dist/NotrusMac.zip.sha256"
+    shasum -a 256 "$ZIP_PATH" > "$ROOT_DIR/dist/Notrus.zip.sha256"
   fi
   if [[ -f "$VERSIONED_ZIP_PATH" ]]; then
     shasum -a 256 "$VERSIONED_ZIP_PATH" > "$VERSIONED_ZIP_PATH.sha256"

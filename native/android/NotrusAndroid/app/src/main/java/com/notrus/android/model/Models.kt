@@ -36,6 +36,17 @@ data class PublicMlsKeyPackage(
     val keyPackage: String,
 )
 
+data class RelayMlsWelcomeEnvelope(
+    val toUserId: String,
+    val welcome: String,
+)
+
+data class RelayMlsBootstrap(
+    val ciphersuite: String,
+    val groupId: String,
+    val welcomes: List<RelayMlsWelcomeEnvelope> = emptyList(),
+)
+
 data class SignalProtocolState(
     val deviceId: Int = 1,
     val identityKeyPair: String,
@@ -142,12 +153,41 @@ data class RelayMessage(
     val epoch: Int? = null,
 )
 
+data class AttachmentUploadRequest(
+    val byteLength: Int,
+    val ciphertext: String,
+    val createdAt: String,
+    val id: String,
+    val iv: String,
+    val senderId: String? = null,
+    val sha256: String,
+    val threadId: String? = null,
+    val transportPadding: String? = null,
+)
+
+data class AttachmentUploadResponse(
+    val ok: Boolean,
+    val attachmentId: String,
+)
+
+data class RelayAttachment(
+    val byteLength: Int,
+    val ciphertext: String,
+    val createdAt: String,
+    val id: String,
+    val iv: String,
+    val senderId: String,
+    val sha256: String,
+    val threadId: String,
+)
+
 data class RelayThread(
     val deliveryCapability: String? = null,
     val deliveryCapabilityExpiresAt: String? = null,
     val id: String,
     val mailboxHandle: String? = null,
     val mailboxHandleExpiresAt: String? = null,
+    val mlsBootstrap: RelayMlsBootstrap? = null,
     val title: String,
     val protocol: String,
     val createdAt: String,
@@ -165,6 +205,9 @@ data class RelayAbuseControls(
 data class RelayHealth(
     val ok: Boolean,
     val abuseControls: RelayAbuseControls? = null,
+    val androidKeyAttestationRequired: Boolean? = null,
+    val androidPlayIntegrityRequired: Boolean? = null,
+    val appleDeviceCheckRequired: Boolean? = null,
     val attestationConfigured: Boolean? = null,
     val attestationRequired: Boolean? = null,
     val directoryDiscoveryMode: String? = null,
@@ -258,7 +301,10 @@ data class ClientIntegrityReport(
     val bundleIdentifier: String,
     val codeSignatureStatus: String,
     val deviceCheckStatus: String,
+    val deviceCheckToken: String? = null,
     val deviceCheckTokenPresented: Boolean,
+    val playIntegrityToken: String? = null,
+    val playIntegrityTokenPresented: Boolean = false,
     val generatedAt: String,
     val note: String? = null,
     val riskLevel: String,
@@ -304,6 +350,14 @@ data class ConversationThreadRecord(
     val processedMessageCount: Int = 0,
     val protocol: String,
     val signalPeerUserId: String? = null,
+)
+
+data class LocalAttachmentDraft(
+    val id: String,
+    val byteLength: Int,
+    val fileName: String,
+    val mediaType: String,
+    val uri: String,
 )
 
 data class StoredIdentityRecord(
@@ -441,8 +495,9 @@ data class AppUiState(
     val importPassphrase: String = "",
     val directoryQuery: String = "",
     val draftText: String = "",
+    val pendingAttachments: List<LocalAttachmentDraft> = emptyList(),
     val witnessOriginsInput: String = "",
-    val protocolEngineMessage: String = "Signal direct messaging is linked into the Android artifact. MLS groups remain metadata-only on Android until the native group engine is ported.",
+    val protocolEngineMessage: String = "Signal direct messaging and MLS-compatible group transport are linked into this Android build.",
     val transparencyResetAvailable: Boolean = false,
 )
 

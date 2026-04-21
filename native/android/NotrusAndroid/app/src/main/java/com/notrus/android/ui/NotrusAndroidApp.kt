@@ -53,7 +53,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Lock
@@ -81,6 +83,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -113,6 +116,7 @@ import com.notrus.android.model.DeviceInventoryAlias
 import com.notrus.android.model.DeviceInventoryProfile
 import com.notrus.android.model.RelayLinkedDevice
 import com.notrus.android.model.RelayUser
+import com.notrus.android.model.SecureAttachmentReference
 import com.notrus.android.model.selectedThread
 import com.notrus.android.ui.theme.NotrusColorTheme
 import com.notrus.android.ui.theme.NotrusThemeMode
@@ -145,12 +149,19 @@ private enum class BannerTone {
     Success,
 }
 
+private data class PendingAttachmentSaveRequest(
+    val reference: SecureAttachmentReference,
+    val threadId: String,
+)
+
 @Composable
 fun NotrusAndroidApp(
     state: AppUiState,
     viewModel: NotrusViewModel,
     activity: FragmentActivity,
 ) {
+    var pendingAttachmentSave by remember { mutableStateOf<PendingAttachmentSaveRequest?>(null) }
+
     val importArchiveLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri ->
@@ -160,6 +171,25 @@ fun NotrusAndroidApp(
         contract = ActivityResultContracts.CreateDocument("application/json"),
     ) { uri ->
         uri?.let { viewModel.exportCurrentProfile(activity, it) }
+    }
+    val addAttachmentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        uris.forEach(viewModel::addPendingAttachment)
+    }
+    val saveAttachmentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("*/*"),
+    ) { destination ->
+        val pending = pendingAttachmentSave
+        if (destination != null && pending != null) {
+            viewModel.saveAttachment(
+                activity = activity,
+                threadId = pending.threadId,
+                reference = pending.reference,
+                destinationUri = destination,
+            )
+        }
+        pendingAttachmentSave = null
     }
 
     var destination by rememberSaveable { mutableStateOf(WorkspaceDestination.Chats) }
@@ -214,6 +244,17 @@ fun NotrusAndroidApp(
                 },
                 onImportArchive = {
                     importArchiveLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
+                },
+                onAttachFiles = {
+                    addAttachmentLauncher.launch(arrayOf("*/*"))
+                },
+                onSaveAttachment = { threadId, reference ->
+                    pendingAttachmentSave = PendingAttachmentSaveRequest(
+                        reference = reference,
+                        threadId = threadId,
+                    )
+                    val defaultName = reference.fileName.ifBlank { "notrus-attachment.bin" }
+                    saveAttachmentLauncher.launch(defaultName)
                 },
             )
         }
@@ -298,7 +339,7 @@ private fun OnboardingView(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text(
-                text = "Set up Notrus on Android",
+                text = "Set up Notrus",
                 style = MaterialTheme.typography.headlineMedium,
                 color = MaterialTheme.colorScheme.onBackground,
             )
@@ -402,6 +443,8 @@ private fun WorkspaceScaffold(
     onChatQueryChange: (String) -> Unit,
     onExportArchive: () -> Unit,
     onImportArchive: () -> Unit,
+    onAttachFiles: () -> Unit,
+    onSaveAttachment: (String, SecureAttachmentReference) -> Unit,
 ) {
     val selectedThread = state.selectedThread
     val showConversationDetail = destination == WorkspaceDestination.Chats && !wideLayout && selectedThread != null
@@ -531,6 +574,8 @@ private fun WorkspaceScaffold(
                                 chatQuery = chatQuery,
                                 onChatQueryChange = onChatQueryChange,
                                 onShowContacts = { onDestinationChange(WorkspaceDestination.Contacts) },
+                                onAttachFiles = onAttachFiles,
+                                onSaveAttachment = onSaveAttachment,
                                 wideLayout = wideLayout,
                             )
 
@@ -715,6 +760,8 @@ private fun ChatsScreen(
     chatQuery: String,
     onChatQueryChange: (String) -> Unit,
     onShowContacts: () -> Unit,
+    onAttachFiles: () -> Unit,
+    onSaveAttachment: (String, SecureAttachmentReference) -> Unit,
     wideLayout: Boolean,
 ) {
     val filteredThreads = remember(state.threads, chatQuery, state.currentIdentity?.id) {
@@ -783,6 +830,8 @@ private fun ChatsScreen(
                             activity = activity,
                             viewModel = viewModel,
                             enhancedVisuals = enhancedVisuals,
+                            onAttachFiles = onAttachFiles,
+                            onSaveAttachment = onSaveAttachment,
                             wideLayout = true,
                         )
                     }
@@ -808,6 +857,8 @@ private fun ChatsScreen(
                     activity = activity,
                     viewModel = viewModel,
                     enhancedVisuals = enhancedVisuals,
+                    onAttachFiles = onAttachFiles,
+                    onSaveAttachment = onSaveAttachment,
                     wideLayout = false,
                 )
             } else {
@@ -895,10 +946,12 @@ private fun ConversationPane(
     activity: FragmentActivity,
     viewModel: NotrusViewModel,
     enhancedVisuals: Boolean,
+    onAttachFiles: () -> Unit,
+    onSaveAttachment: (String, SecureAttachmentReference) -> Unit,
     wideLayout: Boolean,
 ) {
     val messageListState = rememberLazyListState()
-    val canSend = thread.supported && state.draftText.isNotBlank() && !state.isBusy
+    val canSend = thread.supported && (state.draftText.isNotBlank() || state.pendingAttachments.isNotEmpty()) && !state.isBusy
     val sendScale by animateFloatAsState(
         targetValue = if (canSend) 1f else 0.94f,
         animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
@@ -971,6 +1024,9 @@ private fun ConversationPane(
                         message = message,
                         enhancedVisuals = enhancedVisuals,
                         isLocal = message.senderId == state.currentIdentity?.id,
+                        onSaveAttachment = { reference ->
+                            onSaveAttachment(thread.id, reference)
+                        },
                     )
                 }
             }
@@ -1007,12 +1063,63 @@ private fun ConversationPane(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = if (thread.supported) "Secure direct chat" else "Read-only thread on Android",
+                        text = if (thread.supported) {
+                            when (thread.protocol) {
+                                "signal-pqxdh-double-ratchet-v1" -> "Secure direct chat"
+                                "mls-rfc9420-v1" -> "Secure group chat"
+                                else -> "Secure conversation"
+                            }
+                        } else {
+                            "Read-only thread on Android"
+                        },
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     TextButton(onClick = { viewModel.deleteConversation(thread.id) }) {
                         Text("Delete local")
+                    }
+                }
+                AnimatedVisibility(
+                    visible = state.pendingAttachments.isNotEmpty(),
+                    enter = fadeIn(tween(180)) + expandVertically(tween(220, easing = FastOutSlowInEasing)),
+                    exit = fadeOut(tween(140)) + shrinkVertically(tween(180)),
+                ) {
+                    if (state.pendingAttachments.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = "Pending attachments (${state.pendingAttachments.size})",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                state.pendingAttachments.forEach { draft ->
+                                    FilterChip(
+                                        selected = false,
+                                        onClick = { viewModel.removePendingAttachment(draft.id) },
+                                        label = {
+                                            Text(
+                                                text = draft.fileName,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Close,
+                                                contentDescription = "Remove attachment",
+                                            )
+                                        },
+                                        enabled = !state.isBusy,
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
                 Row(
@@ -1029,6 +1136,12 @@ private fun ConversationPane(
                         maxLines = 4,
                         enabled = thread.supported,
                     )
+                    OutlinedIconButton(
+                        onClick = onAttachFiles,
+                        enabled = thread.supported && !state.isBusy,
+                    ) {
+                        Icon(Icons.Rounded.AttachFile, contentDescription = "Attach files")
+                    }
                     FilledIconButton(
                         onClick = { viewModel.sendSelectedMessage(activity) },
                         enabled = canSend,
@@ -2364,6 +2477,7 @@ private fun MessageBubble(
     message: DecryptedMessage,
     enhancedVisuals: Boolean,
     isLocal: Boolean,
+    onSaveAttachment: (SecureAttachmentReference) -> Unit,
 ) {
     val bubbleColor by animateColorAsState(
         targetValue = when {
@@ -2411,17 +2525,19 @@ private fun MessageBubble(
                     )
                 }
 
-                Text(
-                    text = message.body,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = if (message.status != "ok") {
-                        MaterialTheme.colorScheme.onErrorContainer
-                    } else if (isLocal) {
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    },
-                )
+                if (message.body.isNotBlank()) {
+                    Text(
+                        text = message.body,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = if (message.status != "ok") {
+                            MaterialTheme.colorScheme.onErrorContainer
+                        } else if (isLocal) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                    )
+                }
 
                 AnimatedVisibility(
                     visible = message.attachments.isNotEmpty(),
@@ -2431,20 +2547,32 @@ private fun MessageBubble(
                     if (message.attachments.isNotEmpty()) {
                         Column(
                             modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             Text(
                                 text = attachmentCountLabel(message.attachments.size),
                                 style = MaterialTheme.typography.labelLarge,
                                 color = MaterialTheme.colorScheme.onSurface,
                             )
-                            Text(
-                                text = message.attachments.joinToString(", ") { it.fileName },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            message.attachments.forEach { attachment ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = attachment.fileName,
+                                        modifier = Modifier.weight(1f),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    TextButton(onClick = { onSaveAttachment(attachment) }) {
+                                        Text("Save")
+                                    }
+                                }
+                            }
                         }
                     }
                 }

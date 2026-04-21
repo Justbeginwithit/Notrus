@@ -4,6 +4,8 @@ import android.util.Base64
 import com.notrus.android.model.AccountResetRequest
 import com.notrus.android.model.AccountResetResponse
 import com.notrus.android.model.AccountDeleteResponse
+import com.notrus.android.model.AttachmentUploadRequest
+import com.notrus.android.model.AttachmentUploadResponse
 import com.notrus.android.model.ClientIntegrityReport
 import com.notrus.android.model.DeviceDescriptor
 import com.notrus.android.model.DeviceRevokeResponse
@@ -12,10 +14,13 @@ import com.notrus.android.model.LocalIdentity
 import com.notrus.android.model.PublicMlsKeyPackage
 import com.notrus.android.model.PublicSignalBundle
 import com.notrus.android.model.RelayAbuseControls
+import com.notrus.android.model.RelayMlsBootstrap
+import com.notrus.android.model.RelayMlsWelcomeEnvelope
 import com.notrus.android.model.RelayDeviceEvent
 import com.notrus.android.model.RelayHealth
 import com.notrus.android.model.RelayLinkedDevice
 import com.notrus.android.model.RelayMessage
+import com.notrus.android.model.RelayAttachment
 import com.notrus.android.model.RelaySecurityDevicesResponse
 import com.notrus.android.model.RelaySession
 import com.notrus.android.model.RelaySyncPayload
@@ -56,6 +61,9 @@ class RelayClient(
                 powDifficultyBits = json.optJSONObject("abuseControls")?.optInt("powDifficultyBits"),
                 powRequiredForRemoteUntrustedClients = json.optJSONObject("abuseControls")?.optBoolean("powRequiredForRemoteUntrustedClients"),
             ),
+            androidKeyAttestationRequired = json.optJSONObject("attestation")?.optBoolean("androidKeyAttestationRequired"),
+            androidPlayIntegrityRequired = json.optJSONObject("attestation")?.optBoolean("androidPlayIntegrityRequired"),
+            appleDeviceCheckRequired = json.optJSONObject("attestation")?.optBoolean("appleDeviceCheckRequired"),
             attestationConfigured = json.optJSONObject("attestation")?.optBoolean("configured"),
             attestationRequired = json.optJSONObject("attestation")?.optBoolean("required"),
             directoryDiscoveryMode = json.optString("directoryDiscoveryMode").ifBlank { null },
@@ -203,6 +211,63 @@ class RelayClient(
         response.optString("messageId", messageId)
     }
 
+    suspend fun postMlsMessage(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        wireMessage: String,
+    ): String = withContext(Dispatchers.IO) {
+        val messageId = UUID.randomUUID().toString().lowercase()
+        val response = request(
+            "/api/mailboxes/$mailboxHandle/messages",
+            method = "POST",
+            authorizationToken = deliveryCapability,
+            body = JSONObject()
+                .put("createdAt", Instant.now().toString())
+                .put("id", messageId)
+                .put("messageKind", "mls-application")
+                .put("paddingBucket", nextTransportBucket(wireMessage.length))
+                .put("protocol", "mls-rfc9420-v1")
+                .put("transportPadding", transportPadding(wireMessage.length))
+                .put("wireMessage", wireMessage)
+        )
+        response.optString("messageId", messageId)
+    }
+
+    suspend fun uploadAttachment(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        attachment: AttachmentUploadRequest,
+    ): String = withContext(Dispatchers.IO) {
+        val response = request(
+            "/api/mailboxes/$mailboxHandle/attachments",
+            method = "POST",
+            authorizationToken = deliveryCapability,
+            body = JSONObject()
+                .put("byteLength", attachment.byteLength)
+                .put("ciphertext", attachment.ciphertext)
+                .put("createdAt", attachment.createdAt)
+                .put("id", attachment.id)
+                .put("iv", attachment.iv)
+                .put("senderId", attachment.senderId)
+                .put("sha256", attachment.sha256)
+                .put("threadId", attachment.threadId)
+                .put("transportPadding", attachment.transportPadding)
+        )
+        parseAttachmentUploadResponse(response).attachmentId
+    }
+
+    suspend fun fetchAttachment(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        attachmentId: String,
+    ): RelayAttachment = withContext(Dispatchers.IO) {
+        val response = request(
+            "/api/mailboxes/$mailboxHandle/attachments/$attachmentId",
+            authorizationToken = deliveryCapability,
+        )
+        parseRelayAttachment(response)
+    }
+
     suspend fun revokeDevice(
         userId: String,
         signerDeviceId: String,
@@ -337,6 +402,7 @@ class RelayClient(
                 id = json.optString("id"),
                 mailboxHandle = nullableString(json, "mailboxHandle"),
                 mailboxHandleExpiresAt = nullableString(json, "mailboxHandleExpiresAt"),
+                mlsBootstrap = json.optJSONObject("mlsBootstrap")?.let(::parseMlsBootstrap),
                 title = json.optString("title"),
                 protocol = json.optString("protocol", "unknown"),
                 createdAt = json.optString("createdAt", Instant.now().toString()),
@@ -392,6 +458,24 @@ class RelayClient(
         PublicMlsKeyPackage(
             ciphersuite = json.optString("ciphersuite"),
             keyPackage = json.optString("keyPackage"),
+        )
+
+    private fun parseAttachmentUploadResponse(json: JSONObject): AttachmentUploadResponse =
+        AttachmentUploadResponse(
+            ok = json.optBoolean("ok", false),
+            attachmentId = json.optString("attachmentId"),
+        )
+
+    private fun parseRelayAttachment(json: JSONObject): RelayAttachment =
+        RelayAttachment(
+            byteLength = json.optInt("byteLength", 0),
+            ciphertext = json.optString("ciphertext"),
+            createdAt = json.optString("createdAt"),
+            id = json.optString("id"),
+            iv = json.optString("iv"),
+            senderId = json.optString("senderId"),
+            sha256 = json.optString("sha256"),
+            threadId = json.optString("threadId"),
         )
 
     private fun requireSessionToken(): String =
@@ -528,6 +612,28 @@ class RelayClient(
             signedPreKeySignature = json.optString("signedPreKeySignature"),
         )
 
+    private fun parseMlsBootstrap(json: JSONObject): RelayMlsBootstrap {
+        val welcomes = mutableListOf<RelayMlsWelcomeEnvelope>()
+        val welcomeArray = json.optJSONArray("welcomes") ?: JSONArray()
+        for (index in 0 until welcomeArray.length()) {
+            val welcomeJson = welcomeArray.optJSONObject(index) ?: continue
+            val toUserId = welcomeJson.optString("toUserId").trim()
+            val welcome = welcomeJson.optString("welcome").trim()
+            if (toUserId.isBlank() || welcome.isBlank()) {
+                continue
+            }
+            welcomes += RelayMlsWelcomeEnvelope(
+                toUserId = toUserId,
+                welcome = welcome,
+            )
+        }
+        return RelayMlsBootstrap(
+            ciphersuite = json.optString("ciphersuite"),
+            groupId = json.optString("groupId"),
+            welcomes = welcomes,
+        )
+    }
+
     private fun jwk(value: Jwk): JSONObject =
         JSONObject()
             .put("crv", value.crv)
@@ -635,7 +741,10 @@ class RelayClient(
                         .put("bundleIdentifier", integrityReport.bundleIdentifier)
                         .put("codeSignatureStatus", integrityReport.codeSignatureStatus)
                         .put("deviceCheckStatus", integrityReport.deviceCheckStatus)
+                        .put("deviceCheckToken", integrityReport.deviceCheckToken)
                         .put("deviceCheckTokenPresented", integrityReport.deviceCheckTokenPresented)
+                        .put("playIntegrityToken", integrityReport.playIntegrityToken)
+                        .put("playIntegrityTokenPresented", integrityReport.playIntegrityTokenPresented)
                         .put("generatedAt", integrityReport.generatedAt)
                         .put("note", integrityReport.note)
                         .put("riskLevel", integrityReport.riskLevel)

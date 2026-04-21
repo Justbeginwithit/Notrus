@@ -3,7 +3,7 @@ import path from "node:path";
 
 const rootDir = path.resolve(new URL("..", import.meta.url).pathname);
 const sourceRoot = path.join(rootDir, "native", "macos", "NotrusMac", "Sources");
-const packagedInfoPlist = path.join(rootDir, "dist", "NotrusMac.app", "Contents", "Info.plist");
+const packagedInfoPlist = path.join(rootDir, "dist", "Notrus.app", "Contents", "Info.plist");
 const androidSourceRoot = path.join(rootDir, "native", "android", "NotrusAndroid", "app", "src", "main", "java");
 const androidManifestPath = path.join(rootDir, "native", "android", "NotrusAndroid", "app", "src", "main", "AndroidManifest.xml");
 const androidNetworkConfigPath = path.join(rootDir, "native", "android", "NotrusAndroid", "app", "src", "main", "res", "xml", "network_security_config.xml");
@@ -17,7 +17,7 @@ const forbiddenPatterns = [
   { pattern: /NSSharingService|UIActivityViewController|ShareLink/i, reason: "share-sheet surface" },
   { pattern: /QuickLook|QLPreview|QLThumbnail/i, reason: "attachment preview surface" },
   { pattern: /dropDestination|onDrop|draggable|NSDragging|UIDropInteraction/i, reason: "drag-and-drop surface" },
-  { pattern: /Amplitude|Mixpanel|Segment|TelemetryDeck|FirebaseAnalytics|PostHog/i, reason: "analytics SDK" },
+  { pattern: /\bAmplitude\b|\bMixpanel\b|\bSegment\b|\bTelemetryDeck\b|\bFirebaseAnalytics\b|\bPostHog\b/i, reason: "analytics SDK" },
 ];
 
 async function listFiles(directory) {
@@ -49,7 +49,7 @@ async function main() {
 
   const infoPlist = await readFile(packagedInfoPlist, "utf8").catch(() => "");
   if (infoPlist.includes("CFBundleURLTypes") || infoPlist.includes("LSItemContentTypes") || infoPlist.includes("aps-environment")) {
-    violations.push("dist/NotrusMac.app/Contents/Info.plist exposes URL, document, or push entitlements.");
+    violations.push("dist/Notrus.app/Contents/Info.plist exposes URL, document, or push entitlements.");
   }
 
   const androidFiles = (await listFiles(androidSourceRoot).catch(() => [])).filter((file) => file.endsWith(".kt"));

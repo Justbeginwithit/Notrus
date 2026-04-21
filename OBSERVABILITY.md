@@ -13,6 +13,9 @@
 - relay rate limits are keyed by privacy-preserving HMACs rather than retaining raw IPs in bucket identifiers
 - operational responses expose only coarse counters and limits through `/api/health`
 - request bodies are not logged
+- unhandled server errors log only the error class by default
+- full stack traces require `NOTRUS_VERBOSE_RELAY_ERRORS=true` and are local-development only
+- non-local HTTP relay binding is refused by default unless `NOTRUS_ALLOW_REMOTE_HTTP=true` is explicitly set for isolated development
 
 ## Native client behavior
 

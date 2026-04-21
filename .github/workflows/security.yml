@@ -51,11 +51,15 @@ jobs:
           NOTRUS_ADVERSARIAL_RELAY_ORIGIN: http://127.0.0.1:3010
           NOTRUS_PRIVACY_RELAY_ORIGIN: http://127.0.0.1:3010
         run: |
+          npm run test:attestation-service
+          npm run test:attestation-enforcement
           npm run test:client-surfaces
           npm run test:privacy-routing
           npm run test:retention-pruning
           npm run test:metadata-boundary
           npm run test:content-boundary
+          npm run test:production-api-boundary
+          npm run test:recovery-lifecycle
           npm run test:adversarial-inputs
           npm run test:abuse-controls
           npm run test:device-membership

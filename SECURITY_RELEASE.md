@@ -4,8 +4,11 @@
 
 - macOS packaging is produced from `scripts/package-mac-app.sh`
 - Android packaging is produced from `scripts/package-android-app.sh`
-- `npm run package:clients` refreshes both native artifacts together
+- run `npm run package:android-app` and `npm run package:mac-app` to refresh both native artifacts
+- production packaging enforces two-reviewer governance input through `scripts/verify-release-governance.mjs`
 - the macOS packaged binary is code-signed with `NOTRUS_CODESIGN_IDENTITY` when provided, or ad-hoc signed for local verification builds
+- macOS production packaging hard-fails without governance approval input, non-adhoc signing identity, and notarization profile
+- Android production packaging hard-fails without governance approval input, external keystore credentials, and non-debug signer verification via `apksigner`
 - packaged artifacts emit SHA-256 checksum sidecars in `dist/`
 - runtime privacy-routing and retention-pruning proofs exist in `scripts/test-privacy-routing.mjs` and `scripts/test-retention-pruning.mjs`
 - the repository can generate an SBOM with `npm run generate:sbom`
@@ -25,9 +28,9 @@ The intended public-facing release model for Notrus is:
 
 - use a non-ad-hoc Developer ID signing identity through `NOTRUS_CODESIGN_IDENTITY`
 - notarize macOS releases through `NOTRUS_NOTARY_PROFILE`
-- protect Android production signing keys outside the repository
+- keep Android production signing keys outside the repository and pass them only through release-time environment variables
+- provide `NOTRUS_RELEASE_APPROVALS_PATH` with at least two unique reviewers for production packaging
 - review the generated SBOM and dependency diffs before release
-- require a second reviewer for release-tag creation and production relay configuration changes
 - retain release checksums and build logs long enough to investigate rollback or tampering events
 
 ## Release Notes Requirements
@@ -43,12 +46,10 @@ Every GitHub release should clearly state:
 
 ## Current Honest Boundary
 
-This repository contains the technical scaffolding for macOS and Android packaging, signed-build hooks, SBOM generation, secret scanning, and CI verification.
+This repository contains technical enforcement for production packaging gates, signed-build hooks, SBOM generation, secret scanning, and CI verification.
 
 It does not, by itself, prove:
 
-- two-person release control
 - Android production signing-key custody
 - Apple notarization on every published build
-- external release governance
 - external audit

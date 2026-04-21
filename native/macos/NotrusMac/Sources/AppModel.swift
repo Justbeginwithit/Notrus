@@ -10,6 +10,19 @@ private struct PreparedThreadCreation {
     let updatedIdentity: LocalIdentity?
 }
 
+private struct StandardsMlsFanoutRecipient: Codable {
+    let messageKind: String
+    let toUserId: String
+    let wireMessage: String
+}
+
+private struct StandardsMlsFanoutEnvelope: Codable {
+    let format: String
+    let senderId: String
+    let version: Int
+    let recipients: [StandardsMlsFanoutRecipient]
+}
+
 private enum PrivacyDelayKind {
     case sync
     case interactive
@@ -31,6 +44,9 @@ final class AppModel: ObservableObject {
         "This relay presented a transparency history that does not include the head previously pinned on this Mac.",
         "This relay changed its transparency signing key for the Mac key directory.",
     ]
+    private static let mlsFanoutCiphersuite = "MLS-compat-signal-fanout-v1"
+    private static let mlsFanoutEnvelopeFormat = "notrus-mls-signal-fanout-v1"
+    private static let mlsFanoutGroupPrefix = "fanout-signal:"
 
     @Published var relayOrigin: String
     @Published var witnessOriginsText: String
@@ -239,13 +255,13 @@ final class AppModel: ObservableObject {
         }
         if !composeMlsIneligibleContacts.isEmpty {
             let names = composeMlsIneligibleContacts.map(\.displayName).joined(separator: ", ")
-            return "Group chats on macOS use MLS. The selected contact\(composeMlsIneligibleContacts.count == 1 ? "" : "s") \(names) \(composeMlsIneligibleContacts.count == 1 ? "has" : "have") not published MLS group capability yet, so this selection can only be used for direct chats today."
+            return "Some selected contacts (\(names)) have no native MLS key package, so this Mac will use compatible Signal fanout transport inside the standards group thread."
         }
         return nil
     }
 
     var canCreateComposedThread: Bool {
-        !composeSelection.isEmpty && !composeProtocolBlocked && composeMlsIneligibleContacts.isEmpty
+        !composeSelection.isEmpty && !composeProtocolBlocked
     }
 
     var protocolBannerTone: StatusStrip.Tone {
@@ -490,7 +506,7 @@ final class AppModel: ObservableObject {
                 try await registerAndSync()
             } else {
                 localVaultLocked = false
-                statusMessage = "Create or import a device-protected Notrus Mac profile to begin."
+                statusMessage = "Create or import a device-protected Notrus profile to begin."
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -515,7 +531,7 @@ final class AppModel: ObservableObject {
 
         do {
             let method = try await deviceSecretStore.unlockInteractively(
-                reason: "Unlock Notrus Mac to reopen local identities, ratchet state, and contact verification records.",
+                reason: "Unlock Notrus to reopen local identities, ratchet state, and contact verification records.",
                 allowCreation: false
             )
             localVaultLocked = false
@@ -1149,12 +1165,6 @@ final class AppModel: ObservableObject {
             return
         }
 
-        if !composeMlsIneligibleContacts.isEmpty {
-            let names = composeMlsIneligibleContacts.map(\.displayName).joined(separator: ", ")
-            errorMessage = "The selected contact\(composeMlsIneligibleContacts.count == 1 ? "" : "s") \(names) cannot join an MLS group from this build yet because the relay is missing their published MLS key package."
-            return
-        }
-
         if let blockedContact = selected.first(where: { isContactBlocked($0) }) {
             let name = users.first(where: { $0.id == blockedContact })?.displayName ?? "That contact"
             errorMessage = "\(name) is blocked on this Mac. Unblock the contact in Account Center before starting another conversation."
@@ -1250,29 +1260,77 @@ final class AppModel: ObservableObject {
                     guard participants.count >= 3 else {
                         throw RelayClientError.requestFailed("MLS group threads require at least three participants.")
                     }
-                    guard let localMlsState = identity.standardsMlsState else {
-                        throw RelayClientError.requestFailed("This macOS profile is missing its MLS account state.")
+                    guard identity.standardsSignalState != nil, identity.standardsSignalBundle != nil else {
+                        throw RelayClientError.requestFailed("This macOS profile is missing the local Signal standards state required for group fanout compatibility.")
+                    }
+                    let remoteParticipants = participants
+                        .compactMap { participantsById[$0] }
+                        .filter { $0.id != identity.id }
+                    if let missingSignal = remoteParticipants.first(where: { $0.signalBundle == nil }) {
+                        throw RelayClientError.requestFailed("\(missingSignal.displayName) does not currently advertise a Signal bundle required for compatible group fanout.")
+                    }
+                    let canUseNativeMls =
+                        identity.standardsMlsState != nil &&
+                        remoteParticipants.allSatisfy { $0.mlsKeyPackage != nil }
+                    if canUseNativeMls {
+                        let participantKeyPackages = remoteParticipants.reduce(into: [String: PublicMlsKeyPackage]()) { partial, participant in
+                            if let package = participant.mlsKeyPackage {
+                                partial[participant.id] = package
+                            }
+                        }
+                        guard let localMlsState = identity.standardsMlsState else {
+                            throw RelayClientError.requestFailed("This macOS profile is missing its MLS account state.")
+                        }
+                        let created = try StandardsCoreBridge.mlsCreateGroup(
+                            creatorMlsState: localMlsState,
+                            creatorUserId: identity.id,
+                            participantKeyPackages: participantKeyPackages,
+                            participantUserIds: participants,
+                            threadId: threadId
+                        )
+                        let updatedIdentity = identity.updatingStandards(mlsState: created.creatorMlsState)
+
+                        return PreparedThreadCreation(
+                            request: ThreadCreateRequest(
+                                createdAt: createdAt,
+                                envelopes: [],
+                                groupState: nil,
+                                id: threadId,
+                                initialRatchetPublicJwk: nil,
+                                mlsBootstrap: created.threadBootstrap,
+                                participantHandles: participantHandles,
+                                protocol: protocolName,
+                                title: ""
+                            ),
+                            localThreadRecord: ThreadStoreRecord(
+                                bootstrapState: nil,
+                                currentState: nil,
+                                groupTreeState: nil,
+                                lastProcessedMessageId: nil,
+                                localTitle: localThreadTitle.isEmpty ? nil : localThreadTitle,
+                                messageCache: [:],
+                                pendingSentStates: [:],
+                                processedMessageCount: 0,
+                                protocolField: protocolName,
+                                standardsMlsThreadState: created.threadState,
+                                standardsSignalPeerUserId: nil
+                            ),
+                            protocolName: protocolName,
+                            threadId: threadId,
+                            updatedIdentity: updatedIdentity
+                        )
                     }
 
-                    let participantKeyPackages = try participants.reduce(into: [String: PublicMlsKeyPackage]()) { partial, participantId in
-                        guard participantId != identity.id else {
-                            return
+                    let fanoutBootstrap = RelayMlsBootstrap(
+                        ciphersuite: Self.mlsFanoutCiphersuite,
+                        groupId: "\(Self.mlsFanoutGroupPrefix)\(threadId)",
+                        welcomes: remoteParticipants.map { participant in
+                            RelayMlsWelcomeEnvelope(
+                                toUserId: participant.id,
+                                welcome: Data("fanout:\(threadId):\(participant.id):\(createdAt)".utf8).base64EncodedString()
+                            )
                         }
-                        guard let package = participantsById[participantId]?.mlsKeyPackage else {
-                            throw RelayClientError.requestFailed("A selected participant is missing an MLS key package on the relay.")
-                        }
-                        partial[participantId] = package
-                    }
-
-                    let created = try StandardsCoreBridge.mlsCreateGroup(
-                        creatorMlsState: localMlsState,
-                        creatorUserId: identity.id,
-                        participantKeyPackages: participantKeyPackages,
-                        participantUserIds: participants,
-                        threadId: threadId
                     )
-                    let updatedIdentity = identity.updatingStandards(mlsState: created.creatorMlsState)
-
                     return PreparedThreadCreation(
                         request: ThreadCreateRequest(
                             createdAt: createdAt,
@@ -1280,7 +1338,7 @@ final class AppModel: ObservableObject {
                             groupState: nil,
                             id: threadId,
                             initialRatchetPublicJwk: nil,
-                            mlsBootstrap: created.threadBootstrap,
+                            mlsBootstrap: fanoutBootstrap,
                             participantHandles: participantHandles,
                             protocol: protocolName,
                             title: ""
@@ -1295,12 +1353,12 @@ final class AppModel: ObservableObject {
                             pendingSentStates: [:],
                             processedMessageCount: 0,
                             protocolField: protocolName,
-                            standardsMlsThreadState: created.threadState,
+                            standardsMlsThreadState: nil,
                             standardsSignalPeerUserId: nil
                         ),
                         protocolName: protocolName,
                         threadId: threadId,
-                        updatedIdentity: updatedIdentity
+                        updatedIdentity: nil
                     )
                 default:
                     let roomKey = NotrusCrypto.randomRoomKey()
@@ -1922,6 +1980,49 @@ final class AppModel: ObservableObject {
         return (envelope.text, envelope.attachments)
     }
 
+    private func isMlsFanoutCompatibleThread(_ thread: RelayThread) -> Bool {
+        if let bootstrap = thread.mlsBootstrap {
+            if bootstrap.ciphersuite.caseInsensitiveCompare(Self.mlsFanoutCiphersuite) == .orderedSame {
+                return true
+            }
+            if bootstrap.groupId.lowercased().hasPrefix(Self.mlsFanoutGroupPrefix.lowercased()) {
+                return true
+            }
+        }
+        return thread.messages.contains { message in
+            guard let wireMessage = message.wireMessage else {
+                return false
+            }
+            return (try? decodeMlsFanoutEnvelope(wireMessage)) != nil
+        }
+    }
+
+    private func decodeMlsFanoutEnvelope(_ wireMessage: String) throws -> StandardsMlsFanoutEnvelope? {
+        guard let data = wireMessage.data(using: .utf8) else {
+            return nil
+        }
+        guard let envelope = try? JSONDecoder().decode(StandardsMlsFanoutEnvelope.self, from: data) else {
+            return nil
+        }
+        guard envelope.format == Self.mlsFanoutEnvelopeFormat, envelope.version == 1 else {
+            return nil
+        }
+        guard !envelope.senderId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw RelayClientError.requestFailed("Compatible group envelope is missing its sender id.")
+        }
+        guard !envelope.recipients.isEmpty else {
+            throw RelayClientError.requestFailed("Compatible group envelope has no recipients.")
+        }
+        if envelope.recipients.contains(where: {
+            $0.toUserId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+            $0.messageKind.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+            $0.wireMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }) {
+            throw RelayClientError.requestFailed("Compatible group envelope contains an invalid recipient entry.")
+        }
+        return envelope
+    }
+
     private func routingState(for thread: ConversationThread) throws -> (mailboxHandle: String, deliveryCapability: String) {
         guard
             let mailboxHandle = thread.rawThread.mailboxHandle,
@@ -2032,25 +2133,70 @@ final class AppModel: ObservableObject {
         identity: LocalIdentity,
         payload: MessagePayload
     ) async throws {
-        guard let mlsState = identity.standardsMlsState else {
-            throw RelayClientError.requestFailed("This macOS profile is missing its MLS account state.")
+        guard var record = threadRecords[thread.id] else {
+            throw RelayClientError.requestFailed("This MLS thread is missing local thread state on this Mac.")
         }
-        guard var record = threadRecords[thread.id], let threadState = record.standardsMlsThreadState else {
-            throw RelayClientError.requestFailed("This MLS thread is missing its local native group state on this Mac.")
-        }
-
         let plaintext = try encodeStandardsPayload(payload)
+        let useFanoutCompatibility = isMlsFanoutCompatibleThread(thread.rawThread)
+        let updatedIdentity: LocalIdentity
+        let outboundWireMessage: String
 
-        let encrypted = try await NativeExecution.run {
-            try StandardsCoreBridge.mlsEncryptMessage(
-                localMlsState: mlsState,
-                plaintext: plaintext,
-                threadState: threadState
+        if useFanoutCompatibility {
+            guard var signalState = identity.standardsSignalState else {
+                throw RelayClientError.requestFailed("This macOS profile is missing the local Signal standards state required for group fanout.")
+            }
+            let recipients = try thread.participants
+                .filter { $0.id != identity.id }
+                .sorted { $0.id < $1.id }
+                .map { recipient -> StandardsMlsFanoutRecipient in
+                    guard let bundle = recipient.signalBundle else {
+                        throw RelayClientError.requestFailed("\(recipient.displayName) is missing a Signal bundle required for group fanout.")
+                    }
+                    let encrypted = try StandardsCoreBridge.signalEncrypt(
+                        localSignalState: signalState,
+                        localUserId: identity.id,
+                        plaintext: plaintext,
+                        remoteBundle: bundle,
+                        remoteUserId: recipient.id
+                    )
+                    signalState = encrypted.localSignalState
+                    return StandardsMlsFanoutRecipient(
+                        messageKind: encrypted.messageKind,
+                        toUserId: recipient.id,
+                        wireMessage: encrypted.wireMessage
+                    )
+                }
+            let envelope = StandardsMlsFanoutEnvelope(
+                format: Self.mlsFanoutEnvelopeFormat,
+                senderId: identity.id,
+                version: 1,
+                recipients: recipients
             )
+            let encodedEnvelope = try JSONEncoder().encode(envelope)
+            guard let wireMessage = String(data: encodedEnvelope, encoding: .utf8) else {
+                throw RelayClientError.requestFailed("Unable to encode the compatibility group envelope.")
+            }
+            outboundWireMessage = wireMessage
+            updatedIdentity = identity.updatingStandards(signalState: signalState)
+        } else {
+            guard let mlsState = identity.standardsMlsState else {
+                throw RelayClientError.requestFailed("This macOS profile is missing its MLS account state.")
+            }
+            guard let threadState = record.standardsMlsThreadState else {
+                throw RelayClientError.requestFailed("This MLS thread is missing its local native group state on this Mac.")
+            }
+            let encrypted = try await NativeExecution.run {
+                try StandardsCoreBridge.mlsEncryptMessage(
+                    localMlsState: mlsState,
+                    plaintext: plaintext,
+                    threadState: threadState
+                )
+            }
+            updatedIdentity = identity.updatingStandards(mlsState: encrypted.localMlsState)
+            record.standardsMlsThreadState = encrypted.threadState
+            outboundWireMessage = encrypted.wireMessage
         }
 
-        let updatedIdentity = identity.updatingStandards(mlsState: encrypted.localMlsState)
-        record.standardsMlsThreadState = encrypted.threadState
         let outbound = OutboundMessage(
             createdAt: NotrusCrypto.isoNow(),
             id: UUID().uuidString.lowercased(),
@@ -2058,7 +2204,7 @@ final class AppModel: ObservableObject {
             protocolField: "mls-rfc9420-v1",
             senderId: identity.id,
             threadId: thread.id,
-            wireMessage: encrypted.wireMessage
+            wireMessage: outboundWireMessage
         )
 
         record.messageCache[outbound.id] = CachedMessageState(
@@ -2078,7 +2224,9 @@ final class AppModel: ObservableObject {
                 deliveryCapability: route.deliveryCapability,
                 message: outbound.relayTransportForm()
             )
-            statusMessage = "Sent ciphertext over RFC 9420 MLS."
+            statusMessage = useFanoutCompatibility
+                ? "Sent ciphertext over compatible group fanout transport."
+                : "Sent ciphertext over RFC 9420 MLS."
         } catch {
             record.messageCache.removeValue(forKey: outbound.id)
             threadRecords[thread.id] = record
@@ -2693,6 +2841,117 @@ final class AppModel: ObservableObject {
         warnings: [String]
     ) throws -> ConversationThread {
         var threadWarnings = warnings
+        if isMlsFanoutCompatibleThread(thread) {
+            guard var signalState = identity.standardsSignalState else {
+                return materializeUnsupportedThread(
+                    thread: thread,
+                    participants: participants,
+                    usersById: usersById,
+                    title: resolvedThreadTitle(thread: thread, participants: participants, identityID: identity.id),
+                    protocolName: "mls-rfc9420-v1",
+                    reason: "This macOS profile is missing the local Signal standards state required for compatible group fanout.",
+                    warnings: threadWarnings
+                )
+            }
+
+            var record = threadRecords[thread.id] ?? ThreadStoreRecord(protocolField: "mls-rfc9420-v1")
+            if
+                record.processedMessageCount > thread.messages.count ||
+                (
+                    record.processedMessageCount > 0 &&
+                    thread.messages[record.processedMessageCount - 1].id != record.lastProcessedMessageId
+                )
+            {
+                record = ThreadStoreRecord(
+                    hiddenAt: record.hiddenAt,
+                    localTitle: record.localTitle,
+                    messageCache: [:],
+                    processedMessageCount: 0,
+                    protocolField: "mls-rfc9420-v1"
+                )
+            }
+
+            for message in thread.messages.dropFirst(record.processedMessageCount) {
+                if message.senderId == identity.id {
+                    record.messageCache[message.id] = record.messageCache[message.id] ?? CachedMessageState(
+                        body: "Local plaintext unavailable on this Mac for that previously-sent compatible group message.",
+                        hidden: false,
+                        status: "missing-local-state"
+                    )
+                } else if let wireMessage = message.wireMessage {
+                    do {
+                        guard let envelope = try decodeMlsFanoutEnvelope(wireMessage), envelope.senderId == message.senderId else {
+                            throw RelayClientError.requestFailed("The compatible group envelope was malformed.")
+                        }
+                        guard let recipient = envelope.recipients.first(where: { $0.toUserId == identity.id }) else {
+                            throw RelayClientError.requestFailed("This Mac did not receive a recipient envelope for that group message.")
+                        }
+                        let opened = try StandardsCoreBridge.signalDecrypt(
+                            localSignalState: signalState,
+                            localUserId: identity.id,
+                            messageKind: recipient.messageKind,
+                            remoteUserId: message.senderId,
+                            wireMessage: recipient.wireMessage
+                        )
+                        let decodedPayload = decodeStandardsPayload(opened.plaintext)
+                        signalState = opened.localSignalState
+                        identity = identity.updatingStandards(signalState: signalState)
+                        record.messageCache[message.id] = CachedMessageState(
+                            attachments: decodedPayload.attachments,
+                            body: decodedPayload.text,
+                            hidden: false,
+                            status: "ok"
+                        )
+                    } catch {
+                        threadWarnings.append("A compatible group envelope from \(usersById[message.senderId]?.displayName ?? "Unknown user") failed decryption.")
+                        record.messageCache[message.id] = CachedMessageState(
+                            body: error.localizedDescription,
+                            hidden: false,
+                            status: "invalid"
+                        )
+                    }
+                } else {
+                    threadWarnings.append("A compatible group message was missing its envelope payload.")
+                    record.messageCache[message.id] = CachedMessageState(
+                        body: "The compatible group envelope payload was incomplete.",
+                        hidden: false,
+                        status: "invalid"
+                    )
+                }
+
+                record.processedMessageCount += 1
+                record.lastProcessedMessageId = message.id
+            }
+
+            threadRecords[thread.id] = record
+            let messages = thread.messages.compactMap { message -> DecryptedMessage? in
+                let cached = record.messageCache[message.id]
+                if cached?.hidden == true {
+                    return nil
+                }
+                return DecryptedMessage(
+                    attachments: cached?.attachments ?? [],
+                    id: message.id,
+                    senderId: message.senderId,
+                    senderName: usersById[message.senderId]?.displayName ?? "Unknown user",
+                    createdAt: message.createdAt,
+                    body: cached?.body ?? "Local plaintext unavailable for this compatible group message.",
+                    status: cached?.status ?? "missing-local-state"
+                )
+            }
+
+            return ConversationThread(
+                id: thread.id,
+                title: resolvedThreadTitle(thread: thread, participants: participants, identityID: identity.id),
+                protocolLabel: NotrusProtocolCatalog.spec(for: "mls-rfc9420-v1").label,
+                participants: participants,
+                rawThread: thread,
+                messages: messages,
+                warning: threadWarnings.first,
+                supported: true
+            )
+        }
+
         guard var mlsState = identity.standardsMlsState else {
             return materializeUnsupportedThread(
                 thread: thread,

@@ -1,6 +1,6 @@
-# Notrus Mac
+# Notrus
 
-`NotrusMac` is the native macOS client for Notrus.
+`Notrus` is the native macOS client for this project.
 
 ## Current Scope
 
@@ -11,6 +11,7 @@
 - relay transparency verification and witness comparison
 - standards-based direct Signal threads
 - standards-based MLS group threads
+- standards-group compatible fanout transport when participants do not expose native MLS key packages
 - encrypted recovery archives and recovery-authorized account reset
 
 ## Run

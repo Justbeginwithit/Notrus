@@ -31,7 +31,7 @@ enum AttachmentGateway {
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = true
         panel.title = "Attach Encrypted Files"
-        panel.message = "Choose files to encrypt before upload. Notrus Mac will not preview or auto-open them."
+        panel.message = "Choose files to encrypt before upload. Notrus will not preview or auto-open them."
         guard panel.runModal() == .OK else {
             throw AttachmentGatewayError.importCancelled
         }
@@ -63,7 +63,7 @@ enum AttachmentGateway {
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = sanitizedFileName(reference.fileName)
         panel.title = "Save Decrypted Attachment"
-        panel.message = "Notrus Mac will write the decrypted bytes to the location you choose. The file will not be previewed or opened automatically."
+        panel.message = "Notrus will write the decrypted bytes to the location you choose. The file will not be previewed or opened automatically."
         guard panel.runModal() == .OK, let url = panel.url else {
             throw AttachmentGatewayError.saveCancelled
         }

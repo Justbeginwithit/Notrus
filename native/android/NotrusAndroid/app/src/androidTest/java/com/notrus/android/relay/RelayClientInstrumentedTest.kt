@@ -1,6 +1,9 @@
 package com.notrus.android.relay
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.notrus.android.model.AttachmentUploadRequest
+import com.notrus.android.model.Jwk
+import com.notrus.android.model.LocalIdentity
 import com.notrus.android.model.RelayUser
 import java.net.ServerSocket
 import java.net.Socket
@@ -57,7 +60,7 @@ class RelayClientInstrumentedTest {
                 .toString()
         )
 
-        val users = RelayClient(origin = origin).searchDirectory("user-a", "ABCD-1234")
+        val users = RelayClient(origin = origin, sessionToken = "session-token").searchDirectory("bob")
 
         assertEquals(1, users.size)
         val first: RelayUser = users.first()
@@ -102,7 +105,7 @@ class RelayClientInstrumentedTest {
                 .toString()
         )
 
-        val users = RelayClient(origin = origin).searchDirectory("user-a", "bob")
+        val users = RelayClient(origin = origin, sessionToken = "session-token").searchDirectory("bob")
 
         assertEquals(1, users.size)
         val bundle = users.first().signalBundle
@@ -115,7 +118,7 @@ class RelayClientInstrumentedTest {
         testRelay.enqueue(status = 400, body = "The invite code is invalid.", contentType = "text/plain; charset=utf-8")
 
         val error = runCatching {
-            RelayClient(origin = origin).searchDirectory("user-a", "invalid")
+            RelayClient(origin = origin, sessionToken = "session-token").searchDirectory("invalid")
         }.exceptionOrNull()
 
         assertNotNull(error)
@@ -133,54 +136,140 @@ class RelayClientInstrumentedTest {
                 .toString()
         )
 
-        val threadId = RelayClient(origin = origin).createDirectThread("user-a", "user-b")
+        val threadId = RelayClient(origin = origin, sessionToken = "session-token").createDirectThread("contact-handle-1")
 
         assertEquals("thread-direct-1", threadId)
+        assertTrue(testRelay.requests.first().requestLine.startsWith("POST /api/routing/threads"))
     }
 
     @Test
-    fun syncTreatsJsonNullTransparencyPreviousHashAsMissing() = runBlocking {
+    fun postMlsMessageUsesMlsProtocolAndApplicationKind() = runBlocking {
         testRelay.enqueue(
-            status = 200,
+            status = 201,
             body = JSONObject()
-                .put("entryCount", 1)
-                .put("transparencyHead", "head-1")
-                .put("transparencySignature", "sig-1")
-                .put(
-                    "transparencySigner",
-                    JSONObject()
-                        .put("algorithm", "ed25519")
-                        .put("keyId", "signer-1")
-                        .put("publicKeyRaw", "raw")
-                        .put("publicKeySpki", "spki")
-                )
-                .put(
-                    "transparencyEntries",
-                    JSONArray().put(
-                        JSONObject()
-                            .put("createdAt", "2026-04-09T00:00:00Z")
-                            .put("entryHash", "entry-1")
-                            .put("fingerprint", "fp-1")
-                            .put("kind", "identity-created")
-                            .put("prekeyFingerprint", JSONObject.NULL)
-                            .put("previousHash", JSONObject.NULL)
-                            .put("sequence", 1)
-                            .put("userId", "user-a")
-                            .put("username", "alice")
-                    )
-                )
-                .put("users", JSONArray())
-                .put("threads", JSONArray())
-                .put("deviceEvents", JSONArray())
-                .put("devices", JSONArray())
+                .put("ok", true)
+                .put("messageId", "mls-message-1")
                 .toString()
         )
 
-        val sync = RelayClient(origin = origin).sync("user-a")
+        val messageId = RelayClient(origin = origin).postMlsMessage(
+            mailboxHandle = "mailbox-group-1",
+            deliveryCapability = "delivery-capability",
+            wireMessage = "{\"format\":\"notrus-mls-signal-fanout-v1\"}",
+        )
 
-        assertEquals(1, sync.transparencyEntries.size)
-        assertNull(sync.transparencyEntries.first().previousHash)
-        assertNull(sync.transparencyEntries.first().prekeyFingerprint)
+        assertEquals("mls-message-1", messageId)
+        assertTrue(testRelay.requests.first().requestLine.startsWith("POST /api/mailboxes/mailbox-group-1/messages"))
+        assertEquals("Bearer delivery-capability", testRelay.requests.first().headers["authorization"])
+        assertTrue(testRelay.requests.first().body.contains("\"protocol\":\"mls-rfc9420-v1\""))
+        assertTrue(testRelay.requests.first().body.contains("\"messageKind\":\"mls-application\""))
+    }
+
+    @Test
+    fun syncParsesMlsBootstrapMetadataForGroupThreads() = runBlocking {
+        testRelay.enqueue(
+            status = 200,
+            body = JSONObject()
+                .put("directoryDiscoveryMode", "username-or-invite")
+                .put("users", JSONArray())
+                .put(
+                    "threads",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("id", "thread-group-1")
+                            .put("title", "")
+                            .put("protocol", "mls-rfc9420-v1")
+                            .put("createdAt", "2026-04-21T00:00:00Z")
+                            .put("createdBy", "user-a")
+                            .put("participantIds", JSONArray().put("user-a").put("user-b").put("user-c"))
+                            .put("messages", JSONArray())
+                            .put(
+                                "mlsBootstrap",
+                                JSONObject()
+                                    .put("ciphersuite", "MLS-compat-signal-fanout-v1")
+                                    .put("groupId", "fanout-signal:thread-group-1")
+                                    .put(
+                                        "welcomes",
+                                        JSONArray().put(
+                                            JSONObject()
+                                                .put("toUserId", "user-b")
+                                                .put("welcome", "ZmFrZS13ZWxjb21l")
+                                        )
+                                    )
+                            )
+                    )
+                )
+                .toString()
+        )
+
+        val sync = RelayClient(origin = origin, sessionToken = "session-token").sync()
+
+        assertEquals(1, sync.threads.size)
+        val thread = sync.threads.first()
+        assertEquals("mls-rfc9420-v1", thread.protocol)
+        assertEquals("MLS-compat-signal-fanout-v1", thread.mlsBootstrap?.ciphersuite)
+        assertEquals("fanout-signal:thread-group-1", thread.mlsBootstrap?.groupId)
+        assertEquals(1, thread.mlsBootstrap?.welcomes?.size)
+    }
+
+    @Test
+    fun uploadAttachmentUsesMailboxCapabilityAndReturnsAttachmentId() = runBlocking {
+        testRelay.enqueue(
+            status = 201,
+            body = JSONObject()
+                .put("ok", true)
+                .put("attachmentId", "attachment-1")
+                .toString()
+        )
+
+        val attachmentId = RelayClient(origin = origin).uploadAttachment(
+            mailboxHandle = "mailbox-1",
+            deliveryCapability = "delivery-capability",
+            attachment = AttachmentUploadRequest(
+                byteLength = 512,
+                ciphertext = "Y2lwaGVydGV4dA==",
+                createdAt = "2026-04-21T00:00:00Z",
+                id = "attachment-1",
+                iv = "aXY=",
+                senderId = "user-a",
+                sha256 = "deadbeef",
+                threadId = "thread-1",
+                transportPadding = null,
+            ),
+        )
+
+        assertEquals("attachment-1", attachmentId)
+        assertTrue(testRelay.requests.first().requestLine.startsWith("POST /api/mailboxes/mailbox-1/attachments"))
+        assertEquals("Bearer delivery-capability", testRelay.requests.first().headers["authorization"])
+        assertTrue(testRelay.requests.first().body.contains("\"ciphertext\":\"Y2lwaGVydGV4dA==\""))
+    }
+
+    @Test
+    fun fetchAttachmentUsesMailboxCapabilityAndParsesRelayPayload() = runBlocking {
+        testRelay.enqueue(
+            status = 200,
+            body = JSONObject()
+                .put("byteLength", 512)
+                .put("ciphertext", "Y2lwaGVydGV4dA==")
+                .put("createdAt", "2026-04-21T00:00:00Z")
+                .put("id", "attachment-1")
+                .put("iv", "aXY=")
+                .put("senderId", "user-a")
+                .put("sha256", "deadbeef")
+                .put("threadId", "thread-1")
+                .toString()
+        )
+
+        val attachment = RelayClient(origin = origin).fetchAttachment(
+            mailboxHandle = "mailbox-1",
+            deliveryCapability = "delivery-capability",
+            attachmentId = "attachment-1",
+        )
+
+        assertEquals("attachment-1", attachment.id)
+        assertEquals("thread-1", attachment.threadId)
+        assertEquals("Bearer delivery-capability", testRelay.requests.first().headers["authorization"])
+        assertTrue(testRelay.requests.first().requestLine.startsWith("GET /api/mailboxes/mailbox-1/attachments/attachment-1"))
     }
 
     @Test
@@ -214,7 +303,7 @@ class RelayClientInstrumentedTest {
                 .toString()
         )
 
-        val identity = com.notrus.android.model.LocalIdentity(
+        val identity = LocalIdentity(
             id = "user-a",
             username = "alice",
             displayName = "Alice",
@@ -222,20 +311,20 @@ class RelayClientInstrumentedTest {
             storageMode = "strongbox-or-keystore",
             fingerprint = "fp-a",
             recoveryFingerprint = "rfp-a",
-            recoveryPublicJwk = com.notrus.android.model.Jwk(kty = "OKP", crv = "Ed25519", x = "AQ", y = ""),
-            signingPublicJwk = com.notrus.android.model.Jwk(kty = "OKP", crv = "Ed25519", x = "AQ", y = ""),
-            encryptionPublicJwk = com.notrus.android.model.Jwk(kty = "OKP", crv = "X25519", x = "AQ", y = ""),
+            recoveryPublicJwk = Jwk(kty = "OKP", crv = "Ed25519", x = "AQ", y = ""),
+            signingPublicJwk = Jwk(kty = "OKP", crv = "Ed25519", x = "AQ", y = ""),
+            encryptionPublicJwk = Jwk(kty = "OKP", crv = "X25519", x = "AQ", y = ""),
             prekeyCreatedAt = "2026-04-09T00:00:00Z",
             prekeyFingerprint = "pfp-a",
-            prekeyPublicJwk = com.notrus.android.model.Jwk(kty = "OKP", crv = "X25519", x = "AQ", y = ""),
+            prekeyPublicJwk = Jwk(kty = "OKP", crv = "X25519", x = "AQ", y = ""),
             prekeySignature = "sig-a",
             standardsSignalReady = false,
             standardsMlsReady = false,
         )
 
-        val user = RelayClient(origin = origin).register(identity)
+        val response = RelayClient(origin = origin).register(identity)
 
-        assertEquals("NTRS-1234", user.directoryCode)
+        assertEquals("NTRS-1234", response.user.directoryCode)
         assertEquals(2, testRelay.requests.size)
         assertNull(testRelay.requests[0].headers["x-notrus-pow-token"])
         assertEquals("challenge-token", testRelay.requests[1].headers["x-notrus-pow-token"])
@@ -333,6 +422,7 @@ private class TestRelay : AutoCloseable {
             200 -> "OK"
             201 -> "Created"
             400 -> "Bad Request"
+            404 -> "Not Found"
             else -> "Test Response"
         }
 }

@@ -862,6 +862,64 @@ final class NotrusMacCheckpointTests: XCTestCase {
         XCTAssertNotNil(model.localDeviceInventory.appInstanceId)
     }
 
+    @MainActor
+    func testComposeAllowsCompatibleGroupWhenContactsLackMlsKeyPackages() throws {
+        let deviceSecretStore = DeviceSecretStore(
+            service: "com.notrus.mac.tests.\(UUID().uuidString)",
+            account: "compose-fanout-compat",
+            fixedData: Data(repeating: 7, count: 32)
+        )
+        let model = AppModel(
+            deviceSecretStore: deviceSecretStore,
+            identityStore: IdentityStore(directory: temporaryDirectory.appendingPathComponent("compose-accounts", isDirectory: true), deviceSecretStore: deviceSecretStore),
+            securityStateStore: SecurityStateStore(directory: temporaryDirectory.appendingPathComponent("compose-security", isDirectory: true), deviceSecretStore: deviceSecretStore),
+            threadStateStore: ThreadStateStore(directory: temporaryDirectory.appendingPathComponent("compose-threads", isDirectory: true), deviceSecretStore: deviceSecretStore)
+        )
+
+        let identity = try NotrusCrypto.createIdentity(displayName: "Composer", username: "composer")
+        model.currentIdentity = identity
+        let now = NotrusCrypto.isoNow()
+        let bob = RelayUser(
+            id: "user-bob",
+            username: "bob",
+            displayName: "Bob",
+            fingerprint: "fingerprint-bob",
+            mlsKeyPackage: nil,
+            prekeyCreatedAt: now,
+            prekeyFingerprint: "prekey-bob",
+            prekeyPublicJwk: identity.prekeyPublicJwk,
+            prekeySignature: identity.prekeySignature,
+            signalBundle: nil,
+            signingPublicJwk: identity.signingPublicJwk,
+            encryptionPublicJwk: identity.encryptionPublicJwk,
+            createdAt: now,
+            updatedAt: now
+        )
+        let carol = RelayUser(
+            id: "user-carol",
+            username: "carol",
+            displayName: "Carol",
+            fingerprint: "fingerprint-carol",
+            mlsKeyPackage: nil,
+            prekeyCreatedAt: now,
+            prekeyFingerprint: "prekey-carol",
+            prekeyPublicJwk: identity.prekeyPublicJwk,
+            prekeySignature: identity.prekeySignature,
+            signalBundle: nil,
+            signingPublicJwk: identity.signingPublicJwk,
+            encryptionPublicJwk: identity.encryptionPublicJwk,
+            createdAt: now,
+            updatedAt: now
+        )
+
+        model.users = [bob, carol]
+        model.composeSelection = [bob.id, carol.id]
+
+        XCTAssertEqual(model.composeMlsIneligibleContacts.map(\.id).sorted(), [bob.id, carol.id].sorted())
+        XCTAssertTrue(model.canCreateComposedThread)
+        XCTAssertNotNil(model.composeSelectionWarning)
+    }
+
     func testTransportPolicyRejectsRemoteHttp() throws {
         XCTAssertThrowsError(try TransportSecurityPolicy.validatedRelayOrigin("http://192.168.1.20:3000"))
         XCTAssertNoThrow(try TransportSecurityPolicy.validatedRelayOrigin("http://127.0.0.1:3000"))

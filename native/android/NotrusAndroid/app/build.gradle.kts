@@ -12,6 +12,10 @@ val releaseKeystorePath = System.getenv("NOTRUS_ANDROID_KEYSTORE_PATH")
 val releaseKeystorePassword = System.getenv("NOTRUS_ANDROID_KEYSTORE_PASSWORD")
 val releaseKeyAlias = System.getenv("NOTRUS_ANDROID_KEY_ALIAS")
 val releaseKeyPassword = System.getenv("NOTRUS_ANDROID_KEY_PASSWORD")
+val releaseMode = (System.getenv("NOTRUS_RELEASE_MODE") ?: "local").lowercase()
+val enforceProductionSigning = releaseMode == "production"
+val playIntegrityCloudProjectNumber =
+    (System.getenv("NOTRUS_PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER") ?: "0").toLongOrNull() ?: 0L
 val hasReleaseSigning =
     !releaseKeystorePath.isNullOrBlank() &&
         !releaseKeystorePassword.isNullOrBlank() &&
@@ -29,6 +33,7 @@ android {
         versionCode = 2
         versionName = "0.2.0-alpha2"
         buildConfigField("String", "DEFAULT_RELAY_ORIGIN", "\"$defaultRelayOrigin\"")
+        buildConfigField("long", "PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER", "${playIntegrityCloudProjectNumber}L")
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -63,6 +68,10 @@ android {
             )
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
+            } else if (enforceProductionSigning) {
+                throw GradleException(
+                    "Production Android releases require NOTRUS_ANDROID_KEYSTORE_PATH, NOTRUS_ANDROID_KEYSTORE_PASSWORD, NOTRUS_ANDROID_KEY_ALIAS, and NOTRUS_ANDROID_KEY_PASSWORD."
+                )
             } else {
                 signingConfig = signingConfigs.getByName("debug")
             }

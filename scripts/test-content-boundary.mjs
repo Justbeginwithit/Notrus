@@ -1,130 +1,88 @@
+import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import http from "node:http";
-import https from "node:https";
+import { withManagedRelay } from "./managed-relay.mjs";
 
-const relayOrigin = process.env.NOTRUS_CONTENT_RELAY_ORIGIN ?? "http://127.0.0.1:3000";
-const relayUrl = new URL(relayOrigin);
-const storePath = process.env.NOTRUS_CONTENT_STORE_PATH || null;
 const plaintextAttachment = Buffer.from("server should never store this plaintext attachment", "utf8");
 
 function isoNow() {
   return new Date().toISOString();
 }
 
-function hex(buffer) {
-  return Buffer.from(buffer).toString("hex");
+function randomBase64(bytes = 32) {
+  return randomBytes(bytes).toString("base64");
 }
 
-function base64url(buffer) {
-  return Buffer.from(buffer)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
-
-function generateJwk() {
+function generatePublicJwk() {
   const { publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-  const jwk = publicKey.export({ format: "jwk" });
-  return {
-    crv: jwk.crv,
-    kty: jwk.kty,
-    x: jwk.x,
-    y: jwk.y,
-  };
+  return publicKey.export({ format: "jwk" });
 }
 
-function fakeSignalBundle() {
-  const bytes = () => randomBytes(32).toString("base64");
+function signalBundle() {
   return {
     deviceId: 1,
-    identityKey: bytes(),
+    identityKey: randomBase64(),
     kyberPreKeyId: 1,
-    kyberPreKeyPublic: bytes(),
-    kyberPreKeySignature: bytes(),
+    kyberPreKeyPublic: randomBase64(),
+    kyberPreKeySignature: randomBase64(),
     preKeyId: 1,
-    preKeyPublic: bytes(),
-    registrationId: 42,
+    preKeyPublic: randomBase64(),
+    registrationId: 1001,
     signedPreKeyId: 1,
-    signedPreKeyPublic: bytes(),
-    signedPreKeySignature: bytes(),
+    signedPreKeyPublic: randomBase64(),
+    signedPreKeySignature: randomBase64(),
   };
 }
 
-function identityPayload({ userId, username, displayName }) {
+function identity(username) {
   return {
-    displayName,
-    encryptionPublicJwk: generateJwk(),
-    fingerprint: hex(randomBytes(16)),
-    mlsKeyPackage: null,
-    prekeyCreatedAt: isoNow(),
-    prekeyFingerprint: hex(randomBytes(16)),
-    prekeyPublicJwk: generateJwk(),
-    prekeySignature: randomBytes(64).toString("base64"),
-    recoveryFingerprint: hex(randomBytes(16)),
-    recoveryPublicJwk: generateJwk(),
-    signalBundle: fakeSignalBundle(),
-    signingPublicJwk: generateJwk(),
-    userId,
+    userId: `user-${randomBytes(8).toString("hex")}`,
     username,
+    displayName: username,
+    fingerprint: randomBytes(16).toString("hex"),
+    recoveryFingerprint: randomBytes(16).toString("hex"),
+    recoveryPublicJwk: generatePublicJwk(),
+    signingPublicJwk: generatePublicJwk(),
+    encryptionPublicJwk: generatePublicJwk(),
+    prekeyCreatedAt: isoNow(),
+    prekeyFingerprint: randomBytes(16).toString("hex"),
+    prekeyPublicJwk: generatePublicJwk(),
+    prekeySignature: randomBase64(),
+    signalBundle: signalBundle(),
+    device: {
+      createdAt: isoNow(),
+      id: `device-${randomBytes(6).toString("hex")}`,
+      label: `${username}-device`,
+      platform: "test",
+      publicJwk: generatePublicJwk(),
+      riskLevel: "low",
+      storageMode: "device-only",
+    },
   };
 }
 
-async function post(pathname, body) {
-  return requestJson(pathname, {
-    method: "POST",
-    body,
+async function request(origin, pathname, { method = "GET", token = null, body } = {}) {
+  const response = await fetch(new URL(pathname, origin), {
+    method,
+    headers: {
+      Accept: "application/json",
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
   });
+  const payload = await response.json().catch(() => ({}));
+  return { payload, response, status: response.status };
 }
 
-async function get(pathname) {
-  return requestJson(pathname, { method: "GET" });
-}
-
-function requestJson(pathname, { method, body }) {
-  const url = new URL(pathname, relayUrl);
-  const client = url.protocol === "https:" ? https : http;
-  const payload = body ? Buffer.from(JSON.stringify(body), "utf8") : null;
-
-  return new Promise((resolve, reject) => {
-    const request = client.request(
-      url,
-      {
-        method,
-        headers: payload
-          ? {
-              "Content-Length": String(payload.length),
-              "Content-Type": "application/json",
-            }
-          : {},
-      },
-      (response) => {
-        const chunks = [];
-        response.on("data", (chunk) => chunks.push(chunk));
-        response.on("end", () => {
-          const raw = Buffer.concat(chunks).toString("utf8");
-          const decoded = raw ? JSON.parse(raw) : {};
-          if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) > 299) {
-            reject(new Error(`${pathname} failed: ${response.statusCode} ${decoded.error ?? "unknown error"}`));
-            return;
-          }
-          resolve(decoded);
-        });
-      }
-    );
-
-    request.on("error", reject);
-    if (payload) {
-      request.write(payload);
-    }
-    request.end();
-  });
+async function expectOk(origin, pathname, options) {
+  const result = await request(origin, pathname, options);
+  assert.equal(result.response.ok, true, `${options?.method ?? "GET"} ${pathname} returned ${result.status}`);
+  return result.payload;
 }
 
 async function encryptAttachment(plaintext, { attachmentId, senderId, threadId }) {
   const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt"]);
-  const rawKey = Buffer.from(await crypto.subtle.exportKey("raw", key));
   const iv = randomBytes(12);
   const aad = Buffer.from(
     JSON.stringify({
@@ -144,111 +102,116 @@ async function encryptAttachment(plaintext, { attachmentId, senderId, threadId }
     )
   );
   return {
-    attachmentKey: rawKey.toString("base64"),
     ciphertext: encrypted.toString("base64"),
     iv: iv.toString("base64"),
     sha256: createHash("sha256").update(Buffer.concat([iv, encrypted])).digest("hex"),
   };
 }
 
-async function main() {
+async function run({ origin, storePath }) {
   const suffix = randomBytes(4).toString("hex");
-  const aliceUserId = `content-boundary-alice-${suffix}`;
-  const bobUserId = `content-boundary-bob-${suffix}`;
-  const threadId = `content-boundary-thread-${suffix}`;
-  const attachmentId = `content-boundary-attachment-${suffix}`;
-  const messageId = `content-boundary-message-${suffix}`;
-  const alice = identityPayload({
-    userId: aliceUserId,
-    username: `contentalice${suffix}`,
-    displayName: "Content Boundary Alice",
+  const alice = identity(`contentalice${suffix}`);
+  const bob = identity(`contentbob${suffix}`);
+
+  const aliceRegistration = await expectOk(origin, "/api/bootstrap/register", {
+    method: "POST",
+    body: alice,
   });
-  const bob = identityPayload({
-    userId: bobUserId,
-    username: `contentbob${suffix}`,
-    displayName: "Content Boundary Bob",
+  const bobRegistration = await expectOk(origin, "/api/bootstrap/register", {
+    method: "POST",
+    body: bob,
   });
 
-  await post("/api/register", alice);
-  await post("/api/register", bob);
+  const search = await expectOk(origin, `/api/directory/search?q=${encodeURIComponent(bob.username)}`, {
+    token: aliceRegistration.session.token,
+  });
+  const bobResult = search.results.find((candidate) => candidate.username === bob.username);
+  assert.ok(bobResult?.contactHandle, "Directory search should return an opaque contact handle.");
 
-  await post("/api/threads", {
-    createdAt: isoNow(),
-    createdBy: alice.userId,
-    envelopes: [],
-    groupState: null,
-    id: threadId,
-    initialRatchetPublicJwk: null,
-    mlsBootstrap: null,
-    participantIds: [alice.userId, bob.userId],
-    protocol: "signal-pqxdh-double-ratchet-v1",
-    title: "Content Boundary",
+  const thread = await expectOk(origin, "/api/routing/threads", {
+    method: "POST",
+    token: aliceRegistration.session.token,
+    body: {
+      createdAt: isoNow(),
+      id: `content-thread-${suffix}`,
+      participantHandles: [bobResult.contactHandle],
+      protocol: "signal-pqxdh-double-ratchet-v1",
+      title: "",
+    },
   });
 
-  await post(`/api/threads/${threadId}/messages`, {
-    createdAt: isoNow(),
-    id: messageId,
-    messageKind: "signal-whisper",
-    protocol: "signal-pqxdh-double-ratchet-v1",
-    senderId: alice.userId,
-    threadId,
-    wireMessage: randomBytes(96).toString("base64"),
+  const aliceSync = await expectOk(origin, "/api/sync/state", { token: aliceRegistration.session.token });
+  const aliceThread = aliceSync.threads.find((candidate) => candidate.id === thread.threadId);
+  assert.ok(aliceThread?.mailboxHandle, "Alice sync should return a mailbox handle.");
+  assert.ok(aliceThread?.deliveryCapability, "Alice sync should return a delivery capability.");
+
+  const messageId = `content-message-${suffix}`;
+  await expectOk(origin, `/api/mailboxes/${aliceThread.mailboxHandle}/messages`, {
+    method: "POST",
+    token: aliceThread.deliveryCapability,
+    body: {
+      createdAt: isoNow(),
+      id: messageId,
+      messageKind: "signal-whisper",
+      protocol: "signal-pqxdh-double-ratchet-v1",
+      wireMessage: randomBase64(96),
+    },
   });
 
+  const attachmentId = `content-attachment-${suffix}`;
   const sealedAttachment = await encryptAttachment(plaintextAttachment, {
     attachmentId,
     senderId: alice.userId,
-    threadId,
+    threadId: thread.threadId,
   });
-  await post(`/api/threads/${threadId}/attachments`, {
-    byteLength: plaintextAttachment.length,
-    ciphertext: sealedAttachment.ciphertext,
-    createdAt: isoNow(),
-    id: attachmentId,
-    iv: sealedAttachment.iv,
-    senderId: alice.userId,
-    sha256: sealedAttachment.sha256,
-    threadId,
+  await expectOk(origin, `/api/mailboxes/${aliceThread.mailboxHandle}/attachments`, {
+    method: "POST",
+    token: aliceThread.deliveryCapability,
+    body: {
+      byteLength: plaintextAttachment.length,
+      ciphertext: sealedAttachment.ciphertext,
+      createdAt: isoNow(),
+      id: attachmentId,
+      iv: sealedAttachment.iv,
+      sha256: sealedAttachment.sha256,
+    },
   });
 
-  const fetchedAttachment = await get(
-    `/api/threads/${threadId}/attachments/${attachmentId}?userId=${bob.userId}`
+  const bobSync = await expectOk(origin, "/api/sync/state", { token: bobRegistration.session.token });
+  const bobThread = bobSync.threads.find((candidate) => candidate.id === thread.threadId);
+  assert.ok(bobThread?.mailboxHandle, "Bob sync should return a mailbox handle.");
+  assert.ok(bobThread?.deliveryCapability, "Bob sync should return a delivery capability.");
+
+  const fetchedAttachment = await expectOk(
+    origin,
+    `/api/mailboxes/${bobThread.mailboxHandle}/attachments/${attachmentId}`,
+    { token: bobThread.deliveryCapability }
   );
-  if (fetchedAttachment.ciphertext !== sealedAttachment.ciphertext) {
-    throw new Error("Fetched attachment ciphertext did not match the uploaded ciphertext.");
-  }
+  assert.equal(fetchedAttachment.ciphertext, sealedAttachment.ciphertext, "Fetched attachment ciphertext should match upload.");
 
-  await expectUnauthorized(`/api/threads/${threadId}/attachments/${attachmentId}?userId=outsider`);
+  const unauthorizedFetch = await request(
+    origin,
+    `/api/mailboxes/${bobThread.mailboxHandle}/attachments/${attachmentId}`,
+    { token: bobRegistration.session.token }
+  );
+  assert.equal(unauthorizedFetch.status, 401, "Attachment fetch should require a mailbox capability, not a session token.");
 
-  const store = await readFile(storePath ?? new URL("./data/store.json", import.meta.url), "utf8").catch(async () => {
-    return readFile(new URL("../data/store.json", import.meta.url), "utf8");
-  });
-
-  if (store.includes(plaintextAttachment.toString("utf8"))) {
-    throw new Error("Relay store contains the plaintext attachment.");
+  if (storePath) {
+    const store = await readFile(storePath, "utf8");
+    assert.equal(store.includes(plaintextAttachment.toString("utf8")), false, "Relay store contains plaintext attachment data.");
+    assert.equal(store.includes(sealedAttachment.ciphertext), true, "Relay store should contain only encrypted attachment material.");
   }
 
   console.log("content-boundary: relay stored ciphertext-only message and attachment material");
 }
 
-function expectUnauthorized(pathname) {
-  const url = new URL(pathname, relayUrl);
-  const client = url.protocol === "https:" ? https : http;
-
-  return new Promise((resolve, reject) => {
-    const request = client.request(url, { method: "GET" }, (response) => {
-      if (response.statusCode !== 403) {
-        reject(new Error(`Expected unauthorized attachment fetch to return 403, received ${response.statusCode}.`));
-        return;
-      }
-      resolve();
-    });
-    request.on("error", reject);
-    request.end();
-  });
-}
-
-main().catch((error) => {
-  console.error(error.message);
+withManagedRelay(
+  {
+    envOriginName: "NOTRUS_CONTENT_RELAY_ORIGIN",
+    port: Number(process.env.NOTRUS_CONTENT_BOUNDARY_PORT || 3065),
+  },
+  run
+).catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });

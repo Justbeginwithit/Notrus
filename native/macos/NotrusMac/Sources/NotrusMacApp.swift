@@ -12,7 +12,7 @@ struct NotrusMacApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Notrus Mac") {
+        WindowGroup("Notrus") {
             RootView()
                 .environmentObject(model)
                 .frame(minWidth: 1080, minHeight: 760)
@@ -123,7 +123,7 @@ struct RootView: View {
                 BusyOverlay(message: message)
             }
         }
-        .alert("Notrus Mac", isPresented: Binding(
+        .alert("Notrus", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { newValue in
                 if !newValue {
@@ -289,14 +289,14 @@ struct OnboardingView: View {
     private var heroPanel: some View {
         GlassPanel(padding: 30) {
             VStack(alignment: .leading, spacing: 22) {
-                NotrusBrandLockup(title: "Notrus Mac", subtitle: "Native secure messaging")
+                NotrusBrandLockup(title: "Notrus", subtitle: "Native secure messaging")
                 HeroPill(label: "Native Product Vault")
 
                 VStack(alignment: .leading, spacing: 12) {
                     Text("A finished Mac messenger with native key custody, portable recovery, and a relay that only ever sees ciphertext.")
                         .font(.system(size: 42, weight: .bold, design: .rounded))
                         .foregroundStyle(NotrusPalette.ink)
-                    Text("Notrus Mac now keeps its profile catalog in a device-authenticated native vault, supports portable recovery archives for deliberate account transfer, and treats new contacts as unverified until you review them.")
+                    Text("Notrus now keeps its profile catalog in a device-authenticated native vault, supports portable recovery archives for deliberate account transfer, and treats new contacts as unverified until you review them.")
                         .font(.system(size: 16, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -424,7 +424,7 @@ struct VaultUnlockView: View {
     private var unlockHeroPanel: some View {
         GlassPanel(padding: 30) {
             VStack(alignment: .leading, spacing: 22) {
-                NotrusBrandLockup(title: "Notrus Mac", subtitle: "Device-protected local vault")
+                NotrusBrandLockup(title: "Notrus", subtitle: "Device-protected local vault")
                 HeroPill(label: "Device Unlock")
                 Text("Your local Notrus vault is locked.")
                     .font(.system(size: 40, weight: .bold, design: .rounded))
@@ -450,7 +450,7 @@ struct VaultUnlockView: View {
     private var unlockActionPanel: some View {
         GlassPanel(padding: 28) {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Unlock Notrus Mac")
+                Text("Unlock Notrus")
                     .font(.system(size: 28, weight: .bold, design: .rounded))
                     .foregroundStyle(NotrusPalette.ink)
                 Text("This uses Touch ID or macOS device authentication to open the local encrypted vault. It does not verify your contacts or replace message-layer identity.")
@@ -1632,7 +1632,7 @@ struct ComposeThreadSheet: View {
                         Text("Create Native Thread")
                             .font(.system(size: 28, weight: .bold, design: .rounded))
                             .foregroundStyle(NotrusPalette.ink)
-                        Text("Pick one or more relay contacts. Notrus Mac will create the right local state for the selected protocol and keep decrypted session state on this Mac.")
+                        Text("Pick one or more relay contacts. Notrus will create the right local state for the selected protocol and keep decrypted session state on this device.")
                             .foregroundStyle(.secondary)
 
                         LabeledField(label: "Optional local title") {
@@ -1854,7 +1854,7 @@ struct AccountCenterSheet: View {
                                 .font(.system(size: 16, weight: .bold, design: .rounded))
                                 .foregroundStyle(NotrusPalette.ink)
 
-                            Text("Choose whether Notrus Mac follows the system appearance or stays in a dedicated light or dark presentation.")
+                            Text("Choose whether Notrus follows the system appearance or stays in a dedicated light or dark presentation.")
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
 
@@ -2025,7 +2025,7 @@ struct AccountCenterSheet: View {
                                         .foregroundStyle(NotrusPalette.accent)
                                 }
 
-                                Text("macOS does not support App Attest for native Mac apps, so Notrus Mac uses local code-signature validation plus DeviceCheck token availability as a coarse risk signal. This does not replace end-to-end cryptography.")
+                                Text("macOS does not support App Attest for native Mac apps, so Notrus uses local code-signature validation plus DeviceCheck token availability as a coarse risk signal. This does not replace end-to-end cryptography.")
                                     .font(.callout)
                                     .foregroundStyle(.secondary)
 

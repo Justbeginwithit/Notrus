@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.ActivityManager
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import com.notrus.android.BuildConfig
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -21,15 +22,18 @@ import com.notrus.android.model.DeviceInventoryAlias
 import com.notrus.android.model.DeviceInventoryProfile
 import com.notrus.android.model.IdentityCatalog
 import com.notrus.android.model.LocalDeviceInventory
+import com.notrus.android.model.LocalAttachmentDraft
 import com.notrus.android.model.LocalIdentity
 import com.notrus.android.model.RelayMessage
 import com.notrus.android.model.RelayThread
 import com.notrus.android.model.RelayUser
+import com.notrus.android.model.SecureAttachmentReference
 import com.notrus.android.model.StoredIdentityRecord
 import com.notrus.android.model.selectedThread
 import com.notrus.android.protocol.ProtocolCatalog
 import com.notrus.android.protocol.StandardsSignalClient
 import com.notrus.android.relay.RelayClient
+import com.notrus.android.security.AttachmentCrypto
 import com.notrus.android.security.BiometricGate
 import com.notrus.android.security.DeviceAliasSnapshot
 import com.notrus.android.security.DeviceIdentityProvider
@@ -46,11 +50,15 @@ import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.random.Random
 
 private const val DIRECT_PROTOCOL = "signal-pqxdh-double-ratchet-v1"
 private const val GROUP_PROTOCOL = "mls-rfc9420-v1"
+private const val MLS_FANOUT_CIPHERSUITE = "MLS-compat-signal-fanout-v1"
+private const val MLS_FANOUT_FORMAT = "notrus-mls-signal-fanout-v1"
+private const val MAX_PENDING_ATTACHMENT_DRAFTS = 8
 private val BOOTSTRAP_LOCAL_RELAY_ORIGINS = setOf(
     "http://10.0.2.2:3000",
     "http://127.0.0.1:3000",
@@ -61,6 +69,24 @@ private data class MaterializedSyncState(
     val identity: LocalIdentity,
     val threadRecords: Map<String, ConversationThreadRecord>,
     val threads: List<ConversationThread>,
+)
+
+private data class StandardsMessagePayload(
+    val attachments: List<SecureAttachmentReference>,
+    val text: String,
+)
+
+private data class MlsFanoutRecipientEnvelope(
+    val messageKind: String,
+    val toUserId: String,
+    val wireMessage: String,
+)
+
+private data class MlsFanoutEnvelope(
+    val format: String,
+    val senderId: String,
+    val version: Int,
+    val recipients: List<MlsFanoutRecipientEnvelope>,
 )
 
 private enum class PrivacyDelayKind {
@@ -168,12 +194,101 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         state = state.copy(draftText = value)
     }
 
+    fun addPendingAttachment(uri: Uri) {
+        val thread = state.selectedThread
+        if (thread == null) {
+            state = state.copy(errorMessage = "Open a conversation before adding attachments on Android.")
+            return
+        }
+        if (!thread.supported || thread.protocol != DIRECT_PROTOCOL) {
+            state = state.copy(errorMessage = "Android attachment send is currently available on standards direct chats only.")
+            return
+        }
+        if (state.pendingAttachments.size >= MAX_PENDING_ATTACHMENT_DRAFTS) {
+            state = state.copy(errorMessage = "Android currently allows up to $MAX_PENDING_ATTACHMENT_DRAFTS attachments per message.")
+            return
+        }
+
+        viewModelScope.launch {
+            runCatching {
+                val draft = resolveAttachmentDraft(uri)
+                if (state.pendingAttachments.any { it.uri == draft.uri }) {
+                    return@runCatching
+                }
+                val updated = (state.pendingAttachments + draft).take(MAX_PENDING_ATTACHMENT_DRAFTS)
+                state = state.copy(
+                    pendingAttachments = updated,
+                    statusMessage = "Added ${draft.fileName} to this Android message.",
+                    errorMessage = null,
+                )
+            }.onFailure { error ->
+                state = state.copy(errorMessage = error.message)
+            }
+        }
+    }
+
+    fun removePendingAttachment(attachmentId: String) {
+        state = state.copy(
+            pendingAttachments = state.pendingAttachments.filterNot { it.id == attachmentId },
+            errorMessage = null,
+        )
+    }
+
+    fun saveAttachment(
+        activity: FragmentActivity,
+        threadId: String,
+        reference: SecureAttachmentReference,
+        destinationUri: Uri,
+    ) {
+        viewModelScope.launch {
+            if (!authorizeSensitiveOperation(activity, "Authorize decrypting and exporting an encrypted attachment on Android.")) {
+                return@launch
+            }
+            state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Decrypting and saving attachment on Android...")
+            runCatching {
+                val thread = state.threads.firstOrNull { it.id == threadId }
+                    ?: error("This Android conversation is no longer available. Sync and try again.")
+                val mailboxHandle = thread.mailboxHandle
+                    ?: error("This Android conversation is missing its mailbox handle.")
+                val deliveryCapability = thread.deliveryCapability
+                    ?: error("This Android conversation is missing its delivery capability.")
+
+                applyPrivacyDelayIfEnabled(PrivacyDelayKind.Delivery)
+                val encrypted = relayClient().fetchAttachment(
+                    mailboxHandle = mailboxHandle,
+                    deliveryCapability = deliveryCapability,
+                    attachmentId = reference.id,
+                )
+                val plaintext = AttachmentCrypto.openAttachment(encrypted, reference)
+                applicationContext.contentResolver.openOutputStream(destinationUri, "w")?.use { output ->
+                    output.write(plaintext)
+                } ?: error("Android could not open the selected destination.")
+                state = state.copy(
+                    isBusy = false,
+                    statusMessage = "Saved ${reference.fileName} to the selected location.",
+                    errorMessage = null,
+                )
+            }.onFailure { error ->
+                state = state.copy(isBusy = false, errorMessage = error.message)
+            }
+        }
+    }
+
     fun selectThread(threadId: String) {
-        state = state.copy(selectedThreadId = threadId, errorMessage = null)
+        state = state.copy(
+            selectedThreadId = threadId,
+            pendingAttachments = if (state.selectedThreadId == threadId) state.pendingAttachments else emptyList(),
+            errorMessage = null,
+        )
     }
 
     fun clearSelectedThread() {
-        state = state.copy(selectedThreadId = null, draftText = "", errorMessage = null)
+        state = state.copy(
+            selectedThreadId = null,
+            draftText = "",
+            pendingAttachments = emptyList(),
+            errorMessage = null,
+        )
     }
 
     fun dismissStatusMessage(expectedMessage: String? = null) {
@@ -217,7 +332,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             val unlocked = BiometricGate.authenticate(
                 activity = activity,
                 executor = activity.mainExecutor,
-                title = "Unlock Notrus Android",
+                title = "Unlock Notrus",
                 subtitle = "Open the encrypted local vault for identities and relay state.",
             )
 
@@ -232,16 +347,17 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 ?: profiles.firstOrNull()
             relaySession = null
 
-            state = state.copy(
-                currentDevice = deviceIdentityProvider.descriptor(applicationContext, appInstanceId),
-                vaultLocked = false,
-                integrityReport = DeviceRiskSignals.capture(applicationContext),
-                profiles = profiles,
-                currentIdentity = current,
-                currentDirectoryCode = current?.directoryCode,
-                statusMessage = "Vault unlocked on this Android device.",
-                errorMessage = null,
-            )
+                state = state.copy(
+                    currentDevice = deviceIdentityProvider.descriptor(applicationContext, appInstanceId),
+                    vaultLocked = false,
+                    integrityReport = DeviceRiskSignals.capture(applicationContext),
+                    profiles = profiles,
+                    currentIdentity = current,
+                    currentDirectoryCode = current?.directoryCode,
+                    pendingAttachments = emptyList(),
+                    statusMessage = "Vault unlocked on this Android device.",
+                    errorMessage = null,
+                )
             refreshDeviceInventory(catalog = catalog, currentDevice = state.currentDevice)
             lastSensitiveAuthAtMs = System.currentTimeMillis()
 
@@ -442,6 +558,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     threads = emptyList(),
                     selectedThreadId = null,
                     draftText = "",
+                    pendingAttachments = emptyList(),
                     importPassphrase = "",
                     statusMessage = when (imported) {
                         is com.notrus.android.model.ImportedRecoveryPayload.Transfer ->
@@ -473,6 +590,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             currentDirectoryCode = current?.directoryCode,
             selectedThreadId = null,
             draftText = "",
+            pendingAttachments = emptyList(),
         )
         refreshDeviceInventory(catalog = updatedCatalog, currentDevice = state.currentDevice)
         if (current != null) {
@@ -528,6 +646,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                         threads = emptyList(),
                         selectedThreadId = null,
                         draftText = "",
+                        pendingAttachments = emptyList(),
                         linkedDeviceEvents = emptyList(),
                         linkedDevices = emptyList(),
                         relayHealth = null,
@@ -544,6 +663,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                         profiles = updatedCatalog.identities.map { it.identity },
                         selectedThreadId = null,
                         draftText = "",
+                        pendingAttachments = emptyList(),
                     )
                     refreshDeviceInventory(catalog = updatedCatalog, currentDevice = state.currentDevice)
                     registerAndSync(nextIdentity)
@@ -663,6 +783,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             threads = visibleThreads,
             selectedThreadId = state.selectedThreadId.takeUnless { it == threadId } ?: visibleThreads.firstOrNull()?.id,
             draftText = if (state.selectedThreadId == threadId) "" else state.draftText,
+            pendingAttachments = if (state.selectedThreadId == threadId) emptyList() else state.pendingAttachments,
             statusMessage = "Deleted the local Android copy of ${threadTitle}.",
             errorMessage = null,
         )
@@ -696,6 +817,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             saveContact(user.id)
             state = state.copy(
                 selectedThreadId = existingThread.id,
+                pendingAttachments = emptyList(),
                 statusMessage = "Opened secure direct chat with ${user.displayName}.",
                 errorMessage = null,
             )
@@ -732,9 +854,10 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         val identity = state.currentIdentity ?: return
         val thread = state.selectedThread ?: return
         val body = state.draftText.trim()
+        val pendingAttachments = state.pendingAttachments
 
-        if (body.isEmpty()) {
-            state = state.copy(errorMessage = "Type a message before sending.")
+        if (body.isEmpty() && pendingAttachments.isEmpty()) {
+            state = state.copy(errorMessage = "Type a message or attach a file before sending.")
             return
         }
         if (!state.transparency.chainValid) {
@@ -745,40 +868,99 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             state = state.copy(errorMessage = transparencyBlockMessage("before Android sends more ciphertext"))
             return
         }
-        if (thread.protocol != DIRECT_PROTOCOL) {
-            state = state.copy(errorMessage = "Android can currently send only standards direct messages.")
-            return
-        }
         if (!thread.supported) {
             state = state.copy(errorMessage = thread.warning ?: "This thread is not writable on Android yet.")
             return
         }
 
-        val remoteUser = thread.participants.firstOrNull { it.id != identity.id }
-        if (remoteUser == null || remoteUser.signalBundle == null) {
-            state = state.copy(errorMessage = "The remote Signal bundle is missing for this thread.")
-            return
-        }
+        when (thread.protocol) {
+            DIRECT_PROTOCOL -> {
+                val remoteUser = thread.participants.firstOrNull { it.id != identity.id }
+                if (remoteUser == null || remoteUser.signalBundle == null) {
+                    state = state.copy(errorMessage = "The remote Signal bundle is missing for this thread.")
+                    return
+                }
+                sendDirectSelectedMessage(
+                    activity = activity,
+                    body = body,
+                    identity = identity,
+                    pendingAttachments = pendingAttachments,
+                    remoteUser = remoteUser,
+                    thread = thread,
+                )
+            }
 
+            GROUP_PROTOCOL -> {
+                val remoteParticipants = thread.participants
+                    .asSequence()
+                    .filter { it.id != identity.id }
+                    .distinctBy { it.id }
+                    .toList()
+                if (remoteParticipants.size < 2) {
+                    state = state.copy(errorMessage = "Android group send requires at least two remote participants.")
+                    return
+                }
+                val missingSignal = remoteParticipants.firstOrNull { it.signalBundle == null }
+                if (missingSignal != null) {
+                    state = state.copy(errorMessage = "${missingSignal.displayName} is missing a Signal bundle for Android group fanout.")
+                    return
+                }
+                sendGroupSelectedMessage(
+                    activity = activity,
+                    body = body,
+                    identity = identity,
+                    pendingAttachments = pendingAttachments,
+                    remoteParticipants = remoteParticipants,
+                    thread = thread,
+                )
+            }
+
+            else -> {
+                state = state.copy(errorMessage = "Android cannot send this protocol yet.")
+            }
+        }
+    }
+
+    private fun sendDirectSelectedMessage(
+        activity: FragmentActivity,
+        body: String,
+        identity: LocalIdentity,
+        pendingAttachments: List<LocalAttachmentDraft>,
+        remoteUser: RelayUser,
+        thread: ConversationThread,
+    ) {
         viewModelScope.launch {
             if (!authorizeSensitiveOperation(activity, "Authorize sending ciphertext from this Android device.")) {
                 return@launch
             }
-            state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Encrypting and sending your Signal message...")
+            state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Encrypting and sending from Android...")
             runCatching {
                 val signalState = identity.standardsSignalState
                     ?: error("This Android profile does not have local Signal state.")
-                val sealed = StandardsSignalClient.encrypt(
-                    state = signalState,
-                    localUserId = identity.id,
-                    plaintext = body,
-                    remoteBundle = remoteUser.signalBundle,
-                    remoteUserId = remoteUser.id,
-                )
                 val mailboxHandle = thread.mailboxHandle
                     ?: error("This Android conversation is missing its current mailbox handle. Sync once, then send again.")
                 val deliveryCapability = thread.deliveryCapability
                     ?: error("This Android conversation is missing its current delivery capability. Sync once, then send again.")
+                val attachmentReferences = uploadPendingAttachments(
+                    identity = identity,
+                    mailboxHandle = mailboxHandle,
+                    deliveryCapability = deliveryCapability,
+                    pendingAttachments = pendingAttachments,
+                    threadId = thread.id,
+                )
+                val standardsPayload = encodeStandardsPayload(
+                    StandardsMessagePayload(
+                        attachments = attachmentReferences,
+                        text = body,
+                    )
+                )
+                val sealed = StandardsSignalClient.encrypt(
+                    state = signalState,
+                    localUserId = identity.id,
+                    plaintext = standardsPayload,
+                    remoteBundle = requireNotNull(remoteUser.signalBundle),
+                    remoteUserId = remoteUser.id,
+                )
                 applyPrivacyDelayIfEnabled(PrivacyDelayKind.Delivery)
                 val messageId = relayClient().postSignalMessage(
                     mailboxHandle = mailboxHandle,
@@ -801,6 +983,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     signalPeerUserId = remoteUser.id,
                     messageCache = threadRecord.messageCache + (
                         messageId to CachedMessageState(
+                            attachments = attachmentReferences,
                             body = body,
                             status = "ok",
                         )
@@ -812,10 +995,158 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                         threadRecords = currentRecord.threadRecords + mapOf(thread.id to updatedThreadRecord),
                     ),
                 )
-                state = state.copy(currentIdentity = updatedIdentity, draftText = "")
+                state = state.copy(
+                    currentIdentity = updatedIdentity,
+                    draftText = "",
+                    pendingAttachments = emptyList(),
+                )
                 registerAndSync(updatedIdentity, preferredThreadId = thread.id)
             }.onFailure { error ->
                 state = state.copy(isBusy = false, errorMessage = error.message)
+            }
+        }
+    }
+
+    private fun sendGroupSelectedMessage(
+        activity: FragmentActivity,
+        body: String,
+        identity: LocalIdentity,
+        pendingAttachments: List<LocalAttachmentDraft>,
+        remoteParticipants: List<RelayUser>,
+        thread: ConversationThread,
+    ) {
+        viewModelScope.launch {
+            if (!authorizeSensitiveOperation(activity, "Authorize sending group ciphertext from this Android device.")) {
+                return@launch
+            }
+            state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Encrypting group fanout and sending from Android...")
+            runCatching {
+                var signalState = identity.standardsSignalState
+                    ?: error("This Android profile does not have local Signal state.")
+                val mailboxHandle = thread.mailboxHandle
+                    ?: error("This Android group is missing its current mailbox handle. Sync once, then send again.")
+                val deliveryCapability = thread.deliveryCapability
+                    ?: error("This Android group is missing its current delivery capability. Sync once, then send again.")
+
+                val attachmentReferences = uploadPendingAttachments(
+                    identity = identity,
+                    mailboxHandle = mailboxHandle,
+                    deliveryCapability = deliveryCapability,
+                    pendingAttachments = pendingAttachments,
+                    threadId = thread.id,
+                )
+                val encodedPayload = encodeStandardsPayload(
+                    StandardsMessagePayload(
+                        attachments = attachmentReferences,
+                        text = body,
+                    )
+                )
+
+                val recipientEnvelopes = buildList {
+                    for (participant in remoteParticipants.sortedBy { it.id }) {
+                        val sealed = StandardsSignalClient.encrypt(
+                            state = signalState,
+                            localUserId = identity.id,
+                            plaintext = encodedPayload,
+                            remoteBundle = requireNotNull(participant.signalBundle),
+                            remoteUserId = participant.id,
+                        )
+                        signalState = sealed.state
+                        add(
+                            MlsFanoutRecipientEnvelope(
+                                messageKind = sealed.messageKind,
+                                toUserId = participant.id,
+                                wireMessage = sealed.wireMessage,
+                            ),
+                        )
+                    }
+                }
+
+                val fanoutWire = encodeMlsFanoutEnvelope(
+                    MlsFanoutEnvelope(
+                        format = MLS_FANOUT_FORMAT,
+                        senderId = identity.id,
+                        version = 1,
+                        recipients = recipientEnvelopes,
+                    ),
+                )
+
+                applyPrivacyDelayIfEnabled(PrivacyDelayKind.Delivery)
+                val messageId = relayClient().postMlsMessage(
+                    mailboxHandle = mailboxHandle,
+                    deliveryCapability = deliveryCapability,
+                    wireMessage = fanoutWire,
+                )
+
+                val refreshed = StandardsSignalClient.refreshBundle(signalState)
+                val updatedIdentity = identity.copy(
+                    standardsSignalReady = true,
+                    standardsSignalBundle = refreshed.bundle,
+                    standardsSignalState = refreshed.state,
+                )
+                val currentRecord = currentStoredRecord(identity.id)
+                    ?: error("The local Android profile record is missing.")
+                val threadRecord = currentRecord.threadRecords[thread.id]
+                    ?: ConversationThreadRecord(protocol = GROUP_PROTOCOL)
+                val updatedThreadRecord = threadRecord.copy(
+                    protocol = GROUP_PROTOCOL,
+                    signalPeerUserId = null,
+                    messageCache = threadRecord.messageCache + (
+                        messageId to CachedMessageState(
+                            attachments = attachmentReferences,
+                            body = body,
+                            status = "ok",
+                        )
+                    ),
+                )
+                persistStoredRecord(
+                    currentRecord.copy(
+                        identity = updatedIdentity,
+                        threadRecords = currentRecord.threadRecords + mapOf(thread.id to updatedThreadRecord),
+                    ),
+                )
+                state = state.copy(
+                    currentIdentity = updatedIdentity,
+                    draftText = "",
+                    pendingAttachments = emptyList(),
+                )
+                registerAndSync(updatedIdentity, preferredThreadId = thread.id)
+            }.onFailure { error ->
+                state = state.copy(isBusy = false, errorMessage = error.message)
+            }
+        }
+    }
+
+    private suspend fun uploadPendingAttachments(
+        identity: LocalIdentity,
+        mailboxHandle: String,
+        deliveryCapability: String,
+        pendingAttachments: List<LocalAttachmentDraft>,
+        threadId: String,
+    ): List<SecureAttachmentReference> {
+        if (pendingAttachments.isEmpty()) {
+            return emptyList()
+        }
+        return buildList {
+            for (draft in pendingAttachments) {
+                val plaintext = readAttachmentBytes(
+                    uri = Uri.parse(draft.uri),
+                    expectedName = draft.fileName,
+                )
+                val sealedAttachment = AttachmentCrypto.sealAttachment(
+                    data = plaintext,
+                    fileName = draft.fileName,
+                    mediaType = draft.mediaType,
+                    senderId = identity.id,
+                    threadId = threadId,
+                )
+                applyPrivacyDelayIfEnabled(PrivacyDelayKind.Delivery)
+                relayClient().uploadAttachment(
+                    mailboxHandle = mailboxHandle,
+                    deliveryCapability = deliveryCapability,
+                    attachment = sealedAttachment.request,
+                )
+                add(sealedAttachment.reference)
             }
         }
     }
@@ -965,12 +1296,13 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 threads = materialized.threads,
                 relayHealth = relayHealth,
                 selectedThreadId = selectedThreadId,
+                pendingAttachments = if (selectedThreadId == state.selectedThreadId) state.pendingAttachments else emptyList(),
                 statusMessage = if (!transparency.chainValid) {
                     "Android sync completed, but transparency verification needs attention before you trust new keys or create new chats."
                 } else if (sync.directoryDiscoveryMode == "exact-username-or-invite" || sync.directoryDiscoveryMode == "username-or-invite") {
-                    "Android sync complete. Search contacts by username or invite code, save them locally, then open direct Signal chats from this device."
+                    "Android sync complete. Search contacts by username or invite code, save them locally, then open secure chats and compatible group threads from this device."
                 } else {
-                    "Android sync complete. Contacts and direct Signal threads are ready on this device."
+                    "Android sync complete. Contacts, secure direct chats, and compatible group threads are ready on this device."
                 },
                 errorMessage = null,
                 isBusy = false,
@@ -1000,23 +1332,39 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 usersById[userId] ?: placeholderUser(userId)
             }
 
-            if (thread.protocol == DIRECT_PROTOCOL && participants.size == 2) {
-                val materialized = materializeDirectSignalThread(
-                    thread = thread,
-                    participants = participants,
-                    identity = updatedIdentity,
-                    existingRecord = updatedRecords[thread.id],
-                )
-                updatedIdentity = materialized.identity
-                updatedRecords[thread.id] = materialized.record
-                materialized.thread
-            } else {
-                materializeUnsupportedThread(
-                    thread = thread,
-                    participants = participants,
-                    existingRecord = updatedRecords[thread.id],
-                    identityId = updatedIdentity.id,
-                )
+            when {
+                thread.protocol == DIRECT_PROTOCOL && participants.size == 2 -> {
+                    val materialized = materializeDirectSignalThread(
+                        thread = thread,
+                        participants = participants,
+                        identity = updatedIdentity,
+                        existingRecord = updatedRecords[thread.id],
+                    )
+                    updatedIdentity = materialized.identity
+                    updatedRecords[thread.id] = materialized.record
+                    materialized.thread
+                }
+
+                thread.protocol == GROUP_PROTOCOL && participants.size >= 3 -> {
+                    val materialized = materializeStandardsGroupThread(
+                        thread = thread,
+                        participants = participants,
+                        identity = updatedIdentity,
+                        existingRecord = updatedRecords[thread.id],
+                    )
+                    updatedIdentity = materialized.identity
+                    updatedRecords[thread.id] = materialized.record
+                    materialized.thread
+                }
+
+                else -> {
+                    materializeUnsupportedThread(
+                        thread = thread,
+                        participants = participants,
+                        existingRecord = updatedRecords[thread.id],
+                        identityId = updatedIdentity.id,
+                    )
+                }
             }
         }
         val visibleConversations = conversations.filter { updatedRecords[it.id]?.hiddenAt == null }
@@ -1109,11 +1457,13 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                             remoteUserId = message.senderId,
                             wireMessage = message.wireMessage,
                         )
+                        val payload = decodeStandardsPayload(opened.plaintext)
                         signalState = opened.state
                         record.copy(
                             messageCache = record.messageCache + (
                                 message.id to CachedMessageState(
-                                    body = normalizeLegacyDisplayBody(opened.plaintext),
+                                    attachments = payload.attachments,
+                                    body = payload.text,
                                     status = "ok",
                                 )
                             ),
@@ -1157,7 +1507,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             } else {
                 DecryptedMessage(
                     attachments = cached?.attachments ?: emptyList(),
-                    body = normalizeLegacyDisplayBody(cached?.body ?: "Local plaintext is unavailable on this Android device for that Signal message."),
+                    body = cached?.body ?: "Local plaintext is unavailable on this Android device for that Signal message.",
                     createdAt = message.createdAt,
                     id = message.id,
                     senderId = message.senderId,
@@ -1189,6 +1539,224 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
+    private fun materializeStandardsGroupThread(
+        thread: RelayThread,
+        participants: List<RelayUser>,
+        identity: LocalIdentity,
+        existingRecord: ConversationThreadRecord?,
+    ): MaterializedThread {
+        val fanoutCompatible = isMlsFanoutThread(thread)
+        var signalState = identity.standardsSignalState
+            ?: return MaterializedThread(
+                identity = identity,
+                record = existingRecord ?: ConversationThreadRecord(protocol = GROUP_PROTOCOL),
+                thread = materializeUnsupportedThread(
+                    thread = thread,
+                    participants = participants,
+                    existingRecord = existingRecord,
+                    identityId = identity.id,
+                    warning = "This Android profile is missing local Signal state required for MLS-compatible group fanout.",
+                ),
+            )
+
+        var record = existingRecord ?: ConversationThreadRecord(protocol = GROUP_PROTOCOL)
+        if (
+            record.processedMessageCount > thread.messages.size ||
+            (
+                record.processedMessageCount > 0 &&
+                    thread.messages.getOrNull(record.processedMessageCount - 1)?.id != record.lastProcessedMessageId
+                )
+        ) {
+            record = ConversationThreadRecord(
+                hiddenAt = record.hiddenAt,
+                localTitle = record.localTitle,
+                messageCache = emptyMap(),
+                lastProcessedMessageId = null,
+                processedMessageCount = 0,
+                protocol = GROUP_PROTOCOL,
+                signalPeerUserId = null,
+            )
+        }
+
+        var decodeFailures = 0
+        for (message in thread.messages.drop(record.processedMessageCount)) {
+            record = when {
+                message.senderId == identity.id -> {
+                    record.copy(
+                        messageCache = if (record.messageCache.containsKey(message.id)) {
+                            record.messageCache
+                        } else {
+                            record.messageCache + (
+                                message.id to CachedMessageState(
+                                    body = normalizeLegacyDisplayBody("Sent from this Android device."),
+                                    status = "missing-local-state",
+                                )
+                            )
+                        },
+                    )
+                }
+
+                !fanoutCompatible -> {
+                    decodeFailures += 1
+                    record.copy(
+                        messageCache = record.messageCache + (
+                            message.id to CachedMessageState(
+                                body = normalizeLegacyDisplayBody("This group uses native MLS envelopes that are not linked into this Android build yet."),
+                                status = "unsupported",
+                            )
+                        ),
+                    )
+                }
+
+                message.messageKind == "mls-application" && !message.wireMessage.isNullOrBlank() -> {
+                    val envelope = decodeMlsFanoutEnvelope(message.wireMessage)
+                    if (envelope == null || envelope.senderId != message.senderId) {
+                        decodeFailures += 1
+                        record.copy(
+                            messageCache = record.messageCache + (
+                                message.id to CachedMessageState(
+                                    body = normalizeLegacyDisplayBody("The group envelope could not be parsed on Android."),
+                                    status = "invalid",
+                                )
+                            ),
+                        )
+                    } else {
+                        val recipient = envelope.recipients.firstOrNull { it.toUserId == identity.id }
+                        if (recipient == null) {
+                            decodeFailures += 1
+                            record.copy(
+                                messageCache = record.messageCache + (
+                                    message.id to CachedMessageState(
+                                        body = normalizeLegacyDisplayBody("This Android device did not receive a recipient envelope for that group message."),
+                                        status = "invalid",
+                                    )
+                                ),
+                            )
+                        } else {
+                            try {
+                                val opened = StandardsSignalClient.decrypt(
+                                    state = signalState,
+                                    localUserId = identity.id,
+                                    messageKind = recipient.messageKind,
+                                    remoteUserId = message.senderId,
+                                    wireMessage = recipient.wireMessage,
+                                )
+                                val payload = decodeStandardsPayload(opened.plaintext)
+                                signalState = opened.state
+                                record.copy(
+                                    messageCache = record.messageCache + (
+                                        message.id to CachedMessageState(
+                                            attachments = payload.attachments,
+                                            body = payload.text,
+                                            status = "ok",
+                                        )
+                                    ),
+                                )
+                            } catch (error: Exception) {
+                                decodeFailures += 1
+                                record.copy(
+                                    messageCache = record.messageCache + (
+                                        message.id to CachedMessageState(
+                                            body = normalizeLegacyDisplayBody(error.message ?: "Android could not decrypt that group envelope."),
+                                            status = "invalid",
+                                        )
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                }
+
+                else -> {
+                    decodeFailures += 1
+                    record.copy(
+                        messageCache = record.messageCache + (
+                            message.id to CachedMessageState(
+                                body = normalizeLegacyDisplayBody("The group message was missing its authenticated envelope payload."),
+                                status = "invalid",
+                            )
+                        ),
+                    )
+                }
+            }.copy(
+                lastProcessedMessageId = message.id,
+                processedMessageCount = record.processedMessageCount + 1,
+                protocol = GROUP_PROTOCOL,
+                signalPeerUserId = null,
+            )
+        }
+
+        val refreshed = StandardsSignalClient.refreshBundle(signalState)
+        val updatedIdentity = identity.copy(
+            standardsMlsReady = fanoutCompatible,
+            standardsSignalReady = true,
+            standardsSignalBundle = refreshed.bundle,
+            standardsSignalState = refreshed.state,
+        )
+
+        val fallbackMessages = thread.messages.mapNotNull { message ->
+            val cached = record.messageCache[message.id]
+            if (cached?.hidden == true) {
+                null
+            } else {
+                DecryptedMessage(
+                    attachments = cached?.attachments ?: emptyList(),
+                    body = cached?.body ?: "Local plaintext unavailable on this Android device for that group message.",
+                    createdAt = message.createdAt,
+                    id = message.id,
+                    senderId = message.senderId,
+                    senderName = participants.firstOrNull { it.id == message.senderId }?.displayName ?: "Unknown user",
+                    status = cached?.status ?: "missing-local-state",
+                )
+            }
+        }
+
+        val warning = when {
+            !fanoutCompatible -> "This thread uses native RFC 9420 MLS envelopes that this Android build cannot decrypt yet."
+            decodeFailures > 0 -> "One or more group envelopes failed decryption on this Android device."
+            else -> null
+        }
+
+        return MaterializedThread(
+            identity = updatedIdentity,
+            record = record,
+            thread = ConversationThread(
+                deliveryCapability = thread.deliveryCapability,
+                id = thread.id,
+                title = resolveThreadTitle(thread, participants, updatedIdentity.id, record.localTitle),
+                mailboxHandle = thread.mailboxHandle,
+                protocol = thread.protocol,
+                protocolLabel = ProtocolCatalog.label(thread.protocol),
+                participants = participants,
+                participantIds = thread.participantIds,
+                messages = fallbackMessages,
+                messageCount = thread.messages.size,
+                attachmentCount = thread.attachmentCount,
+                lastActivityAt = relayThreadLastActivity(thread),
+                supported = fanoutCompatible,
+                warning = warning,
+            ),
+        )
+    }
+
+    private fun isMlsFanoutThread(thread: RelayThread): Boolean {
+        if (thread.protocol != GROUP_PROTOCOL) {
+            return false
+        }
+        val bootstrap = thread.mlsBootstrap
+        if (bootstrap != null) {
+            if (bootstrap.ciphersuite.equals(MLS_FANOUT_CIPHERSUITE, ignoreCase = true)) {
+                return true
+            }
+            if (bootstrap.groupId.startsWith("fanout-signal:", ignoreCase = true)) {
+                return true
+            }
+        }
+        return thread.messages.any { message ->
+            !message.wireMessage.isNullOrBlank() && decodeMlsFanoutEnvelope(message.wireMessage) != null
+        }
+    }
+
     private fun materializeUnsupportedThread(
         thread: RelayThread,
         participants: List<RelayUser>,
@@ -1209,7 +1777,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
         val finalWarning = warning ?: when (thread.protocol) {
-            GROUP_PROTOCOL -> "MLS groups can be inspected on Android, but full native group send support is not active in this alpha build yet."
+            GROUP_PROTOCOL -> "This group thread is not writable on Android in this build."
             else -> "This thread uses ${ProtocolCatalog.label(thread.protocol)}, which is not writable on Android yet."
         }
         return ConversationThread(
@@ -1581,6 +2149,168 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             fingerprint = "unknown",
             createdAt = Instant.EPOCH.toString(),
         )
+
+    private fun resolveAttachmentDraft(uri: Uri): LocalAttachmentDraft {
+        val resolver = applicationContext.contentResolver
+        var displayName = "attachment.bin"
+        var byteLength = -1L
+        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
+            ?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIndex >= 0) {
+                        displayName = cursor.getString(nameIndex) ?: displayName
+                    }
+                    val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+                        byteLength = cursor.getLong(sizeIndex)
+                    }
+                }
+            }
+        val mediaType = resolver.getType(uri).orEmpty().ifBlank { "application/octet-stream" }
+        if (byteLength > AttachmentCrypto.MaxAttachmentSizeBytes) {
+            error("Android attachments are limited to ${AttachmentCrypto.MaxAttachmentSizeBytes / (1024 * 1024)} MB per file.")
+        }
+
+        return LocalAttachmentDraft(
+            id = UUID.randomUUID().toString().lowercase(),
+            byteLength = byteLength.coerceAtLeast(0L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+            fileName = AttachmentCrypto.sanitizeFileName(displayName),
+            mediaType = mediaType,
+            uri = uri.toString(),
+        )
+    }
+
+    private fun readAttachmentBytes(uri: Uri, expectedName: String): ByteArray {
+        val bytes = applicationContext.contentResolver.openInputStream(uri)?.use { stream ->
+            stream.readBytes()
+        } ?: error("Android could not open $expectedName.")
+        if (bytes.size > AttachmentCrypto.MaxAttachmentSizeBytes) {
+            error("$expectedName exceeds Android's ${AttachmentCrypto.MaxAttachmentSizeBytes / (1024 * 1024)} MB attachment limit.")
+        }
+        return bytes
+    }
+
+    private fun encodeStandardsPayload(payload: StandardsMessagePayload): String {
+        val attachments = JSONArray()
+        payload.attachments.forEach { reference ->
+            attachments.put(
+                JSONObject()
+                    .put("attachmentKey", reference.attachmentKey)
+                    .put("byteLength", reference.byteLength)
+                    .put("fileName", reference.fileName)
+                    .put("id", reference.id)
+                    .put("mediaType", reference.mediaType)
+                    .put("sha256", reference.sha256)
+            )
+        }
+        return JSONObject()
+            .put("attachments", attachments)
+            .put("text", payload.text)
+            .put("version", 1)
+            .toString()
+    }
+
+    private fun encodeMlsFanoutEnvelope(envelope: MlsFanoutEnvelope): String {
+        val recipients = JSONArray()
+        envelope.recipients.forEach { recipient ->
+            recipients.put(
+                JSONObject()
+                    .put("messageKind", recipient.messageKind)
+                    .put("toUserId", recipient.toUserId)
+                    .put("wireMessage", recipient.wireMessage),
+            )
+        }
+        return JSONObject()
+            .put("format", envelope.format)
+            .put("senderId", envelope.senderId)
+            .put("version", envelope.version)
+            .put("recipients", recipients)
+            .toString()
+    }
+
+    private fun decodeMlsFanoutEnvelope(wireMessage: String?): MlsFanoutEnvelope? {
+        if (wireMessage.isNullOrBlank()) {
+            return null
+        }
+        val json = runCatching { JSONObject(wireMessage) }.getOrNull() ?: return null
+        if (!json.optString("format").equals(MLS_FANOUT_FORMAT, ignoreCase = false)) {
+            return null
+        }
+        val senderId = json.optString("senderId").trim()
+        if (senderId.isBlank()) {
+            return null
+        }
+        val version = json.optInt("version", 0)
+        if (version != 1) {
+            return null
+        }
+        val recipients = mutableListOf<MlsFanoutRecipientEnvelope>()
+        val recipientArray = json.optJSONArray("recipients") ?: JSONArray()
+        for (index in 0 until recipientArray.length()) {
+            val recipient = recipientArray.optJSONObject(index) ?: continue
+            val messageKind = recipient.optString("messageKind").trim()
+            val toUserId = recipient.optString("toUserId").trim()
+            val recipientWire = recipient.optString("wireMessage").trim()
+            if (messageKind.isBlank() || toUserId.isBlank() || recipientWire.isBlank()) {
+                continue
+            }
+            recipients += MlsFanoutRecipientEnvelope(
+                messageKind = messageKind,
+                toUserId = toUserId,
+                wireMessage = recipientWire,
+            )
+        }
+        if (recipients.isEmpty()) {
+            return null
+        }
+        return MlsFanoutEnvelope(
+            format = MLS_FANOUT_FORMAT,
+            senderId = senderId,
+            version = version,
+            recipients = recipients,
+        )
+    }
+
+    private fun decodeStandardsPayload(plaintext: String): StandardsMessagePayload {
+        val normalizedLegacy = normalizeLegacyDisplayBody(plaintext)
+        val envelope = runCatching { JSONObject(plaintext) }.getOrNull()
+            ?: return StandardsMessagePayload(attachments = emptyList(), text = normalizedLegacy)
+        if (envelope.optInt("version", 0) != 1) {
+            return StandardsMessagePayload(attachments = emptyList(), text = normalizedLegacy)
+        }
+
+        val text = envelope.optString("text", "")
+        val attachments = buildList {
+            val array = envelope.optJSONArray("attachments") ?: JSONArray()
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val id = item.optString("id").trim()
+                val attachmentKey = item.optString("attachmentKey").trim()
+                val fileName = item.optString("fileName").trim()
+                val mediaType = item.optString("mediaType").trim()
+                val sha256 = item.optString("sha256").trim()
+                if (id.isBlank() || attachmentKey.isBlank() || fileName.isBlank() || mediaType.isBlank() || sha256.isBlank()) {
+                    continue
+                }
+                add(
+                    SecureAttachmentReference(
+                        attachmentKey = attachmentKey,
+                        byteLength = item.optInt("byteLength", 0).coerceAtLeast(0),
+                        fileName = fileName,
+                        id = id,
+                        mediaType = mediaType,
+                        sha256 = sha256,
+                    )
+                )
+            }
+        }
+
+        return StandardsMessagePayload(
+            attachments = attachments,
+            text = text,
+        )
+    }
 
     private fun normalizeLegacyDisplayBody(raw: String): String {
         val trimmed = raw.trim()

@@ -39,13 +39,13 @@ Each item below should be re-verified with one or more of:
 | 16 | App sandbox and inter-app boundaries | `pass` |
 | 17 | Secure attachment handling | `pass` |
 | 18 | Memory safety and strict parsing | `pass` |
-| 19 | Supply-chain security | `partial` |
+| 19 | Supply-chain security | `pass` |
 | 20 | Secure UX defaults | `pass` |
 | 21 | Minimal logging and telemetry | `pass` |
 | 22 | Abuse controls | `pass` |
 | 23 | Adversarial testing | `pass` |
 | 24 | External audit | `external` |
-| 25 | Platform-specific must-haves | `partial` |
+| 25 | Platform-specific must-haves | `pass` |
 
 ## 1. Threat model first
 
@@ -263,11 +263,12 @@ What exists:
 - Linked-device registration, listing, security events, and signed revocation now exist on the relay in [server.js](server.js).
 - macOS and Android each create a distinct device-management key and surface linked devices in their native clients in [DeviceSecretStore.swift](native/macos/NotrusMac/Sources/DeviceSecretStore.swift), [NotrusMacApp.swift](native/macos/NotrusMac/Sources/NotrusMacApp.swift), [DeviceIdentityProvider.kt](native/android/NotrusAndroid/app/src/main/java/com/notrus/android/security/DeviceIdentityProvider.kt), and [NotrusAndroidApp.kt](native/android/NotrusAndroid/app/src/main/java/com/notrus/android/ui/NotrusAndroidApp.kt).
 - Recovery-authorized account reset now revokes all linked devices at once, and direct revoke is available without conflating devices with conversation participants.
+- Relay session capabilities are now checked against current device-link state on every privileged v2 request, and device revoke invalidates revoked-device sessions and mailbox capabilities immediately in [server.js](server.js).
 - The live proof in [test-device-membership.mjs](scripts/test-device-membership.mjs) verifies distinct linked devices, signed revoke, revoked-device lockout, and thread-membership separation.
 
 Re-verify with:
 - inspect [DEVICE_MODEL.md](DEVICE_MODEL.md)
-- require per-device keys and visible device membership before upgrading
+- run `npm run test:device-membership`
 
 ## 14. Group chat is harder than 1:1
 
@@ -318,13 +319,14 @@ Status:
 `pass`
 
 What exists:
-- Attachments are now encrypted client-side with separate attachment keys in [NotrusCrypto.swift](native/macos/NotrusMac/Sources/NotrusCrypto.swift) and stored as ciphertext-only blobs on the relay in [server.js](server.js).
-- The native app imports files only through explicit `NSOpenPanel`, never auto-previews, never auto-opens, and only writes decrypted bytes through explicit `NSSavePanel` in [AttachmentGateway.swift](native/macos/NotrusMac/Sources/AttachmentGateway.swift).
-- The conversation UI now treats attachments as explicit save actions rather than inline previews in [NotrusMacApp.swift](native/macos/NotrusMac/Sources/NotrusMacApp.swift).
-- Native tests cover attachment ciphertext round-trip and filename sanitization in [NotrusMacCheckpointTests.swift](native/macos/NotrusMac/Tests/NotrusMacCheckpointTests.swift), and the live relay proof confirms ciphertext-only attachment storage in [test-content-boundary.mjs](scripts/test-content-boundary.mjs).
+- Attachments are encrypted client-side with separate attachment keys in both [NotrusCrypto.swift](native/macos/NotrusMac/Sources/NotrusCrypto.swift) and [AttachmentCrypto.kt](native/android/NotrusAndroid/app/src/main/java/com/notrus/android/security/AttachmentCrypto.kt), and are stored as ciphertext-only blobs on the relay in [server.js](server.js).
+- The native clients only import and export attachments through explicit user document pickers (`NSOpenPanel`/`NSSavePanel` on macOS and SAF document pickers on Android), with no inline plaintext preview or auto-open path.
+- The conversation UIs treat attachments as explicit save actions in both [NotrusMacApp.swift](native/macos/NotrusMac/Sources/NotrusMacApp.swift) and [NotrusAndroidApp.kt](native/android/NotrusAndroid/app/src/main/java/com/notrus/android/ui/NotrusAndroidApp.kt).
+- Native tests cover attachment round-trip and integrity checks on Android in [AndroidLocalSecurityInstrumentedTest.kt](native/android/NotrusAndroid/app/src/androidTest/java/com/notrus/android/security/AndroidLocalSecurityInstrumentedTest.kt), plus relay attachment upload/fetch path parsing in [RelayClientInstrumentedTest.kt](native/android/NotrusAndroid/app/src/androidTest/java/com/notrus/android/relay/RelayClientInstrumentedTest.kt), and the live relay proof confirms ciphertext-only attachment storage in [test-content-boundary.mjs](scripts/test-content-boundary.mjs).
 
 Re-verify with:
 - run `swift test --package-path native/macos/NotrusMac`
+- run `cd native/android/NotrusAndroid && ./gradlew connectedDebugAndroidTest`
 - run `env NOTRUS_CONTENT_RELAY_ORIGIN=http://127.0.0.1:3010 npm run test:content-boundary`
 
 ## 18. Memory safety and unsafe parsing are major practical risks
@@ -346,20 +348,24 @@ Re-verify with:
 ## 19. Supply chain security is mandatory
 
 Status:
-`partial`
+`pass`
 
 What exists:
 - The repo now generates an SBOM with [generate-sbom.mjs](scripts/generate-sbom.mjs), scans the tracked source tree for obvious secrets with [scan-secrets.mjs](scripts/scan-secrets.mjs), and documents the release path in [SECURITY_RELEASE.md](SECURITY_RELEASE.md).
-- The packaging flow now emits checksums for both macOS and Android artifacts, supports real codesigning through `NOTRUS_CODESIGN_IDENTITY`, and packages both clients together in [package-mac-app.sh](scripts/package-mac-app.sh) and [package-android-app.sh](scripts/package-android-app.sh).
+- The packaging flow now emits checksums for both macOS and Android artifacts, supports real codesigning through `NOTRUS_CODESIGN_IDENTITY`, and keeps both native packaging paths in [package-mac-app.sh](scripts/package-mac-app.sh) and [package-android-app.sh](scripts/package-android-app.sh).
+- Production packaging now enforces explicit release governance through [verify-release-governance.mjs](scripts/verify-release-governance.mjs), with a two-reviewer approval artifact template in [approvals.template.json](config/release/approvals.template.json).
+- Android production packaging now blocks debug-signing fallback, requires external keystore credentials, and verifies signer metadata through `apksigner` in [package-android-app.sh](scripts/package-android-app.sh) and [build.gradle.kts](native/android/NotrusAndroid/app/build.gradle.kts).
+- macOS production packaging now hard-fails without release governance approval, non-adhoc signing, and notarization inputs in [package-mac-app.sh](scripts/package-mac-app.sh).
 - GitHub automation now runs the security suite and both native build jobs in [.github/workflows/security.yml](.github/workflows/security.yml), and dependency update scaffolding exists in [.github/dependabot.yml](.github/dependabot.yml).
-
-Why not `pass`:
-- Two-person release control and production signing-key custody are documented but not enforceable from this repository alone.
-- The current packaged app in this workspace is still ad-hoc signed unless a real Developer ID identity is provided.
+- The internal security suite now runs against an isolated ephemeral relay through [test-security-suite.mjs](scripts/test-security-suite.mjs), removing stale-state flakiness from local verification.
 
 Re-verify with:
 - run `npm run scan:secrets`
 - run `npm run generate:sbom`
+- run `npm run test:release-governance`
+- run `npm run test:security-suite`
+- run `NOTRUS_RELEASE_MODE=production zsh scripts/package-mac-app.sh` and confirm it fails without governance/signing inputs
+- run `NOTRUS_RELEASE_MODE=production zsh scripts/package-android-app.sh` and confirm it fails without governance/signing inputs
 - inspect [SECURITY_RELEASE.md](SECURITY_RELEASE.md)
 
 ## 20. The UX must make secure behavior the easy behavior
@@ -399,6 +405,7 @@ Status:
 
 What exists:
 - Relay-side rate limits now exist for IPs, users, and privacy-preserving app-instance identifiers in [server.js](server.js).
+- Abuse-report submission now requires an authenticated session and enforces reporter identity binding in [server.js](server.js).
 - The native app now supports local block/unblock plus minimal-evidence abuse reports in [AppModel.swift](native/macos/NotrusMac/Sources/AppModel.swift), [NotrusMacApp.swift](native/macos/NotrusMac/Sources/NotrusMacApp.swift), and the relay endpoint in [server.js](server.js).
 - The adversarial relay suite exercises malformed abuse-report inputs in [test-adversarial-inputs.mjs](scripts/test-adversarial-inputs.mjs).
 
@@ -408,7 +415,7 @@ Notes:
 
 Re-verify with:
 - inspect rate-limit logic in [server.js](server.js)
-- add moderation-safe abuse flows
+- run `npm run test:abuse-controls`
 
 ## 23. Testing needs to be adversarial
 
@@ -417,8 +424,10 @@ Status:
 
 What exists:
 - Native checkpoint tests now cover contact verification, rollback rejection, backup/restore, attachment hygiene, and blocked-contact persistence in [NotrusMacCheckpointTests.swift](native/macos/NotrusMac/Tests/NotrusMacCheckpointTests.swift).
+- Android connected tests now cover local encrypted attachment handling plus recovery archive/import integrity and recovery-authority reconstruction in [AndroidLocalSecurityInstrumentedTest.kt](native/android/NotrusAndroid/app/src/androidTest/java/com/notrus/android/security/AndroidLocalSecurityInstrumentedTest.kt).
 - Protocol vectors, replay tests, and tamper rejection now run in [lib.rs](native/protocol-core/src/lib.rs).
 - Live relay proofs now cover metadata boundaries, ciphertext-only content boundaries, and adversarial malformed-input handling in [test-metadata-boundary.mjs](scripts/test-metadata-boundary.mjs), [test-content-boundary.mjs](scripts/test-content-boundary.mjs), and [test-adversarial-inputs.mjs](scripts/test-adversarial-inputs.mjs).
+- Recovery-authorized account-reset lifecycle and post-delete username rebinding proofs now run in [test-recovery-lifecycle.mjs](scripts/test-recovery-lifecycle.mjs).
 - CI now runs the internal security proof suite on every change in [.github/workflows/security.yml](.github/workflows/security.yml).
 
 Notes:
@@ -437,6 +446,7 @@ Status:
 
 What exists:
 - No external crypto review or MASVS assessment has been completed.
+- External-audit handoff scope and closure process are now documented in [EXTERNAL_AUDIT.md](EXTERNAL_AUDIT.md).
 
 Why it is `external`:
 - This item cannot be honestly closed by repository changes alone.
@@ -449,25 +459,26 @@ Re-verify with:
 ## 25. Platform-specific must-haves
 
 Status:
-`partial`
+`pass`
 
 What exists:
 - macOS native secret catalog protection in [DeviceSecretStore.swift](native/macos/NotrusMac/Sources/DeviceSecretStore.swift)
 - macOS ATS enforcement in [package-mac-app.sh](scripts/package-mac-app.sh) and [TransportSecurityPolicy.swift](native/macos/NotrusMac/Sources/TransportSecurityPolicy.swift)
 - macOS LocalAuthentication gating in [DeviceSecretStore.swift](native/macos/NotrusMac/Sources/DeviceSecretStore.swift)
-- macOS DeviceCheck-backed risk-signal capture in [DeviceRiskSignals.swift](native/macos/NotrusMac/Sources/DeviceRiskSignals.swift)
+- macOS DeviceCheck-backed risk-signal capture now includes token forwarding to relay bootstrap in [DeviceRiskSignals.swift](native/macos/NotrusMac/Sources/DeviceRiskSignals.swift) and [Models.swift](native/macos/NotrusMac/Sources/Models.swift)
 - macOS desktop-risk handling for imports, exports, previews, and local files in [PLATFORM_BOUNDARIES.md](PLATFORM_BOUNDARIES.md) and [AttachmentGateway.swift](native/macos/NotrusMac/Sources/AttachmentGateway.swift)
 - Android Keystore and StrongBox-aware identity and device keys in [StrongBoxIdentityProvider.kt](native/android/NotrusAndroid/app/src/main/java/com/notrus/android/security/StrongBoxIdentityProvider.kt) and [DeviceIdentityProvider.kt](native/android/NotrusAndroid/app/src/main/java/com/notrus/android/security/DeviceIdentityProvider.kt)
 - Android BiometricPrompt gating in [BiometricGate.kt](native/android/NotrusAndroid/app/src/main/java/com/notrus/android/security/BiometricGate.kt)
 - Android network security and backup exclusions in [AndroidManifest.xml](native/android/NotrusAndroid/app/src/main/AndroidManifest.xml), [network_security_config.xml](native/android/NotrusAndroid/app/src/main/res/xml/network_security_config.xml), [backup_rules.xml](native/android/NotrusAndroid/app/src/main/res/xml/backup_rules.xml), and [data_extraction_rules.xml](native/android/NotrusAndroid/app/src/main/res/xml/data_extraction_rules.xml)
 - Android risk signals and linked-device controls in [DeviceRiskSignals.kt](native/android/NotrusAndroid/app/src/main/java/com/notrus/android/security/DeviceRiskSignals.kt) and [NotrusAndroidApp.kt](native/android/NotrusAndroid/app/src/main/java/com/notrus/android/ui/NotrusAndroidApp.kt)
-
-Why not `pass`:
-- Google Play Integrity token verification and Apple DeviceCheck server verification are not yet implemented end to end.
-- The native clients use platform-native keys, biometric gating, transport lockdown, backup exclusions, and attestation-ready device keys, but the vendor-attestation validation loop still remains below the ideal bar.
+- Relay-side attestation enforcement now supports Android key-attestation verification, Apple DeviceCheck verification, and Android Play Integrity token verification through [server.js](server.js) and [attestation.js](attestation.js).
+- End-to-end attestation enforcement tests now verify acceptance/rejection behavior for all three attestation gates in [test-attestation-enforcement.mjs](scripts/test-attestation-enforcement.mjs).
 
 Re-verify with:
-- compare both platforms against the platform-specific checklist from the security program
+- run `npm run test:attestation-service`
+- run `npm run test:attestation-enforcement`
+- run `source scripts/swift-env.sh && swift build --package-path native/macos/NotrusMac`
+- run `cd native/android/NotrusAndroid && GRADLE_USER_HOME=/Users/tim/Documents/Playground/.build/gradle-home/android ./gradlew :app:compileDebugKotlin`
 
 ## Working rule for future sessions
 

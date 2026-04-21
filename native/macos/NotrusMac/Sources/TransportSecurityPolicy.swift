@@ -7,7 +7,7 @@ enum TransportSecurityError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .insecureOrigin(let origin):
-            return "Notrus Mac only allows `http://localhost` and `http://127.0.0.1` for local development. Use HTTPS for relay URLs such as \(origin)."
+            return "Notrus only allows `http://localhost` and `http://127.0.0.1` for local development. Use HTTPS for relay URLs such as \(origin)."
         case .invalidOrigin:
             return "The relay URL is invalid."
         }

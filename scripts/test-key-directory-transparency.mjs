@@ -140,6 +140,7 @@ async function main() {
     env: {
       ...process.env,
       NOTRUS_DATA_DIR: path.join(tempDir, "relay-data"),
+      NOTRUS_ENABLE_DEVELOPMENT_COMPAT_ROUTES: "true",
       NOTRUS_PROTOCOL_POLICY: "require-standards",
       PORT: String(relayPort),
     },

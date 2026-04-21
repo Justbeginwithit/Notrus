@@ -7,9 +7,9 @@ import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const appPath = path.join(root, "dist", "NotrusMac.app");
-const zipPath = path.join(root, "dist", "NotrusMac.zip");
-const binaryPath = path.join(appPath, "Contents", "MacOS", "NotrusMac");
+const appPath = path.join(root, "dist", "Notrus.app");
+const zipPath = path.join(root, "dist", "Notrus.zip");
+const binaryPath = path.join(appPath, "Contents", "MacOS", "Notrus");
 const appIconPath = path.join(appPath, "Contents", "Resources", "AppIcon.icns");
 const helperPaths = [
   path.join(appPath, "Contents", "Helpers", "notrus-protocol-core"),
@@ -17,8 +17,8 @@ const helperPaths = [
   path.join(appPath, "Contents", "Resources", "notrus-protocol-core"),
 ];
 const infoPlistPath = path.join(appPath, "Contents", "Info.plist");
-const appShaPath = path.join(root, "dist", "NotrusMac.app.sha256");
-const zipShaPath = path.join(root, "dist", "NotrusMac.zip.sha256");
+const appShaPath = path.join(root, "dist", "Notrus.app.sha256");
+const zipShaPath = path.join(root, "dist", "Notrus.zip.sha256");
 
 function assert(condition, message) {
   if (!condition) {
@@ -109,7 +109,7 @@ async function main() {
 
   const info = await plistJson(infoPlistPath);
   assert(info.CFBundleIdentifier === "com.notrus.mac", "Unexpected macOS bundle identifier.");
-  assert(info.CFBundleExecutable === "NotrusMac", "Unexpected macOS bundle executable.");
+  assert(info.CFBundleExecutable === "Notrus", "Unexpected macOS bundle executable.");
   assert(info.CFBundleIconFile === "AppIcon", "Unexpected macOS bundle icon file.");
   assert(info.CFBundleIconName === "AppIcon", "Unexpected macOS bundle icon name.");
   assert(info.NSApplicationIconFile === "AppIcon", "Unexpected NSApplicationIconFile value.");

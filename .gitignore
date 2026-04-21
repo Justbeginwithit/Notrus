@@ -1,10 +1,13 @@
-node_modules/
+node_modules
 data/store.json
 data/witness-store.json
 data/transparency-signing-key.json
+data/xiaomi-firmware-watch/
 .secrets/
-dist/
+config/release/approvals.json
+dist
 .DS_Store
+.vscode/
 .build/
 **/.build/
 **/target/
@@ -13,3 +16,8 @@ dist/
 **/build/
 native/android/NotrusAndroid/local.properties
 native/android/NotrusAndroid/.idea/
+snake/
+relayhardening.rtf
+scripts/test-snake-game.mjs
+scripts/test-xiaomi-firmware-watch.mjs
+tools/xiaomi-firmware-watch/

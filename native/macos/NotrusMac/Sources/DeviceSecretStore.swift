@@ -14,7 +14,7 @@ enum DeviceSecretStoreError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .authenticationFailed:
-            return "Notrus Mac could not unlock the device-protected vault."
+            return "Notrus could not unlock the device-protected vault."
         case .biometryChanged:
             return "This Mac's biometric set changed, so the local vault must be re-approved before protected secrets can be used again."
         case .keychain(let status):

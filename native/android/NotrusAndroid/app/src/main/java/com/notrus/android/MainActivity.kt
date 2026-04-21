@@ -23,7 +23,11 @@ class MainActivity : AppCompatActivity() {
                 themeModeKey = viewModel.state.themeMode,
             ) {
                 SideEffect {
-                    if (viewModel.state.privacyModeEnabled) {
+                    val shouldProtectWindow =
+                        viewModel.state.privacyModeEnabled ||
+                            viewModel.state.vaultLocked ||
+                            viewModel.state.currentIdentity != null
+                    if (shouldProtectWindow) {
                         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                     } else {
                         window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)

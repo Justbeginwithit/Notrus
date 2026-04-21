@@ -13,6 +13,14 @@ const ALLOW_ORIGINS = (process.env.ATTESTATION_ALLOW_ORIGINS ?? "*")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
+const APPLE_DEVICECHECK_MODE = (process.env.APPLE_DEVICECHECK_MODE ?? "mock").trim().toLowerCase();
+const APPLE_DEVICECHECK_TEAM_ID = (process.env.APPLE_DEVICECHECK_TEAM_ID ?? "").trim();
+const APPLE_DEVICECHECK_KEY_ID = (process.env.APPLE_DEVICECHECK_KEY_ID ?? "").trim();
+const APPLE_DEVICECHECK_PRIVATE_KEY = (process.env.APPLE_DEVICECHECK_PRIVATE_KEY ?? "").trim();
+const APPLE_DEVICECHECK_PRIVATE_KEY_PATH = (process.env.APPLE_DEVICECHECK_PRIVATE_KEY_PATH ?? "").trim();
+const APPLE_DEVICECHECK_ENVIRONMENT = (process.env.APPLE_DEVICECHECK_ENVIRONMENT ?? "production").trim().toLowerCase();
+const PLAY_INTEGRITY_MODE = (process.env.PLAY_INTEGRITY_MODE ?? "mock").trim().toLowerCase();
+const PLAY_INTEGRITY_VERIFIER_ORIGIN = (process.env.PLAY_INTEGRITY_VERIFIER_ORIGIN ?? "").trim();
 
 function setApiHeaders(request, response) {
   response.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -84,6 +92,32 @@ function canonicalJwk(jwk) {
 
 function sha256Hex(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function truthy(value) {
+  return value === true;
+}
+
+async function readAppleDeviceCheckPrivateKey() {
+  if (APPLE_DEVICECHECK_PRIVATE_KEY) {
+    return APPLE_DEVICECHECK_PRIVATE_KEY;
+  }
+  if (APPLE_DEVICECHECK_PRIVATE_KEY_PATH) {
+    return (await fs.readFile(APPLE_DEVICECHECK_PRIVATE_KEY_PATH, "utf8")).trim();
+  }
+  return "";
+}
+
+function decodeJsonPayload(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }
 
 function toX509Chain(certificateChain) {
@@ -220,6 +254,189 @@ export async function verifyAndroidAttestation(payload) {
   };
 }
 
+export async function verifyAppleDeviceCheck(payload) {
+  const token = isNonEmptyString(payload?.deviceCheckToken, 16_000) ? payload.deviceCheckToken.trim() : null;
+  const bundleIdentifier = isNonEmptyString(payload?.bundleIdentifier, 240) ? payload.bundleIdentifier.trim() : null;
+  const transactionId = crypto.randomUUID();
+  const timestampMs = Date.now();
+
+  if (!token) {
+    return {
+      ok: true,
+      platform: "apple",
+      status: "missing-token",
+      verified: false,
+      note: "DeviceCheck verification failed because no device token was provided.",
+      verifiedAt: new Date().toISOString(),
+    };
+  }
+
+  if (APPLE_DEVICECHECK_MODE !== "live") {
+    const verified = token.startsWith("mock-devicecheck-token-") || token.startsWith("mock-dc-");
+    return {
+      ok: true,
+      platform: "apple",
+      status: verified ? "devicecheck-mock-verified" : "devicecheck-mock-invalid",
+      verified,
+      note: verified
+        ? "DeviceCheck token validated with the local mock verifier."
+        : "DeviceCheck token was rejected by the local mock verifier.",
+      verifiedAt: new Date().toISOString(),
+    };
+  }
+
+  const privateKeyPem = await readAppleDeviceCheckPrivateKey();
+  if (!APPLE_DEVICECHECK_TEAM_ID || !APPLE_DEVICECHECK_KEY_ID || !privateKeyPem) {
+    return {
+      ok: true,
+      platform: "apple",
+      status: "devicecheck-not-configured",
+      verified: false,
+      note: "Apple DeviceCheck live verification is not fully configured on this attestation service.",
+      verifiedAt: new Date().toISOString(),
+    };
+  }
+
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const jwtPayload = {
+      aud: "devicecheck.apple.com",
+      exp: nowSeconds + 300,
+      iat: nowSeconds,
+      iss: APPLE_DEVICECHECK_TEAM_ID,
+      ...(bundleIdentifier ? { sub: bundleIdentifier } : {}),
+    };
+
+    const header = {
+      alg: "ES256",
+      kid: APPLE_DEVICECHECK_KEY_ID,
+      typ: "JWT",
+    };
+    const encode = (value) => Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+    const unsignedJwt = `${encode(header)}.${encode(jwtPayload)}`;
+    const signature = crypto.sign("sha256", Buffer.from(unsignedJwt, "utf8"), {
+      key: privateKeyPem,
+      dsaEncoding: "ieee-p1363",
+    });
+    const jwtToken = `${unsignedJwt}.${Buffer.from(signature).toString("base64url")}`;
+    const endpoint =
+      APPLE_DEVICECHECK_ENVIRONMENT === "development"
+        ? "https://api.development.devicecheck.apple.com/v1/validate_device_token"
+        : "https://api.devicecheck.apple.com/v1/validate_device_token";
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${jwtToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        device_token: token,
+        timestamp: timestampMs,
+        transaction_id: transactionId,
+      }),
+    });
+
+    const raw = await response.text();
+    const decoded = decodeJsonPayload(raw);
+    const verified = response.ok;
+    return {
+      ok: true,
+      platform: "apple",
+      status: verified ? "devicecheck-verified" : "devicecheck-rejected",
+      verified,
+      note: verified
+        ? "Apple DeviceCheck verification accepted the provided token."
+        : `Apple DeviceCheck verification failed with HTTP ${response.status}.`,
+      providerStatus: response.status,
+      providerResponse: decoded,
+      verifiedAt: new Date().toISOString(),
+    };
+  } catch {
+    return {
+      ok: true,
+      platform: "apple",
+      status: "devicecheck-error",
+      verified: false,
+      note: "Apple DeviceCheck verification request failed.",
+      verifiedAt: new Date().toISOString(),
+    };
+  }
+}
+
+export async function verifyAndroidPlayIntegrity(payload) {
+  const token = isNonEmptyString(payload?.playIntegrityToken, 16_000) ? payload.playIntegrityToken.trim() : null;
+  if (!token) {
+    return {
+      ok: true,
+      platform: "android",
+      status: "missing-token",
+      verified: false,
+      note: "Play Integrity verification failed because no token was provided.",
+      verifiedAt: new Date().toISOString(),
+    };
+  }
+
+  if (PLAY_INTEGRITY_MODE !== "live") {
+    const verified = token.startsWith("mock-play-integrity-token-") || token.startsWith("mock-play-");
+    return {
+      ok: true,
+      platform: "android",
+      status: verified ? "play-integrity-mock-verified" : "play-integrity-mock-invalid",
+      verified,
+      note: verified
+        ? "Play Integrity token validated with the local mock verifier."
+        : "Play Integrity token was rejected by the local mock verifier.",
+      verifiedAt: new Date().toISOString(),
+    };
+  }
+
+  if (!PLAY_INTEGRITY_VERIFIER_ORIGIN) {
+    return {
+      ok: true,
+      platform: "android",
+      status: "play-integrity-not-configured",
+      verified: false,
+      note: "Play Integrity live verification is not configured on this attestation service.",
+      verifiedAt: new Date().toISOString(),
+    };
+  }
+
+  try {
+    const response = await fetch(new URL("/verify", PLAY_INTEGRITY_VERIFIER_ORIGIN), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const raw = await response.text();
+    const decoded = decodeJsonPayload(raw) ?? {};
+    const verified = response.ok && (truthy(decoded.verified) || truthy(decoded.tokenValid) || truthy(decoded.ok));
+    return {
+      ok: true,
+      platform: "android",
+      status: verified ? "play-integrity-verified" : "play-integrity-rejected",
+      verified,
+      note: verified
+        ? "Play Integrity verifier accepted the provided token."
+        : `Play Integrity verifier rejected the token with HTTP ${response.status}.`,
+      providerStatus: response.status,
+      providerResponse: decoded,
+      verifiedAt: new Date().toISOString(),
+    };
+  } catch {
+    return {
+      ok: true,
+      platform: "android",
+      status: "play-integrity-error",
+      verified: false,
+      note: "Play Integrity verification request failed.",
+      verifiedAt: new Date().toISOString(),
+    };
+  }
+}
+
 export function createAttestationServer() {
   return http.createServer(async (request, response) => {
     try {
@@ -235,7 +452,16 @@ export function createAttestationServer() {
       if (request.method === "GET" && url.pathname === "/api/attestation/health") {
         sendJson(request, response, 200, {
           ok: true,
-          service: "android-attestation",
+          capabilities: {
+            androidKeyAttestation: true,
+            appleDeviceCheck: true,
+            playIntegrity: true,
+          },
+          mode: {
+            appleDeviceCheck: APPLE_DEVICECHECK_MODE,
+            playIntegrity: PLAY_INTEGRITY_MODE,
+          },
+          service: "notrus-attestation",
         });
         return;
       }
@@ -243,6 +469,20 @@ export function createAttestationServer() {
       if (request.method === "POST" && url.pathname === "/api/attestation/android/verify") {
         const payload = await readJsonBody(request);
         const result = await verifyAndroidAttestation(payload);
+        sendJson(request, response, 200, result);
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/attestation/apple/devicecheck/verify") {
+        const payload = await readJsonBody(request);
+        const result = await verifyAppleDeviceCheck(payload);
+        sendJson(request, response, 200, result);
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/attestation/android/play-integrity/verify") {
+        const payload = await readJsonBody(request);
+        const result = await verifyAndroidPlayIntegrity(payload);
         sendJson(request, response, 200, result);
         return;
       }

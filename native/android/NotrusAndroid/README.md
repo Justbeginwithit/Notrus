@@ -1,6 +1,6 @@
-# Notrus Android
+# Notrus
 
-`NotrusAndroid` is the native Android client for Notrus.
+`Notrus` is the native Android client for this project.
 
 ## Current Scope
 
@@ -10,13 +10,15 @@
 - relay registration and sync
 - local saved contacts
 - standards-based direct Signal chat support
+- encrypted mailbox attachment send + decrypt-and-save support on standards direct chats
 - linked-device visibility and revocation
 - multiple local profiles in one vault for testing and account switching
 
 ## Current Boundary
 
 - direct chats follow the standards Signal path
-- MLS groups are still on the native roadmap for full Android parity
+- standards-group threads support compatible fanout transport on Android (per-recipient Signal envelopes inside `mls-rfc9420-v1` delivery)
+- native MLS state processing still exists as a separate path in the protocol core and macOS client
 - release packaging exists, but production signing and attestation rollout still need hardening work
 
 ## Build

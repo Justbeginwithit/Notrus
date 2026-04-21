@@ -109,29 +109,29 @@ func renderIconPNG(size: Int) throws -> Data {
 func shieldPath(in rect: NSRect) -> NSBezierPath {
     let path = NSBezierPath()
 
-    let top = NSPoint(x: rect.midX, y: rect.minY)
-    let rightShoulder = NSPoint(x: rect.maxX, y: rect.minY + rect.height * 0.19)
-    let rightGate = NSPoint(x: rect.maxX, y: rect.minY + rect.height * 0.46)
-    let tip = NSPoint(x: rect.midX, y: rect.maxY)
-    let leftGate = NSPoint(x: rect.minX, y: rect.minY + rect.height * 0.46)
-    let leftShoulder = NSPoint(x: rect.minX, y: rect.minY + rect.height * 0.19)
+    let top = NSPoint(x: rect.midX, y: rect.maxY)
+    let rightShoulder = NSPoint(x: rect.maxX, y: rect.minY + rect.height * 0.81)
+    let rightGate = NSPoint(x: rect.maxX, y: rect.minY + rect.height * 0.54)
+    let tip = NSPoint(x: rect.midX, y: rect.minY)
+    let leftGate = NSPoint(x: rect.minX, y: rect.minY + rect.height * 0.54)
+    let leftShoulder = NSPoint(x: rect.minX, y: rect.minY + rect.height * 0.81)
 
     path.move(to: top)
-    path.line(to: NSPoint(x: rect.maxX * 0.94 + rect.minX * 0.06, y: rect.minY + rect.height * 0.08))
+    path.line(to: NSPoint(x: rect.maxX * 0.94 + rect.minX * 0.06, y: rect.minY + rect.height * 0.92))
     path.line(to: rightShoulder)
     path.line(to: rightGate)
     path.curve(
         to: tip,
-        controlPoint1: NSPoint(x: rect.maxX, y: rect.minY + rect.height * 0.72),
-        controlPoint2: NSPoint(x: rect.midX + rect.width * 0.18, y: rect.maxY)
+        controlPoint1: NSPoint(x: rect.maxX, y: rect.minY + rect.height * 0.28),
+        controlPoint2: NSPoint(x: rect.midX + rect.width * 0.18, y: rect.minY)
     )
     path.curve(
         to: leftGate,
-        controlPoint1: NSPoint(x: rect.midX - rect.width * 0.18, y: rect.maxY),
-        controlPoint2: NSPoint(x: rect.minX, y: rect.minY + rect.height * 0.72)
+        controlPoint1: NSPoint(x: rect.midX - rect.width * 0.18, y: rect.minY),
+        controlPoint2: NSPoint(x: rect.minX, y: rect.minY + rect.height * 0.28)
     )
     path.line(to: leftShoulder)
-    path.line(to: NSPoint(x: rect.minX + rect.width * 0.06, y: rect.minY + rect.height * 0.08))
+    path.line(to: NSPoint(x: rect.minX + rect.width * 0.06, y: rect.minY + rect.height * 0.92))
     path.close()
 
     return path

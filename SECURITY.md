@@ -101,7 +101,7 @@ Notrus is stronger than the original prototype, but it is still an alpha product
 The remaining high-value work is:
 
 - stronger key-directory and transparency guarantees
-- Android attestation verification on a separate trusted service
+- operational hardening of production attestation credentials and monitoring
 - final macOS release signing, Hardened Runtime, entitlements, and notarization flow
 - secured release/update chain controls
 - deeper sender/recipient privacy and metadata reduction

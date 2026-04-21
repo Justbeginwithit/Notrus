@@ -12,7 +12,6 @@
     "notarize:mac-app": "zsh scripts/notarize-mac-app.sh",
     "package:android-app": "zsh scripts/package-android-app.sh",
     "package:mac-app": "zsh scripts/package-mac-app.sh",
-    "package:clients": "npm run package:mac-app && npm run package:android-app",
     "scan:secrets": "node scripts/scan-secrets.mjs",
     "start": "node server.js",
     "start:attestation": "node attestation.js",
@@ -25,13 +24,17 @@
     "test:client-surfaces": "node scripts/test-client-surfaces.mjs",
     "test:abuse-controls": "node scripts/test-abuse-controls.mjs",
     "test:metadata-boundary": "node scripts/test-metadata-boundary.mjs",
+    "test:production-api-boundary": "node scripts/test-production-api-boundary.mjs",
     "test:privacy-routing": "node scripts/test-privacy-routing.mjs",
+    "test:recovery-lifecycle": "node scripts/test-recovery-lifecycle.mjs",
     "test:retention-pruning": "node scripts/test-retention-pruning.mjs",
     "test:device-membership": "node scripts/test-device-membership.mjs",
     "test:adversarial-inputs": "node scripts/test-adversarial-inputs.mjs",
     "test:mac-release": "node scripts/verify-mac-release.mjs",
+    "test:release-governance": "node scripts/verify-release-governance.mjs",
     "test:standards-e2e": "node scripts/test-standards-e2e.mjs",
+    "test:mls-fanout-compat": "node scripts/test-mls-fanout-compat.mjs",
     "test:protocol-core": "cargo test --manifest-path native/protocol-core/Cargo.toml",
-    "test:security-suite": "npm run scan:secrets && npm run test:client-surfaces && npm run test:metadata-boundary && npm run test:content-boundary && npm run test:privacy-routing && npm run test:retention-pruning && npm run test:adversarial-inputs && npm run test:abuse-controls && npm run test:device-membership"
+    "test:security-suite": "node scripts/test-security-suite.mjs"
   }
 }

@@ -18,6 +18,12 @@ function assert(condition, message) {
   }
 }
 
+function assertResponseKeys(payload, expectedKeys, message) {
+  const actual = Object.keys(payload).sort();
+  const expected = [...expectedKeys].sort();
+  assert(JSON.stringify(actual) === JSON.stringify(expected), `${message} Expected ${expected.join(", ")}, got ${actual.join(", ")}.`);
+}
+
 function generatePublicJwk() {
   const { publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const jwk = publicKey.export({ format: "jwk" });
@@ -132,10 +138,14 @@ async function waitForRelay(origin, attempts = 80) {
   throw new Error("Timed out waiting for the standards relay.");
 }
 
-async function api(pathname, { method = "GET", body } = {}) {
+async function api(pathname, { method = "GET", body, token } = {}) {
   const response = await fetch(`${RELAY_ORIGIN}${pathname}`, {
     method,
-    headers: body ? { "Content-Type": "application/json" } : undefined,
+    headers: {
+      Accept: "application/json",
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await response.json();
@@ -146,7 +156,7 @@ async function api(pathname, { method = "GET", body } = {}) {
 }
 
 async function registerUser(profile) {
-  await api("/api/register", {
+  const response = await api("/api/bootstrap/register", {
     method: "POST",
     body: {
       displayName: profile.displayName,
@@ -165,6 +175,22 @@ async function registerUser(profile) {
       username: profile.username,
     },
   });
+  assert(response.session?.token, `Registration did not issue a session for ${profile.username}.`);
+  profile.session = response.session;
+  profile.registeredUser = response.user;
+}
+
+async function syncProfile(profile) {
+  return api("/api/sync/state", { token: profile.session.token });
+}
+
+async function searchContact(profile, query, expectedUserId) {
+  const search = await api(`/api/directory/search?q=${encodeURIComponent(query)}`, {
+    token: profile.session.token,
+  });
+  const result = search.results?.find((candidate) => candidate.id === expectedUserId);
+  assert(result?.contactHandle, `Directory search did not return a contact handle for ${query}.`);
+  return result;
 }
 
 function createProfile(displayName, username) {
@@ -220,6 +246,9 @@ async function main() {
         cwd: tempRoot,
         env: {
           ...process.env,
+          NODE_ENV: "production",
+          NOTRUS_ENABLE_DEVELOPMENT_COMPAT_ROUTES: "false",
+          NOTRUS_ENABLE_LEGACY_API: "false",
           PORT: String(RELAY_PORT),
           NOTRUS_PROTOCOL_POLICY: "require-standards",
         },
@@ -238,7 +267,10 @@ async function main() {
     await registerUser(bob);
     await registerUser(carol);
 
-    const legacyAttempt = await fetch(`${RELAY_ORIGIN}/api/threads`, {
+    const bobContact = await searchContact(alice, bob.username, bob.id);
+    const carolContact = await searchContact(alice, carol.username, carol.id);
+
+    const legacyCompatibilityAttempt = await fetch(`${RELAY_ORIGIN}/api/threads`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -251,24 +283,42 @@ async function main() {
         envelopes: [],
       }),
     });
-    assert(legacyAttempt.status === 412, "Strict relay unexpectedly allowed a legacy protocol thread.");
+    assert(legacyCompatibilityAttempt.status === 410, "Production relay unexpectedly exposed the legacy thread API.");
+
+    const legacyProtocolAttempt = await fetch(`${RELAY_ORIGIN}/api/routing/threads`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${alice.session.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        createdAt: now(),
+        id: randomUUID(),
+        participantHandles: [bobContact.contactHandle],
+        protocol: "pairwise-v2",
+        title: "legacy",
+      }),
+    });
+    assert(legacyProtocolAttempt.status === 412, "Strict relay unexpectedly allowed a legacy protocol through production routing.");
 
     const directThreadId = randomUUID().toLowerCase();
-    await api("/api/threads", {
+    const directThread = await api("/api/routing/threads", {
       method: "POST",
+      token: alice.session.token,
       body: {
         createdAt: now(),
-        createdBy: alice.id,
-        envelopes: [],
-        groupState: null,
         id: directThreadId,
-        initialRatchetPublicJwk: null,
-        mlsBootstrap: null,
-        participantIds: [alice.id, bob.id],
+        participantHandles: [bobContact.contactHandle],
         protocol: "signal-pqxdh-double-ratchet-v1",
         title: "Alice and Bob",
       },
     });
+    assert(directThread.threadId === directThreadId, "Production direct thread creation returned an unexpected thread id.");
+
+    const aliceDirectSync = await syncProfile(alice);
+    const aliceDirectThread = aliceDirectSync.threads.find((thread) => thread.id === directThreadId);
+    assert(aliceDirectThread?.mailboxHandle, "Alice sync did not return a direct mailbox handle.");
+    assert(aliceDirectThread?.deliveryCapability, "Alice sync did not return a direct delivery capability.");
 
     const aliceToBob = bridge({
       command: "signal-encrypt",
@@ -280,22 +330,24 @@ async function main() {
     });
     updateSignalState(alice, aliceToBob.local_signal_state);
 
-    await api(`/api/threads/${directThreadId}/messages`, {
+    const directMessage = await api(`/api/mailboxes/${aliceDirectThread.mailboxHandle}/messages`, {
       method: "POST",
+      token: aliceDirectThread.deliveryCapability,
       body: {
         createdAt: now(),
         id: randomUUID().toLowerCase(),
         messageKind: aliceToBob.message_kind,
         protocol: "signal-pqxdh-double-ratchet-v1",
-        senderId: alice.id,
-        threadId: directThreadId,
         wireMessage: aliceToBob.wire_message,
       },
     });
+    assertResponseKeys(directMessage, ["messageId", "ok"], "Production message response leaked extra metadata.");
 
-    const bobSync = await api(`/api/sync?userId=${encodeURIComponent(bob.id)}`);
+    const bobSync = await syncProfile(bob);
     const bobDirectThread = bobSync.threads.find((thread) => thread.id === directThreadId);
     assert(bobDirectThread, "Bob did not receive the Signal direct thread.");
+    assert(bobDirectThread.mailboxHandle, "Bob sync did not return a direct mailbox handle.");
+    assert(bobDirectThread.deliveryCapability, "Bob sync did not return a direct delivery capability.");
     const bobDirectMessage = bobDirectThread.messages.at(-1);
     const bobOpened = bridge({
       command: "signal-decrypt",
@@ -318,22 +370,22 @@ async function main() {
     });
     updateSignalState(bob, bobToAlice.local_signal_state);
 
-    await api(`/api/threads/${directThreadId}/messages`, {
+    const replyMessage = await api(`/api/mailboxes/${bobDirectThread.mailboxHandle}/messages`, {
       method: "POST",
+      token: bobDirectThread.deliveryCapability,
       body: {
         createdAt: now(),
         id: randomUUID().toLowerCase(),
         messageKind: bobToAlice.message_kind,
         protocol: "signal-pqxdh-double-ratchet-v1",
-        senderId: bob.id,
-        threadId: directThreadId,
         wireMessage: bobToAlice.wire_message,
       },
     });
+    assertResponseKeys(replyMessage, ["messageId", "ok"], "Production reply response leaked extra metadata.");
 
-    const aliceSync = await api(`/api/sync?userId=${encodeURIComponent(alice.id)}`);
-    const aliceDirectThread = aliceSync.threads.find((thread) => thread.id === directThreadId);
-    const aliceDirectReply = aliceDirectThread.messages.at(-1);
+    const aliceReplySync = await syncProfile(alice);
+    const aliceDirectThreadAfterReply = aliceReplySync.threads.find((thread) => thread.id === directThreadId);
+    const aliceDirectReply = aliceDirectThreadAfterReply.messages.at(-1);
     const aliceOpened = bridge({
       command: "signal-decrypt",
       local_signal_state: alice.standards.signalState,
@@ -364,23 +416,21 @@ async function main() {
     };
     updateMlsState(alice, mlsGroup.creatorMlsState);
 
-    await api("/api/threads", {
+    const groupThread = await api("/api/routing/threads", {
       method: "POST",
+      token: alice.session.token,
       body: {
         createdAt: now(),
-        createdBy: alice.id,
-        envelopes: [],
-        groupState: null,
         id: groupThreadId,
-        initialRatchetPublicJwk: null,
         mlsBootstrap: mlsGroup.threadBootstrap,
-        participantIds: [alice.id, bob.id, carol.id],
+        participantHandles: [bobContact.contactHandle, carolContact.contactHandle],
         protocol: "mls-rfc9420-v1",
         title: "Alice, Bob, Carol",
       },
     });
+    assert(groupThread.threadId === groupThreadId, "Production MLS thread creation returned an unexpected thread id.");
 
-    const bobGroupSync = await api(`/api/sync?userId=${encodeURIComponent(bob.id)}`);
+    const bobGroupSync = await syncProfile(bob);
     const bobGroupThread = bobGroupSync.threads.find((thread) => thread.id === groupThreadId);
     assert(bobGroupThread?.mlsBootstrap?.welcomes?.length === 1, "Bob did not receive a user-scoped MLS welcome.");
     const bobGroupJoin = bridge({
@@ -391,7 +441,7 @@ async function main() {
     });
     updateMlsState(bob, bobGroupJoin.local_mls_state);
 
-    const carolGroupSync = await api(`/api/sync?userId=${encodeURIComponent(carol.id)}`);
+    const carolGroupSync = await syncProfile(carol);
     const carolGroupThread = carolGroupSync.threads.find((thread) => thread.id === groupThreadId);
     assert(carolGroupThread?.mlsBootstrap?.welcomes?.length === 1, "Carol did not receive a user-scoped MLS welcome.");
     const carolGroupJoin = bridge({
@@ -410,20 +460,25 @@ async function main() {
     });
     updateMlsState(alice, aliceGroupMessage.local_mls_state);
 
-    await api(`/api/threads/${groupThreadId}/messages`, {
+    const aliceGroupSync = await syncProfile(alice);
+    const aliceGroupThread = aliceGroupSync.threads.find((thread) => thread.id === groupThreadId);
+    assert(aliceGroupThread?.mailboxHandle, "Alice sync did not return an MLS mailbox handle.");
+    assert(aliceGroupThread?.deliveryCapability, "Alice sync did not return an MLS delivery capability.");
+
+    const groupMessage = await api(`/api/mailboxes/${aliceGroupThread.mailboxHandle}/messages`, {
       method: "POST",
+      token: aliceGroupThread.deliveryCapability,
       body: {
         createdAt: now(),
         id: randomUUID().toLowerCase(),
         messageKind: "mls-application",
         protocol: "mls-rfc9420-v1",
-        senderId: alice.id,
-        threadId: groupThreadId,
         wireMessage: aliceGroupMessage.wire_message,
       },
     });
+    assertResponseKeys(groupMessage, ["messageId", "ok"], "Production MLS message response leaked extra metadata.");
 
-    const bobGroupSyncAfterMessage = await api(`/api/sync?userId=${encodeURIComponent(bob.id)}`);
+    const bobGroupSyncAfterMessage = await syncProfile(bob);
     const bobGroupThreadAfterMessage = bobGroupSyncAfterMessage.threads.find((thread) => thread.id === groupThreadId);
     const bobMlsMessage = bobGroupThreadAfterMessage.messages.at(-1);
     const bobOpenedMls = bridge({
@@ -434,7 +489,7 @@ async function main() {
     });
     assert(bobOpenedMls.plaintext === "hello from mls", "Bob failed to decrypt Alice's MLS group message.");
 
-    const carolGroupSyncAfterMessage = await api(`/api/sync?userId=${encodeURIComponent(carol.id)}`);
+    const carolGroupSyncAfterMessage = await syncProfile(carol);
     const carolGroupThreadAfterMessage = carolGroupSyncAfterMessage.threads.find((thread) => thread.id === groupThreadId);
     const carolMlsMessage = carolGroupThreadAfterMessage.messages.at(-1);
     const carolOpenedMls = bridge({
@@ -450,9 +505,12 @@ async function main() {
       protocolPolicy: health.protocolPolicy?.mode,
       verified: [
         "strict-standards-policy",
-        "signal-direct-round-trip",
-        "mls-group-round-trip",
-        "user-scoped-mls-welcomes",
+        "production-compat-routes-disabled",
+        "production-opaque-contact-routing",
+        "production-mailbox-signal-round-trip",
+        "production-mailbox-mls-group-round-trip",
+        "production-user-scoped-mls-welcomes",
+        "minimal-production-message-responses",
       ],
     }, null, 2));
   } finally {

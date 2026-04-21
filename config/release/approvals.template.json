@@ -1,0 +1,17 @@
+{
+  "releaseId": "0.2.0-alpha2",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "initiatedBy": "release-manager@example.com",
+  "approvals": [
+    {
+      "reviewer": "security-reviewer@example.com",
+      "approvedAt": "2026-04-21T12:00:00Z",
+      "role": "security"
+    },
+    {
+      "reviewer": "operations-reviewer@example.com",
+      "approvedAt": "2026-04-21T12:05:00Z",
+      "role": "operations"
+    }
+  ]
+}
