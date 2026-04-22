@@ -9,6 +9,7 @@
 - the macOS packaged binary is code-signed with `NOTRUS_CODESIGN_IDENTITY` when provided, or ad-hoc signed for local verification builds
 - macOS production packaging hard-fails without governance approval input, non-adhoc signing identity, and notarization profile
 - Android production packaging hard-fails without governance approval input, external keystore credentials, and non-debug signer verification via `apksigner`
+- release docs now require explicit attestation posture disclosure (configured/enforced/off) for each published release
 - packaged artifacts emit SHA-256 checksum sidecars in `dist/`
 - runtime privacy-routing and retention-pruning proofs exist in `scripts/test-privacy-routing.mjs` and `scripts/test-retention-pruning.mjs`
 - the repository can generate an SBOM with `npm run generate:sbom`
@@ -20,7 +21,7 @@
 The intended public-facing release model for Notrus is:
 
 1. maintain source in a clean `Notrus` repository
-2. publish release notes with explicit alpha warnings
+2. publish release notes with explicit maturity and boundary warnings
 3. attach packaged artifacts and checksums to GitHub releases
 4. keep runtime state, local relay data, and secret material out of the repository
 
@@ -32,12 +33,13 @@ The intended public-facing release model for Notrus is:
 - provide `NOTRUS_RELEASE_APPROVALS_PATH` with at least two unique reviewers for production packaging
 - review the generated SBOM and dependency diffs before release
 - retain release checksums and build logs long enough to investigate rollback or tampering events
+- state relay attestation posture explicitly in release notes (`configured` and which `NOTRUS_REQUIRE_*` flags were enabled)
 
 ## Release Notes Requirements
 
 Every GitHub release should clearly state:
 
-- that Notrus is alpha or otherwise state the current maturity level
+- the current maturity level (beta, release candidate, stable, etc.)
 - the supported clients and their current boundaries
 - whether the release is a local verification build or a signed release candidate
 - what changed

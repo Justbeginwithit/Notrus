@@ -2,6 +2,8 @@
 
 `Notrus` is the native macOS client for this project.
 
+Current maturity: beta
+
 ## Current Scope
 
 - device-protected profile creation

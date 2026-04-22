@@ -1,6 +1,6 @@
 # Disclaimer
 
-Notrus is alpha software.
+Notrus is beta software.
 
 Use it with that assumption.
 
@@ -10,16 +10,16 @@ This repository and the packaged clients are provided as-is, without any promise
 
 ## Not For High-Risk Use
 
-Do not use the current alpha build for:
+Do not use the current beta build for:
 
 - emergencies
 - life-safety scenarios
 - regulated communications without independent compliance review
-- environments where a failure would create material legal, financial, or safety harm
+- environments where failure would create material legal, financial, or safety harm
 
 ## Security Boundary
 
-Notrus aims to protect message content and attachments from the relay, but it does not eliminate all metadata exposure and it should not be represented as anonymous, audit-complete, or invulnerable.
+Notrus aims to protect message content and attachments from the relay, but it does not eliminate all metadata exposure and it should not be represented as anonymous, externally audited, or invulnerable.
 
 ## Operator Responsibility
 

@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 private struct PreparedThreadCreation {
     let request: ThreadCreateRequest
@@ -61,7 +62,11 @@ final class AppModel: ObservableObject {
     @Published var linkedDevices: [RelayLinkedDevice] = []
     @Published var users: [RelayUser] = []
     @Published var threads: [ConversationThread] = []
-    @Published var selectedThreadID: String?
+    @Published var selectedThreadID: String? {
+        didSet {
+            UserDefaults.standard.set(selectedThreadID, forKey: selectedThreadKey)
+        }
+    }
     @Published var draftText = ""
     @Published var pendingAttachments: [LocalAttachmentDraft] = []
     @Published var composeTitle = ""
@@ -87,6 +92,7 @@ final class AppModel: ObservableObject {
     private let relayOriginKey = "NotrusMac.relayOrigin"
     private let witnessOriginsKey = "NotrusMac.witnessOrigins"
     private let privacyModeKey = "NotrusMac.privacyModeEnabled"
+    private let selectedThreadKey = "NotrusMac.selectedThreadID"
     private let groupEpochRotationInterval = 12
     private let configuredProtocolPolicy = ProtocolPolicyMode(
         rawValue: ProcessInfo.processInfo.environment["NOTRUS_PROTOCOL_POLICY"] ?? ""
@@ -115,6 +121,7 @@ final class AppModel: ObservableObject {
         self.relayOrigin = Self.bootstrapRelayOrigin(UserDefaults.standard.string(forKey: "NotrusMac.relayOrigin"))
         self.witnessOriginsText = UserDefaults.standard.string(forKey: witnessOriginsKey) ?? ""
         self.privacyModeEnabled = UserDefaults.standard.bool(forKey: privacyModeKey)
+        self.selectedThreadID = UserDefaults.standard.string(forKey: selectedThreadKey)
         self.transparencyPins = Self.loadPinnedHeads()
         self.transparencySignerPins = Self.loadPinnedSignerKeys()
         refreshLocalDeviceInventory()
@@ -815,9 +822,7 @@ final class AppModel: ObservableObject {
     func chooseAttachments() async {
         do {
             let imported = try AttachmentGateway.importAttachments()
-            let existingIds = Set(pendingAttachments.map(\.id))
-            pendingAttachments.append(contentsOf: imported.filter { !existingIds.contains($0.id) })
-            statusMessage = "Prepared \(pendingAttachments.count) attachment\(pendingAttachments.count == 1 ? "" : "s") for encrypted send."
+            appendPendingAttachments(imported)
         } catch {
             if case AttachmentGatewayError.importCancelled = error {
                 return
@@ -830,8 +835,71 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func importDroppedAttachments(from providers: [NSItemProvider]) {
+        let targetType = UTType.fileURL.identifier
+        let candidates = providers.filter { $0.hasItemConformingToTypeIdentifier(targetType) }
+        guard !candidates.isEmpty else {
+            return
+        }
+
+        let dispatchGroup = DispatchGroup()
+        let lock = NSLock()
+        var urls: [URL] = []
+
+        for provider in candidates {
+            dispatchGroup.enter()
+            provider.loadItem(forTypeIdentifier: targetType, options: nil) { item, _ in
+                defer { dispatchGroup.leave() }
+
+                let resolvedURL: URL?
+                if let url = item as? URL {
+                    resolvedURL = url
+                } else if let data = item as? Data {
+                    resolvedURL = NSURL(absoluteURLWithDataRepresentation: data, relativeTo: nil) as URL?
+                } else if let text = item as? String {
+                    resolvedURL = URL(string: text)
+                } else {
+                    resolvedURL = nil
+                }
+
+                guard let resolvedURL else {
+                    return
+                }
+
+                lock.lock()
+                urls.append(resolvedURL)
+                lock.unlock()
+            }
+        }
+
+        dispatchGroup.notify(queue: .main) {
+            guard !urls.isEmpty else {
+                return
+            }
+            self.addPendingAttachments(from: urls)
+        }
+    }
+
+    private func addPendingAttachments(from urls: [URL]) {
+        do {
+            let imported = try AttachmentGateway.importAttachments(from: urls)
+            appendPendingAttachments(imported)
+        } catch {
+            if case AttachmentGatewayError.importCancelled = error {
+                return
+            }
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func removePendingAttachment(_ attachmentId: String) {
         pendingAttachments.removeAll { $0.id == attachmentId }
+    }
+
+    private func appendPendingAttachments(_ imported: [LocalAttachmentDraft]) {
+        let existingIds = Set(pendingAttachments.map(\.id))
+        pendingAttachments.append(contentsOf: imported.filter { !existingIds.contains($0.id) })
+        statusMessage = "Prepared \(pendingAttachments.count) attachment\(pendingAttachments.count == 1 ? "" : "s") for encrypted send."
     }
 
     func searchDirectory() async {

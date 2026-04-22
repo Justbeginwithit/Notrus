@@ -1,6 +1,6 @@
 # How To Use Notrus
 
-## 1. Start A Relay
+## 1. Start the relay
 
 From the repository root:
 
@@ -15,7 +15,7 @@ For local development, use:
 
 For remote device usage, use HTTPS.
 
-## 2. Optional Witness
+## 2. Optional witness
 
 If you want an independent transparency observer:
 
@@ -23,115 +23,140 @@ If you want an independent transparency observer:
 RELAY_ORIGIN=http://127.0.0.1:3000 npm run start:witness
 ```
 
-## 3. Install The Clients
+## 3. Recommended: configure attestation verification
+
+Start attestation service:
+
+```bash
+npm run start:attestation
+```
+
+Run relay with attestation verification enabled:
+
+```bash
+NOTRUS_ATTESTATION_ORIGIN=http://127.0.0.1:3500 \
+node server.js
+```
+
+Run relay with strict enforcement:
+
+```bash
+NOTRUS_ATTESTATION_ORIGIN=http://127.0.0.1:3500 \
+NOTRUS_REQUIRE_ANDROID_ATTESTATION=true \
+NOTRUS_REQUIRE_ANDROID_PLAY_INTEGRITY=true \
+NOTRUS_REQUIRE_APPLE_DEVICECHECK=true \
+node server.js
+```
+
+See full details in [ATTESTATION_SETUP.md](ATTESTATION_SETUP.md).
+
+## 4. Build and install the clients
 
 macOS:
 
 - package with `npm run package:mac-app`
-- open `dist/NotrusMac.app`
+- open `dist/Notrus.app`
 
 Android:
 
 - package with `npm run package:android-app`
-- install `dist/android/NotrusAndroid-0.2.0-alpha2-release.apk`
+- install `dist/android/Notrus-0.3.1-beta2-release.apk`
+  (or unversioned `dist/android/Notrus-release.apk`)
 
-## 4. Create Or Import A Profile
+## 5. Create or import a profile
 
 On both clients you can either:
 
 - create a new local identity
 - import an existing recovery archive
 
-Use recovery import if you are moving an existing account to a new device.
+Use recovery import when moving an existing account to a new device.
 
-## 5. Point The Client At The Relay
+## 6. Point each client at the relay
 
-Set the relay origin in the client to:
+Set relay origin in client settings:
 
-- your local relay URL for same-machine development
-- your HTTPS relay URL for remote devices
+- local relay URL for same-machine development
+- HTTPS relay URL for remote use
 
-If the relay transparency signer changed, use the client’s transparency reset action and resync.
+If transparency signer/trust state changed, use transparency reset and then resync.
 
 Optional:
 
-- enable privacy mode in the macOS Account Center or the Android relay/settings card if you want extra random delay before routine network actions
-- leave privacy mode off if you want the fastest sync and send behavior while testing
+- enable privacy mode for randomized routine network delays
+- keep privacy mode off for lowest latency during debugging
 
-## 6. Find Contacts
+## 7. Find contacts
 
-Notrus currently supports contact discovery by:
+Notrus discovery supports:
 
 - username
 - invite code
 
-If search does not return a remote account immediately:
+If search does not return a remote account:
 
-1. make sure both clients are using the same relay
-2. refresh sync once
-3. search again by username or invite code
+1. verify both clients target the same relay
+2. run sync on both clients
+3. retry search by username or invite code
 
-## 7. Start A Direct Chat
+## 8. Start a direct chat
 
-Direct chats are the primary cross-platform path today.
+1. Search contact
+2. Select result
+3. Create thread
+4. Send message
 
-1. search for the contact
-2. select the result
-3. create the thread
-4. send a message
+## 9. Group chats
 
-## 8. Group Chats
+Standards-group messaging is available with native MLS plus compatibility fanout support.
 
-Group support exists in the codebase, but Android group parity is still incomplete.
+If a participant has no active MLS key package, clients can use standards-thread compatible fanout transport on the same thread protocol.
 
-Use direct chats as the stable cross-platform path unless you are explicitly testing current MLS group behavior.
-
-## 9. Recovery Export And Import
+## 10. Recovery export and import
 
 Export from a trusted device:
 
-1. open Account Center
-2. export a recovery archive
-3. choose a destination file
-4. protect that file and its password
+1. Open Account Center
+2. Export recovery archive
+3. Choose destination file
+4. Protect file and passphrase
 
-Import on a replacement device:
+Import on replacement device:
 
-1. choose import
-2. select the recovery archive
-3. enter the archive password
-4. complete local device setup
+1. Choose import
+2. Select archive
+3. Enter archive passphrase
+4. Complete local device setup
 
-## 10. Common Recovery Actions
+## 11. Common recovery actions
 
-If the app reports a transparency problem:
+If transparency reports trust issues:
 
 - reset transparency trust
 - resync
 
-If the local vault is broken on a device:
+If local vault breaks on a device:
 
-- reset the local vault
-- import a recovery archive
+- reset local vault
+- import recovery archive
 
-If a device is lost:
+If device is lost:
 
-- revoke the linked device
-- rotate or reset account state if needed
+- revoke linked device
+- rotate or reset account state as needed
 
-## 11. What To Expect In This Alpha
+## 12. Current beta boundaries
 
-Stable enough to test:
+Beta-ready:
 
-- relay setup
+- relay setup and sync
 - local account creation
 - recovery export/import
-- username or invite-code discovery
+- username/invite discovery
 - direct messaging between macOS and Android
+- standards-group messaging with compatibility transport
 
-Still under active hardening:
+Still required before stable:
 
-- Android group parity
-- production release signing and notarization
-- attestation enforcement rollout
-- external audit
+- sustained multi-operator real-world burn-in
+- external confidence boosters (independent review/audit, reproducibility maturity)

@@ -1,34 +1,45 @@
 # Notrus Roadmap
 
-This roadmap tracks product direction for the native clients, relay, and release process.
+This roadmap tracks next work after the `v0.3.1-beta2` release.
 
-## Current State (Alpha 2 Refresh 2)
+## Current state (Beta 2)
 
 - Native clients: macOS + Android
-- Relay + witness running in the same repository
+- Relay + witness + attestation service in one repository
 - Standards protocol surface:
   - Direct: `signal-pqxdh-double-ratchet-v1`
   - Group: `mls-rfc9420-v1`
   - Compatibility path: standards-thread fanout transport when native MLS state is unavailable
-- Branding standardized to `Notrus` across packaged app artifacts
+- Opaque routine routing active: session token + mailbox handle + delivery capability
+- Release labels aligned for current artifacts:
+  - macOS: `Notrus-0.3.1-beta2.zip`
+  - Android: `Notrus-0.3.1-beta2-release.apk`
 
-## Next Milestone (Alpha 3)
+## Near-term release-candidate track
 
-- Finish remaining cross-platform recovery edge cases and migration diagnostics
-- Harden linked-device lifecycle UX and revoke/reset clarity
-- Expand Android/macOS parity coverage for group and attachment edge paths
-- Improve release automation with stricter release metadata checks
+- Attestation hardening:
+  - make attestation deployment posture explicit in operator setup docs and release notes
+  - keep enforcement tests green (`test:attestation-service`, `test:attestation-enforcement`)
+  - add operator-facing guidance for partial enforcement profiles (Android-only, Apple-only)
+- UX refinement:
+  - macOS dark-mode contrast and visual parity pass
+  - Android trust/device screen polish after beta-device feedback
+- Reliability:
+  - continue burn-in across profile import/export, linked-device, and relay session-expiry edges
 
-## Stable Track
+## Stable track
 
-- Close stable checklist section 12 via sustained real-world operation evidence
-- Complete optional confidence items where possible:
-  - independent testing
-  - public disclosure process maturity
+- Close stable checklist section 12 with sustained real-world operation evidence
+- Complete external confidence items where possible:
+  - independent testing and review
+  - disclosure-process maturity
   - reproducible/verifiable build improvements
 
-See:
+## Tracking docs
 
+- [RELEASE_NOTES.md](RELEASE_NOTES.md)
+- [ATTESTATION_SETUP.md](ATTESTATION_SETUP.md)
+- [BETA_RELEASE_CHECKLIST.md](BETA_RELEASE_CHECKLIST.md)
 - [STABLE_RELEASE_CHECKLIST.md](STABLE_RELEASE_CHECKLIST.md)
 - [SECURITY_CHECKLIST.md](SECURITY_CHECKLIST.md)
 - [SECURITY_RELEASE.md](SECURITY_RELEASE.md)

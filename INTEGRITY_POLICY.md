@@ -38,4 +38,10 @@ Notrus treats client integrity as a coarse risk signal for abuse resistance and 
 
 - Notrus now supports relay-side Android key-attestation verification, Apple DeviceCheck verification, and Android Play Integrity token verification through the separate attestation service.
 - Production use of vendor attestation still depends on operator-managed credentials and service configuration.
+- Default relay startup keeps attestation optional unless operators explicitly set:
+  - `NOTRUS_ATTESTATION_ORIGIN`
+  - `NOTRUS_REQUIRE_ANDROID_ATTESTATION`
+  - `NOTRUS_REQUIRE_ANDROID_PLAY_INTEGRITY`
+  - `NOTRUS_REQUIRE_APPLE_DEVICECHECK`
 - Integrity remains a risk signal and abuse-control input, not a root of trust for message plaintext.
+- See [ATTESTATION_SETUP.md](ATTESTATION_SETUP.md) for setup and verification.

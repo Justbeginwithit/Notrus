@@ -1,6 +1,6 @@
 {
   "name": "notrus-relay",
-  "version": "0.2.0-alpha.2",
+  "version": "0.3.1-beta.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -35,6 +35,7 @@
     "test:standards-e2e": "node scripts/test-standards-e2e.mjs",
     "test:mls-fanout-compat": "node scripts/test-mls-fanout-compat.mjs",
     "test:protocol-core": "cargo test --manifest-path native/protocol-core/Cargo.toml",
-    "test:security-suite": "node scripts/test-security-suite.mjs"
+    "test:security-suite": "node scripts/test-security-suite.mjs",
+    "test:beta-readiness": "node scripts/test-beta-readiness.mjs"
   }
 }

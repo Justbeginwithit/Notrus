@@ -2,6 +2,10 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+private extension Notification.Name {
+    static let notrusFocusSearch = Notification.Name("NotrusMac.FocusSearch")
+}
+
 @main
 struct NotrusMacApp: App {
     @StateObject private var model = AppModel()
@@ -21,6 +25,53 @@ struct NotrusMacApp: App {
                 .task {
                     await model.bootstrap()
                 }
+        }
+        .commands {
+            NotrusCommands(model: model)
+        }
+    }
+}
+
+struct NotrusCommands: Commands {
+    @ObservedObject var model: AppModel
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Thread") {
+                model.presentComposer()
+            }
+            .keyboardShortcut("n")
+            .disabled(model.currentIdentity == nil || model.localVaultLocked)
+        }
+
+        CommandGroup(after: .appSettings) {
+            Button("Account Center…") {
+                model.accountCenterPresented = true
+            }
+            .keyboardShortcut(",", modifiers: .command)
+        }
+
+        CommandMenu("Notrus") {
+            Button("Sync Now") {
+                Task {
+                    await model.syncNow()
+                }
+            }
+            .keyboardShortcut("r", modifiers: .command)
+            .disabled(model.currentIdentity == nil || model.localVaultLocked)
+
+            Button("Find") {
+                NotificationCenter.default.post(name: .notrusFocusSearch, object: nil)
+            }
+            .keyboardShortcut("f", modifiers: .command)
+
+            Divider()
+
+            Button("Lock Vault") {
+                model.lockLocalVault()
+            }
+            .keyboardShortcut("l", modifiers: .command)
+            .disabled(model.localVaultLocked || !model.hasProfiles)
         }
     }
 }
@@ -56,21 +107,21 @@ enum AppAppearanceMode: String, CaseIterable, Identifiable {
 }
 
 enum NotrusPalette {
-    static let accent = adaptive(light: rgb(0.11, 0.66, 0.60), dark: rgb(0.27, 0.78, 0.72))
-    static let accentSoft = adaptive(light: rgb(0.74, 0.92, 0.88), dark: rgb(0.13, 0.24, 0.24))
-    static let amber = adaptive(light: rgb(0.86, 0.56, 0.22), dark: rgb(0.95, 0.71, 0.35))
+    static let accent = adaptive(light: rgb(0.09, 0.63, 0.67), dark: rgb(0.33, 0.79, 0.85))
+    static let accentSoft = adaptive(light: rgb(0.79, 0.91, 0.98), dark: rgb(0.15, 0.24, 0.32))
+    static let amber = adaptive(light: rgb(0.77, 0.60, 0.18), dark: rgb(0.95, 0.82, 0.42))
     static let rose = adaptive(light: rgb(0.78, 0.31, 0.39), dark: rgb(0.96, 0.49, 0.58))
     static let ink = adaptive(light: rgb(0.10, 0.12, 0.17), dark: rgb(0.93, 0.95, 0.97))
     static let muted = adaptive(light: rgb(0.34, 0.39, 0.46), dark: rgb(0.68, 0.73, 0.79))
     static let mutedSoft = adaptive(light: rgb(0.47, 0.52, 0.58), dark: rgb(0.54, 0.60, 0.66))
-    static let canvas = adaptive(light: rgb(0.95, 0.96, 0.94), dark: rgb(0.06, 0.08, 0.10))
-    static let panel = adaptive(light: rgba(0.98, 0.985, 0.985, 0.84), dark: rgba(0.11, 0.14, 0.18, 0.88))
-    static let panelStrong = adaptive(light: rgba(0.99, 0.995, 0.995, 0.95), dark: rgba(0.14, 0.18, 0.23, 0.96))
-    static let hairline = adaptive(light: rgba(0.0, 0.0, 0.0, 0.08), dark: rgba(1.0, 1.0, 1.0, 0.12))
-    static let depth = adaptive(light: rgb(0.10, 0.12, 0.17), dark: rgb(0.18, 0.24, 0.30))
-    static let backdropStart = adaptive(light: rgb(0.95, 0.96, 0.93), dark: rgb(0.04, 0.06, 0.09))
-    static let backdropMid = adaptive(light: rgb(0.90, 0.94, 0.96), dark: rgb(0.06, 0.10, 0.14))
-    static let backdropEnd = adaptive(light: rgb(0.97, 0.94, 0.89), dark: rgb(0.08, 0.07, 0.11))
+    static let canvas = adaptive(light: rgb(0.95, 0.97, 0.995), dark: rgb(0.05, 0.07, 0.11))
+    static let panel = adaptive(light: rgba(0.97, 0.985, 1.0, 0.88), dark: rgba(0.08, 0.12, 0.18, 0.88))
+    static let panelStrong = adaptive(light: rgba(0.99, 0.995, 1.0, 0.95), dark: rgba(0.11, 0.16, 0.23, 0.95))
+    static let hairline = adaptive(light: rgba(0.15, 0.21, 0.30, 0.12), dark: rgba(0.75, 0.86, 1.0, 0.14))
+    static let depth = adaptive(light: rgb(0.17, 0.26, 0.37), dark: rgb(0.20, 0.32, 0.47))
+    static let backdropStart = adaptive(light: rgb(0.94, 0.97, 1.0), dark: rgb(0.04, 0.07, 0.11))
+    static let backdropMid = adaptive(light: rgb(0.90, 0.95, 1.0), dark: rgb(0.06, 0.10, 0.15))
+    static let backdropEnd = adaptive(light: rgb(0.95, 0.98, 1.0), dark: rgb(0.08, 0.13, 0.20))
 
     private static func adaptive(light: NSColor, dark: NSColor) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
@@ -94,6 +145,8 @@ enum NotrusPalette {
 
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
+    @AppStorage("NotrusMac.lockOnBackground") private var lockOnBackground = true
 
     var body: some View {
         ZStack {
@@ -123,6 +176,18 @@ struct RootView: View {
                 BusyOverlay(message: message)
             }
         }
+        .overlay {
+            if lockOnBackground && scenePhase != .active && model.currentIdentity != nil {
+                Color.black.opacity(0.18)
+                    .overlay {
+                        Label("Notrus is hidden while inactive", systemImage: "lock.shield")
+                            .font(.headline)
+                            .padding(14)
+                            .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .ignoresSafeArea()
+            }
+        }
         .alert("Notrus", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { newValue in
@@ -137,6 +202,14 @@ struct RootView: View {
         } message: {
             Text(model.errorMessage ?? "Unknown error")
         }
+        .onChange(of: scenePhase) { newPhase in
+            guard lockOnBackground else {
+                return
+            }
+            if newPhase == .background, model.currentIdentity != nil {
+                model.lockLocalVault()
+            }
+        }
     }
 }
 
@@ -144,39 +217,23 @@ struct AppBackdrop: View {
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: [
-                    NotrusPalette.backdropStart,
-                    NotrusPalette.backdropMid,
-                    NotrusPalette.backdropEnd
-                ],
+                colors: [NotrusPalette.backdropStart, NotrusPalette.backdropMid, NotrusPalette.backdropEnd],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
             .ignoresSafeArea()
 
             Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [NotrusPalette.accent.opacity(0.32), .clear],
-                        center: .center,
-                        startRadius: 10,
-                        endRadius: 260
-                    )
-                )
-                .frame(width: 520, height: 520)
-                .offset(x: -330, y: -220)
+                .fill(NotrusPalette.accent.opacity(0.09))
+                .frame(width: 560, height: 560)
+                .blur(radius: 40)
+                .offset(x: -260, y: -260)
 
             Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [NotrusPalette.amber.opacity(0.24), .clear],
-                        center: .center,
-                        startRadius: 10,
-                        endRadius: 220
-                    )
-                )
-                .frame(width: 440, height: 440)
-                .offset(x: 340, y: 250)
+                .fill(NotrusPalette.depth.opacity(0.07))
+                .frame(width: 640, height: 640)
+                .blur(radius: 50)
+                .offset(x: 320, y: 300)
         }
     }
 }
@@ -193,12 +250,21 @@ struct GlassPanel<Content: View>: View {
     var body: some View {
         content
             .padding(padding)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [NotrusPalette.panelStrong, NotrusPalette.panel],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            )
             .overlay(
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(NotrusPalette.hairline, lineWidth: 1)
             )
-            .shadow(color: .black.opacity(0.07), radius: 20, x: 0, y: 8)
+            .shadow(color: NotrusPalette.depth.opacity(0.18), radius: 14, x: 0, y: 8)
     }
 }
 
@@ -541,16 +607,23 @@ struct LabeledField<Content: View>: View {
 
 struct WorkspaceView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var threadSearchText = ""
+    @FocusState private var threadSearchFocused: Bool
 
     var body: some View {
         NavigationSplitView {
             sidebar
+                .navigationSplitViewColumnWidth(min: 250, ideal: 300, max: 360)
         } content: {
             threadList
+                .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 440)
         } detail: {
             detailPane
         }
         .navigationSplitViewStyle(.balanced)
+        .onReceive(NotificationCenter.default.publisher(for: .notrusFocusSearch)) { _ in
+            threadSearchFocused = true
+        }
         .toolbar {
             ToolbarItemGroup {
                 Button("Sync") {
@@ -561,137 +634,162 @@ struct WorkspaceView: View {
                 Button("Lock") {
                     model.lockLocalVault()
                 }
+                .keyboardShortcut("l", modifiers: .command)
                 Button("New Thread") {
                     model.presentComposer()
                 }
+                .keyboardShortcut("n", modifiers: .command)
                 Button("Account Center") {
                     model.accountCenterPresented = true
                 }
+                .keyboardShortcut(",", modifiers: .command)
             }
+        }
+    }
+
+    private var filteredThreads: [ConversationThread] {
+        let query = threadSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            return model.threads
+        }
+        let normalized = query.lowercased()
+        return model.threads.filter { thread in
+            if thread.title.lowercased().contains(normalized) {
+                return true
+            }
+            if thread.participants.contains(where: {
+                $0.displayName.lowercased().contains(normalized) || $0.username.lowercased().contains(normalized)
+            }) {
+                return true
+            }
+            return false
         }
     }
 
     private var sidebar: some View {
-        GlassPanel {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    if let identity = model.currentIdentity {
-                        SidebarIdentityCard(
-                            identity: identity,
-                            contactsCount: model.visibleContactRecords.count,
-                            threadsCount: model.threads.count
-                        )
+        List {
+            if let identity = model.currentIdentity {
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(identity.displayName)
+                            .font(.headline)
+                        Text("@\(identity.username)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(identity.fingerprint)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
+                    .textSelection(.enabled)
 
-                    ProfileSwitcherCard(
-                        profiles: model.localProfiles,
-                        currentProfileId: model.currentIdentity?.id,
-                        isBusy: model.isBusy,
-                        openAccountCenter: {
-                            model.accountCenterPresented = true
-                        },
-                        switchProfile: { profileId in
-                            Task {
-                                await model.switchIdentity(to: profileId)
-                            }
-                        }
-                    )
-
-                    LabeledField(label: "Relay URL") {
-                        TextField("Relay URL", text: $model.relayOrigin)
-                            .textFieldStyle(.roundedBorder)
-                            .onChange(of: model.relayOrigin) { _ in
-                                model.persistRelayOrigin()
-                            }
+                    HStack {
+                        Label("\(model.visibleContactRecords.count)", systemImage: "person.2")
+                        Spacer()
+                        Label("\(model.threads.count)", systemImage: "message")
                     }
-
-                    StatusStrip(
-                        text: TransportSecurityPolicy.isLocalDevelopmentOrigin(model.relayOrigin)
-                            ? "Localhost HTTP is allowed only for same-Mac development. Remote relays must use HTTPS."
-                            : "Remote relays are required to use HTTPS with ATS-protected transport.",
-                        tone: .neutral
-                    )
-
-                    LabeledField(label: "Witness Origins") {
-                        TextField("http://127.0.0.1:3400, https://witness.example", text: $model.witnessOriginsText, axis: .vertical)
-                            .lineLimit(1...3)
-                            .textFieldStyle(.roundedBorder)
-                            .onChange(of: model.witnessOriginsText) { _ in
-                                model.persistWitnessOrigins()
-                            }
-                    }
-
-                    StatusStrip(text: model.protocolProgramSummary.note, tone: model.protocolBannerTone)
-                    SecurityCenterCard()
-                    TransparencyCard(
-                        transparency: model.transparency,
-                        onResetTrust: model.transparency.chainValid ? nil : {
-                            Task {
-                                await model.resetTransparencyTrust()
-                            }
-                        }
-                    )
-                    StatusStrip(text: model.statusMessage, tone: .neutral)
-                    Spacer(minLength: 0)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .scrollIndicators(.never)
+
+            Section("Relay") {
+                TextField("Relay URL", text: $model.relayOrigin)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: model.relayOrigin) { _ in
+                        model.persistRelayOrigin()
+                    }
+
+                TextField("Witness origins", text: $model.witnessOriginsText, axis: .vertical)
+                    .lineLimit(1...2)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: model.witnessOriginsText) { _ in
+                        model.persistWitnessOrigins()
+                    }
+
+                Label(
+                    TransportSecurityPolicy.isLocalDevelopmentOrigin(model.relayOrigin)
+                        ? "Localhost HTTP only for local development"
+                        : "Remote relay requires HTTPS",
+                    systemImage: "lock.shield"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            Section("Trust") {
+                Label(model.protocolProgramSummary.note, systemImage: model.protocolBannerTone == .warning ? "exclamationmark.shield" : "checkmark.shield")
+                    .font(.caption)
+                    .foregroundStyle(model.protocolBannerTone == .warning ? Color.orange : .secondary)
+
+                if !model.transparency.chainValid {
+                    Label(model.transparency.warnings.first ?? "Transparency verification needs attention.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Button("Reset Transparency Trust") {
+                        Task {
+                            await model.resetTransparencyTrust()
+                        }
+                    }
+                }
+
+                if model.hasPendingSecurityActions {
+                    Label("Contact security review required", systemImage: "xmark.octagon.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+
+            Section {
+                Button("Account Center…") {
+                    model.accountCenterPresented = true
+                }
+            }
         }
-        .padding(.trailing, 8)
-        .frame(minWidth: 310)
+        .listStyle(.sidebar)
     }
 
     private var threadList: some View {
-        GlassPanel(padding: 16) {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Threads")
-                            .font(.system(size: 24, weight: .bold, design: .rounded))
-                            .foregroundStyle(NotrusPalette.ink)
-                        Text("\(model.threads.count) conversations synced from the relay")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("New Thread") {
-                        model.presentComposer()
-                    }
-                    .buttonStyle(SecondaryActionButtonStyle())
-                }
-
-                if model.threads.isEmpty {
-                    ThreadEmptyState()
-                } else {
-                    ScrollView {
-                        VStack(spacing: 12) {
-                            ForEach(model.threads) { thread in
-                                ThreadRow(
-                                    thread: thread,
-                                    isSelected: model.selectedThreadID == thread.id
-                                )
-                                .onTapGesture {
+        Group {
+            if model.threads.isEmpty {
+                ThreadEmptyState()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(20)
+            } else {
+                List(selection: $model.selectedThreadID) {
+                    ForEach(filteredThreads) { thread in
+                        ThreadRow(thread: thread)
+                            .tag(thread.id)
+                            .contextMenu {
+                                Button("Open") {
                                     model.selectedThreadID = thread.id
                                 }
+                                Button("Delete Local Conversation", role: .destructive) {
+                                    model.deleteConversationLocally(thread.id)
+                                }
                             }
-                        }
                     }
                 }
+                .listStyle(.inset)
+                .searchable(text: $threadSearchText, placement: .toolbar, prompt: "Search chats or contacts")
+                .focused($threadSearchFocused)
             }
         }
     }
 
     private var detailPane: some View {
-        GlassPanel {
-            Group {
-                if let thread = model.selectedThread {
-                    ConversationView(thread: thread)
-                } else {
-                    EmptyDetailPane()
-                }
+        Group {
+            if let thread = model.selectedThread {
+                ConversationView(thread: thread)
+                    .padding(16)
+            } else {
+                EmptyDetailPane()
+                    .padding(24)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(NotrusPalette.panel.opacity(0.92))
     }
 }
 
@@ -1048,28 +1146,23 @@ struct SecurityEventRow: View {
 
 struct ThreadEmptyState: View {
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HeroPill(label: "Quiet relay")
-            Text("No threads yet")
-                .font(.system(size: 30, weight: .bold, design: .rounded))
-                .foregroundStyle(NotrusPalette.ink)
-            Text("Create the first native conversation after another identity registers with the relay. The Mac client will establish the correct local session state for the selected protocol and keep the private side on this Mac.")
+        VStack(alignment: .leading, spacing: 10) {
+            Label("No Conversations", systemImage: "message")
+                .font(.title3.weight(.semibold))
+            Text("Create the first secure thread from the New Thread action.")
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity, minHeight: 220, alignment: .leading)
-        .padding(24)
-        .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 }
 
 struct EmptyDetailPane: View {
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HeroPill(label: "Select a thread")
-            Text("Choose a conversation or create a new one.")
-                .font(.system(size: 30, weight: .bold, design: .rounded))
-                .foregroundStyle(NotrusPalette.ink)
-            Text("The detail pane becomes your native encrypted workspace once a thread is active.")
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Select a Conversation", systemImage: "bubble.left.and.bubble.right")
+                .font(.title3.weight(.semibold))
+            Text("Choose a thread from the list to view and send messages.")
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1078,93 +1171,57 @@ struct EmptyDetailPane: View {
 
 struct ThreadRow: View {
     let thread: ConversationThread
-    let isSelected: Bool
 
     private var participantsLine: String {
         thread.participants.map(\.displayName).joined(separator: ", ")
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(isSelected ? NotrusPalette.accent : NotrusPalette.panelStrong)
-                Image(systemName: thread.supported ? "ellipsis.message.fill" : "exclamationmark.shield")
-                    .foregroundStyle(isSelected ? .white : (thread.supported ? NotrusPalette.ink : NotrusPalette.amber))
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: thread.supported ? "message.fill" : "exclamationmark.shield")
+                    .foregroundStyle(thread.supported ? NotrusPalette.accent : Color.orange)
+                Text(verbatim: thread.title)
+                    .font(.headline)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                ProtocolBadge(label: thread.protocolLabel, supported: thread.supported)
             }
-            .frame(width: 44, height: 44)
 
-            VStack(alignment: .leading, spacing: 6) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 10) {
-                        Text(verbatim: thread.title)
-                            .font(.system(size: 16, weight: .bold, design: .rounded))
-                            .foregroundStyle(isSelected ? .white : NotrusPalette.ink)
-                            .lineLimit(2)
-                        Spacer(minLength: 0)
-                        ProtocolBadge(label: thread.protocolLabel, supported: thread.supported, inverted: isSelected)
-                    }
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(verbatim: thread.title)
-                            .font(.system(size: 16, weight: .bold, design: .rounded))
-                            .foregroundStyle(isSelected ? .white : NotrusPalette.ink)
-                            .lineLimit(2)
-                        ProtocolBadge(label: thread.protocolLabel, supported: thread.supported, inverted: isSelected)
-                    }
-                }
+            Text(participantsLine)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
 
-                Text(participantsLine)
-                    .font(.callout)
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.86) : NotrusPalette.muted)
+            if let warning = thread.warning {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
                     .lineLimit(2)
-
-                if let warning = thread.warning {
-                    Text(warning)
-                        .font(.caption)
-                        .foregroundStyle(isSelected ? Color.white.opacity(0.8) : NotrusPalette.amber)
-                        .lineLimit(2)
-                }
             }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(isSelected ? NotrusPalette.depth : NotrusPalette.panelStrong)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(isSelected ? Color.clear : NotrusPalette.hairline, lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(isSelected ? 0.14 : 0.04), radius: isSelected ? 16 : 8, x: 0, y: 8)
+        .padding(.vertical, 4)
     }
 }
 
 struct ProtocolBadge: View {
     let label: String
     let supported: Bool
-    let inverted: Bool
 
     var body: some View {
         Text(label)
-            .font(.system(size: 11, weight: .semibold, design: .rounded))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
             .background(backgroundColor, in: Capsule())
             .foregroundStyle(foregroundColor)
     }
 
     private var backgroundColor: Color {
-        if inverted {
-            return Color.white.opacity(0.14)
-        }
         return supported ? NotrusPalette.accentSoft : NotrusPalette.amber.opacity(0.18)
     }
 
     private var foregroundColor: Color {
-        if inverted {
-            return .white
-        }
         return supported ? NotrusPalette.ink : NotrusPalette.amber
     }
 }
@@ -1184,7 +1241,7 @@ struct ConversationView: View {
             if model.selectedThreadRequiresReverification {
                 StatusStrip(
                     text: "A contact in this conversation changed identity keys. Verify the new safety number in Account Center before sending more content.",
-                    tone: .warning
+                    tone: .critical
                 )
             }
 
@@ -1223,6 +1280,9 @@ struct ConversationView: View {
                         await model.chooseAttachments()
                     }
                 },
+                importDroppedProviders: { providers in
+                    model.importDroppedAttachments(from: providers)
+                },
                 removeAttachment: { attachmentId in
                     model.removePendingAttachment(attachmentId)
                 }
@@ -1241,48 +1301,39 @@ struct ConversationHeader: View {
     let thread: ConversationThread
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top) {
-                    titleBlock
-                    Spacer()
-                    ProtocolBadge(label: thread.protocolLabel, supported: thread.supported, inverted: false)
-                }
-                VStack(alignment: .leading, spacing: 10) {
-                    titleBlock
-                    ProtocolBadge(label: thread.protocolLabel, supported: thread.supported, inverted: false)
-                }
-            }
-
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 10) {
-                    headerChips
-                }
-                VStack(alignment: .leading, spacing: 10) {
-                    headerChips
-                }
-            }
-
-            HStack(spacing: 10) {
-                Button("Delete Local Conversation", role: .destructive) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                titleBlock
+                Spacer(minLength: 8)
+                ProtocolBadge(label: thread.protocolLabel, supported: thread.supported)
+                Button {
                     model.deleteConversationLocally(thread.id)
+                } label: {
+                    Image(systemName: "trash")
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(SecondaryActionButtonStyle())
+                .buttonStyle(.plain)
+                .help("Delete local conversation")
                 .disabled(model.isBusy)
             }
+
+            HStack(spacing: 8) {
+                headerChips
+            }
         }
+        .padding(.bottom, 4)
     }
 
     private var titleBlock: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(thread.title)
-                .font(.system(size: 30, weight: .bold, design: .rounded))
-                .foregroundStyle(NotrusPalette.ink)
+                .font(.title3.weight(.semibold))
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
             Text(thread.participants.map(\.displayName).joined(separator: ", "))
-                .foregroundStyle(NotrusPalette.muted)
-                .lineLimit(2)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
     }
 
@@ -1305,11 +1356,11 @@ struct MetadataChip: View {
 
     var body: some View {
         Text(label)
-            .font(.system(size: 12, weight: .medium, design: .rounded))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(NotrusPalette.panelStrong, in: Capsule())
-            .foregroundStyle(NotrusPalette.muted)
+            .font(.caption)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.secondary.opacity(0.12), in: Capsule())
+            .foregroundStyle(.secondary)
     }
 }
 
@@ -1321,22 +1372,23 @@ struct MessageBubble: View {
     var body: some View {
         HStack {
             if isCurrentUser {
-                Spacer(minLength: 90)
+                Spacer(minLength: 170)
             }
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text(message.senderName)
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .font(.subheadline.weight(.semibold))
                     Spacer(minLength: 10)
                     Text(shortTimestamp(message.createdAt))
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .font(.caption)
                         .opacity(0.72)
                 }
 
                 Text(message.body)
-                    .font(.system(size: 15, weight: .medium, design: .rounded))
+                    .font(.body)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
 
                 if !message.attachments.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
@@ -1349,16 +1401,16 @@ struct MessageBubble: View {
                                         .font(.system(size: 18, weight: .semibold))
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(attachment.fileName)
-                                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                            .font(.subheadline.weight(.semibold))
                                             .lineLimit(1)
                                         Text("\(attachment.mediaType) • \(formattedByteCount(attachment.byteLength))")
-                                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                                            .font(.caption)
                                             .opacity(0.75)
                                             .lineLimit(1)
                                     }
                                     Spacer(minLength: 8)
                                     Text("Save")
-                                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                                        .font(.caption.weight(.semibold))
                                 }
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 10)
@@ -1374,27 +1426,35 @@ struct MessageBubble: View {
                 }
             }
             .foregroundStyle(bubbleForeground)
-            .padding(16)
-            .background(bubbleBackground, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .padding(13)
+            .background(bubbleBackground, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+            )
+            .frame(maxWidth: 680, alignment: .leading)
+            .contextMenu {
+                Button("Copy Message") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(message.body, forType: .string)
+                }
+            }
 
             if !isCurrentUser {
-                Spacer(minLength: 90)
+                Spacer(minLength: 170)
             }
         }
     }
 
     private var bubbleForeground: Color {
-        if message.status != "ok" {
-            return NotrusPalette.ink
-        }
-        return isCurrentUser ? .white : NotrusPalette.ink
+        .primary
     }
 
     private var bubbleBackground: Color {
         if message.status != "ok" {
             return NotrusPalette.amber.opacity(0.22)
         }
-        return isCurrentUser ? NotrusPalette.depth : NotrusPalette.panelStrong
+        return isCurrentUser ? NotrusPalette.accentSoft.opacity(0.72) : NotrusPalette.panelStrong.opacity(0.92)
     }
 }
 
@@ -1405,8 +1465,10 @@ struct ComposerBar: View {
     let canSend: Bool
     let supported: Bool
     let chooseAttachments: () -> Void
+    let importDroppedProviders: ([NSItemProvider]) -> Void
     let removeAttachment: (String) -> Void
     let send: () -> Void
+    @State private var isDropTargeted = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1476,10 +1538,19 @@ struct ComposerBar: View {
                 }
                 .buttonStyle(PrimaryActionButtonStyle())
                 .disabled(!canSend || isBusy)
+                .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(16)
-        .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(isDropTargeted ? NotrusPalette.accent : .clear, lineWidth: 1.5)
+        )
+        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted) { providers in
+            importDroppedProviders(providers)
+            return true
+        }
     }
 }
 
@@ -1487,6 +1558,7 @@ struct StatusStrip: View {
     enum Tone {
         case neutral
         case warning
+        case critical
     }
 
     let text: String
@@ -1494,7 +1566,7 @@ struct StatusStrip: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: tone == .warning ? "exclamationmark.triangle.fill" : "checkmark.shield")
+            Image(systemName: symbolName)
             Text(text)
                 .font(.system(size: 13, weight: .medium, design: .rounded))
                 .lineLimit(3)
@@ -1507,11 +1579,36 @@ struct StatusStrip: View {
     }
 
     private var foreground: Color {
-        tone == .warning ? NotrusPalette.amber : NotrusPalette.ink
+        switch tone {
+        case .neutral:
+            return NotrusPalette.ink
+        case .warning:
+            return NotrusPalette.amber
+        case .critical:
+            return NotrusPalette.rose
+        }
     }
 
     private var background: Color {
-        tone == .warning ? NotrusPalette.amber.opacity(0.18) : NotrusPalette.accentSoft.opacity(0.8)
+        switch tone {
+        case .neutral:
+            return NotrusPalette.accentSoft.opacity(0.8)
+        case .warning:
+            return NotrusPalette.amber.opacity(0.18)
+        case .critical:
+            return NotrusPalette.rose.opacity(0.16)
+        }
+    }
+
+    private var symbolName: String {
+        switch tone {
+        case .neutral:
+            return "info.circle.fill"
+        case .warning:
+            return "exclamationmark.triangle.fill"
+        case .critical:
+            return "xmark.octagon.fill"
+        }
     }
 }
 
@@ -1716,11 +1813,13 @@ struct ComposeThreadSheet: View {
                             .disabled(model.isBusy || !model.canCreateComposedThread)
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
-        .frame(minWidth: 420, idealWidth: 760, minHeight: 560)
-        .padding(28)
+        .frame(minWidth: 620, idealWidth: 880, minHeight: 640)
+        .padding(20)
     }
 
     private var searchField: some View {
@@ -1781,18 +1880,30 @@ struct ContactSelectionRow: View {
             )
         ) {
             VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(contact.displayName)
-                        .font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundStyle(NotrusPalette.ink)
-                    TrustBadge(status: trust?.status)
-                    if contact.mlsKeyPackage == nil {
-                        MetadataChip(label: "Direct only")
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(contact.displayName)
+                            .font(.system(size: 15, weight: .semibold, design: .rounded))
+                            .foregroundStyle(NotrusPalette.ink)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                        contactBadges
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(contact.displayName)
+                            .font(.system(size: 15, weight: .semibold, design: .rounded))
+                            .foregroundStyle(NotrusPalette.ink)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        contactBadges
                     }
                 }
                 Text("@\(contact.username)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(
                     trust?.blockedAt != nil
                         ? "This contact is blocked on this Mac and will not appear in the new-thread composer until you unblock them."
@@ -1802,10 +1913,13 @@ struct ContactSelectionRow: View {
                 )
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .toggleStyle(.checkbox)
         .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(isSelected ? NotrusPalette.accentSoft.opacity(0.9) : NotrusPalette.panelStrong)
@@ -1815,17 +1929,53 @@ struct ContactSelectionRow: View {
                 .strokeBorder(isSelected ? NotrusPalette.accent.opacity(0.4) : NotrusPalette.hairline, lineWidth: 1)
         )
     }
+
+    @ViewBuilder
+    private var contactBadges: some View {
+        HStack(spacing: 6) {
+            TrustBadge(status: trust?.status)
+            if contact.mlsKeyPackage == nil {
+                MetadataChip(label: "Direct only")
+            }
+        }
+    }
 }
 
 struct AccountCenterSheet: View {
+    private enum AccountCenterSection: String, CaseIterable, Identifiable {
+        case general
+        case security
+        case devices
+        case relay
+        case privacy
+        case recovery
+        case advanced
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .general: return "General"
+            case .security: return "Security"
+            case .devices: return "Devices"
+            case .relay: return "Relay"
+            case .privacy: return "Privacy"
+            case .recovery: return "Recovery"
+            case .advanced: return "Advanced"
+            }
+        }
+    }
+
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @AppStorage("NotrusMac.appearanceMode") private var appearanceModeRaw = AppAppearanceMode.system.rawValue
+    @AppStorage("NotrusMac.lockOnBackground") private var lockOnBackground = true
     @State private var exportPassphrase = ""
     @State private var importPassphrase = ""
     @State private var preparedExport: PreparedRecoveryArchiveExport?
     @State private var exportPickerPresented = false
     @State private var importPickerPresented = false
+    @State private var selectedSection: AccountCenterSection = .general
 
     var body: some View {
         ZStack {
@@ -1837,8 +1987,7 @@ struct AccountCenterSheet: View {
                         HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text("Account Center")
-                                    .font(.system(size: 30, weight: .bold, design: .rounded))
-                                    .foregroundStyle(NotrusPalette.ink)
+                                    .font(.largeTitle.weight(.bold))
                                 Text("Manage local profiles, switch test identities, and move portable accounts with encrypted recovery archives.")
                                     .foregroundStyle(.secondary)
                             }
@@ -1849,10 +1998,17 @@ struct AccountCenterSheet: View {
                             .buttonStyle(SecondaryActionButtonStyle())
                         }
 
+                        Picker("Section", selection: $selectedSection) {
+                            ForEach(AccountCenterSection.allCases) { section in
+                                Text(section.title).tag(section)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
+                        if selectedSection == .general {
                         VStack(alignment: .leading, spacing: 14) {
                             Text("Appearance")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
-                                .foregroundStyle(NotrusPalette.ink)
+                                .font(.title3.weight(.semibold))
 
                             Text("Choose whether Notrus follows the system appearance or stays in a dedicated light or dark presentation.")
                                 .font(.callout)
@@ -1867,11 +2023,12 @@ struct AccountCenterSheet: View {
                         }
                         .padding(18)
                         .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        }
 
+                        if selectedSection == .privacy || selectedSection == .general {
                         VStack(alignment: .leading, spacing: 14) {
                             Text("Privacy Mode")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
-                                .foregroundStyle(NotrusPalette.ink)
+                                .font(.title3.weight(.semibold))
 
                             Text("When enabled, Notrus adds short random delays before routine relay sync, directory lookup, thread creation, and message delivery. This weakens timing correlation at the cost of responsiveness.")
                                 .font(.callout)
@@ -1894,14 +2051,19 @@ struct AccountCenterSheet: View {
                                 }
                             }
                             .toggleStyle(.switch)
+
+                            Toggle("Lock vault when app moves to background", isOn: $lockOnBackground)
+                                .toggleStyle(.switch)
+                                .font(.subheadline)
                         }
                         .padding(18)
                         .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        }
 
+                        if selectedSection == .devices || selectedSection == .advanced {
                         VStack(alignment: .leading, spacing: 14) {
                             Text("Stored on This Mac")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
-                                .foregroundStyle(NotrusPalette.ink)
+                                .font(.title3.weight(.semibold))
 
                             Text("Inspect the local vault backend, current device key state, and every profile stored on this Mac before creating or importing another account.")
                                 .font(.callout)
@@ -1962,11 +2124,12 @@ struct AccountCenterSheet: View {
                         }
                         .padding(18)
                         .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        }
 
+                        if selectedSection == .advanced {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("Profiles on This Mac")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
-                                .foregroundStyle(NotrusPalette.ink)
+                                .font(.title3.weight(.semibold))
 
                             ForEach(model.localProfiles, id: \.id) { profile in
                                 ViewThatFits(in: .horizontal) {
@@ -2006,11 +2169,12 @@ struct AccountCenterSheet: View {
                                 }
                             }
                         }
+                        }
 
+                        if selectedSection == .security {
                         VStack(alignment: .leading, spacing: 14) {
                             Text("Device Integrity")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
-                                .foregroundStyle(NotrusPalette.ink)
+                                .font(.title3.weight(.semibold))
 
                             if let integrity = model.integrityReport {
                                 HStack(spacing: 10) {
@@ -2042,11 +2206,12 @@ struct AccountCenterSheet: View {
                         }
                         .padding(18)
                         .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        }
 
+                        if selectedSection == .devices || selectedSection == .relay {
                         VStack(alignment: .leading, spacing: 14) {
                             Text("Linked Devices")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
-                                .foregroundStyle(NotrusPalette.ink)
+                                .font(.title3.weight(.semibold))
 
                             Text("Each linked device keeps its own device-management key. Add and revoke events are visible here and stay separate from conversation membership.")
                                 .font(.callout)
@@ -2114,11 +2279,12 @@ struct AccountCenterSheet: View {
                         }
                         .padding(18)
                         .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        }
 
+                        if selectedSection == .advanced {
                         VStack(alignment: .leading, spacing: 14) {
                             Text("Create Another Profile")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
-                                .foregroundStyle(NotrusPalette.ink)
+                                .font(.title3.weight(.semibold))
 
                             AdaptiveFieldRow {
                                 LabeledField(label: "Display name") {
@@ -2142,11 +2308,12 @@ struct AccountCenterSheet: View {
                         }
                         .padding(18)
                         .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        }
 
+                        if selectedSection == .security {
                         VStack(alignment: .leading, spacing: 14) {
                             Text("Contact Verification")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
-                                .foregroundStyle(NotrusPalette.ink)
+                                .font(.title3.weight(.semibold))
 
                             Text("First contact stays unverified on this Mac. If a contact key changes, Notrus will surface a security event and stop treating the new key as trusted until you review it.")
                                 .font(.callout)
@@ -2210,11 +2377,12 @@ struct AccountCenterSheet: View {
                         }
                         .padding(18)
                         .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        }
 
+                        if selectedSection == .recovery {
                         VStack(alignment: .leading, spacing: 14) {
                             Text("Recovery Archive")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
-                                .foregroundStyle(NotrusPalette.ink)
+                                .font(.title3.weight(.semibold))
 
                             Text("Device-vault profiles can be exported as encrypted recovery archives and imported on another Mac later. Legacy hardware-pinned profiles stay local-only.")
                                 .font(.callout)
@@ -2252,11 +2420,12 @@ struct AccountCenterSheet: View {
                         }
                         .padding(18)
                         .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        }
                     }
                 }
             }
-            .frame(minWidth: 440, idealWidth: 860, minHeight: 720)
-            .padding(28)
+            .frame(minWidth: 560, idealWidth: 900, minHeight: 720)
+            .padding(20)
         }
         .fileExporter(
             isPresented: $exportPickerPresented,
@@ -2316,17 +2485,37 @@ struct AccountCenterSheet: View {
             Text(label)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(value)
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundStyle(NotrusPalette.ink)
-                    .lineLimit(1)
-                    .textSelection(.enabled)
-                Spacer(minLength: 0)
-                if let trailing, !trailing.isEmpty {
-                    Text(trailing)
-                        .font(.caption)
-                        .foregroundStyle(NotrusPalette.muted)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(value)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(NotrusPalette.ink)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .layoutPriority(1)
+                    if let trailing, !trailing.isEmpty {
+                        Text(trailing)
+                            .font(.caption)
+                            .foregroundStyle(NotrusPalette.muted)
+                            .lineLimit(2)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(value)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(NotrusPalette.ink)
+                        .lineLimit(3)
+                        .truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                    if let trailing, !trailing.isEmpty {
+                        Text(trailing)
+                            .font(.caption)
+                            .foregroundStyle(NotrusPalette.muted)
+                            .lineLimit(2)
+                    }
                 }
             }
         }
@@ -2478,42 +2667,31 @@ struct AccountCenterSheet: View {
 struct PrimaryActionButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 14, weight: .semibold, design: .rounded))
+            .font(.body.weight(.semibold))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
             .foregroundStyle(.white)
-            .padding(.horizontal, 18)
-            .padding(.vertical, 12)
             .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                NotrusPalette.accent.opacity(configuration.isPressed ? 0.8 : 1),
-                                NotrusPalette.depth.opacity(configuration.isPressed ? 0.85 : 1)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(configuration.isPressed ? NotrusPalette.accent.opacity(0.72) : NotrusPalette.accent)
             )
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
-            .animation(.easeOut(duration: 0.14), value: configuration.isPressed)
     }
 }
 
 struct SecondaryActionButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 14, weight: .semibold, design: .rounded))
-            .foregroundStyle(NotrusPalette.ink)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 11)
+            .font(.body.weight(.semibold))
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
             .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(NotrusPalette.panelStrong.opacity(configuration.isPressed ? 0.78 : 1))
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor).opacity(configuration.isPressed ? 0.75 : 1))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(NotrusPalette.hairline, lineWidth: 1)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(.separator.opacity(0.4), lineWidth: 1)
             )
     }
 }

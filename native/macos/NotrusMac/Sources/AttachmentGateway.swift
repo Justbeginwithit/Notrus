@@ -40,7 +40,15 @@ enum AttachmentGateway {
             throw AttachmentGatewayError.emptySelection
         }
 
-        return try panel.urls.map { url in
+        return try importAttachments(from: panel.urls)
+    }
+
+    static func importAttachments(from urls: [URL]) throws -> [LocalAttachmentDraft] {
+        guard !urls.isEmpty else {
+            throw AttachmentGatewayError.emptySelection
+        }
+
+        return try urls.map { url in
             let values = try url.resourceValues(forKeys: [.contentTypeKey, .fileSizeKey, .nameKey])
             let byteLength = values.fileSize ?? 0
             let fileName = sanitizedFileName(values.name ?? url.lastPathComponent)

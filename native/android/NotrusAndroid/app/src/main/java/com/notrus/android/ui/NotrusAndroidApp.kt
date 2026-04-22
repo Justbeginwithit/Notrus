@@ -344,7 +344,7 @@ private fun OnboardingView(
                 color = MaterialTheme.colorScheme.onBackground,
             )
             Text(
-                text = "Create a device-protected profile or import a recovery archive. Direct chats are the stable cross-platform path in the current alpha.",
+                text = "Create a device-protected profile or import a recovery archive. Direct chats are the stable cross-platform path in the current beta.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -2278,6 +2278,11 @@ private fun LinkedDeviceRow(
     enhancedVisuals: Boolean,
     onRevoke: (() -> Unit)?,
 ) {
+    val displayLabel = sanitizeDisplayValue(device.label) ?: "Unknown device"
+    val displayPlatform = sanitizeDisplayValue(device.platform) ?: "unknown"
+    val displayRisk = sanitizeDisplayValue(device.riskLevel)?.uppercase() ?: "UNKNOWN"
+    val displayAttestationStatus = sanitizeDisplayValue(device.attestationStatus)
+    val displayAttestationNote = sanitizeDisplayValue(device.attestationNote)
     val rowColor by animateColorAsState(
         targetValue = if (enhancedVisuals) {
             lerp(MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.tertiary, 0.02f).copy(alpha = 0.9f)
@@ -2297,12 +2302,12 @@ private fun LinkedDeviceRow(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
             Text(
-                text = device.label,
+                text = displayLabel,
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Text(
-                text = "${device.platform} · ${device.id}",
+                text = "$displayPlatform · ${device.id}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -2315,17 +2320,24 @@ private fun LinkedDeviceRow(
                 if (device.revokedAt != null) {
                     InlineStatusBadge(label = "Revoked", tone = MaterialTheme.colorScheme.tertiary)
                 } else {
-                    InlineStatusBadge(label = "Risk ${device.riskLevel.uppercase()}", tone = successTone())
+                    InlineStatusBadge(label = "Risk $displayRisk", tone = successTone())
                 }
-                device.attestationStatus?.let {
+                displayAttestationStatus?.let {
                     InlineStatusBadge(label = it.replace('-', ' '), tone = MaterialTheme.colorScheme.primary)
                 }
             }
-            device.attestationNote?.let {
+            displayAttestationNote?.let {
                 Text(
                     text = it,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (device.current && device.revokedAt != null) {
+                Text(
+                    text = "This Android device is marked as revoked on the relay. Re-bootstrap this profile to restore linked-device access.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
                 )
             }
             onRevoke?.let {
@@ -2333,6 +2345,14 @@ private fun LinkedDeviceRow(
                     Text("Revoke linked device")
                 }
             }
+    }
+}
+
+private fun sanitizeDisplayValue(value: String?): String? {
+    val trimmed = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    return when (trimmed.lowercase()) {
+        "null", "nil", "undefined", "(null)", "<null>" -> null
+        else -> trimmed
     }
 }
 

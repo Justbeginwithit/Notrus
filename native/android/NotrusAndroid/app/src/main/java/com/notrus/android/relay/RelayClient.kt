@@ -422,19 +422,21 @@ class RelayClient(
         val safeArray = array ?: JSONArray()
         for (index in 0 until safeArray.length()) {
             val json = safeArray.optJSONObject(index) ?: continue
+            val id = nullableString(json, "id") ?: continue
+            val createdAt = nullableString(json, "createdAt") ?: Instant.now().toString()
             devices += RelayLinkedDevice(
-                attestationNote = json.optString("attestationNote").ifBlank { null },
-                attestationStatus = json.optString("attestationStatus").ifBlank { null },
-                attestedAt = json.optString("attestedAt").ifBlank { null },
-                createdAt = json.optString("createdAt"),
+                attestationNote = nullableString(json, "attestationNote"),
+                attestationStatus = nullableString(json, "attestationStatus"),
+                attestedAt = nullableString(json, "attestedAt"),
+                createdAt = createdAt,
                 current = json.optBoolean("current", false),
-                id = json.optString("id"),
-                label = json.optString("label"),
-                platform = json.optString("platform"),
-                revokedAt = json.optString("revokedAt").ifBlank { null },
-                riskLevel = json.optString("riskLevel", "unknown"),
-                storageMode = json.optString("storageMode").ifBlank { null },
-                updatedAt = json.optString("updatedAt", json.optString("createdAt")),
+                id = id,
+                label = nullableString(json, "label") ?: "Unknown device",
+                platform = nullableString(json, "platform") ?: "unknown",
+                revokedAt = nullableString(json, "revokedAt"),
+                riskLevel = nullableString(json, "riskLevel") ?: "unknown",
+                storageMode = nullableString(json, "storageMode"),
+                updatedAt = nullableString(json, "updatedAt") ?: createdAt,
             )
         }
         return devices
@@ -525,8 +527,22 @@ class RelayClient(
         if (!json.has(key) || json.isNull(key)) {
             null
         } else {
-            json.optString(key).takeUnless { it.isBlank() || it == "null" }
+            sanitizeOptionalString(json.opt(key))
         }
+
+    private fun sanitizeOptionalString(value: Any?): String? {
+        val text = when (value) {
+            null, JSONObject.NULL -> null
+            else -> value.toString()
+        }?.trim() ?: return null
+        if (text.isBlank()) {
+            return null
+        }
+        return when (text.lowercase()) {
+            "null", "nil", "undefined" -> null
+            else -> text
+        }
+    }
 
     private fun jsonInt32(json: JSONObject, key: String, defaultValue: Int): Int {
         if (!json.has(key) || json.isNull(key)) {

@@ -51,6 +51,14 @@ Android:
 - encrypted local vault storage
 - per-device identity and linked-device controls
 
+## Attestation Posture
+
+- relay-side attestation verification support exists through the separate attestation service (`attestation.js`)
+- default relay startup does not enforce attestation verification unless operator flags are set
+- production-like deployments should explicitly configure `NOTRUS_ATTESTATION_ORIGIN` and the required enforcement flags per platform
+- attestation outcomes are treated as trust/risk and abuse-control signals, not as a plaintext decryption authority
+- setup and runtime verification are documented in [ATTESTATION_SETUP.md](ATTESTATION_SETUP.md)
+
 ## Transparency And Verification
 
 - the relay maintains an append-only transparency log for identity and key events
@@ -96,23 +104,23 @@ The native macOS and Android clients also expose an optional privacy mode that a
 
 ## Current Honest Boundary
 
-Notrus is stronger than the original prototype, but it is still an alpha product.
+Notrus is currently beta software.
 
-The remaining high-value work is:
+The remaining high-value work before stable is:
 
-- stronger key-directory and transparency guarantees
-- operational hardening of production attestation credentials and monitoring
-- final macOS release signing, Hardened Runtime, entitlements, and notarization flow
-- secured release/update chain controls
-- deeper sender/recipient privacy and metadata reduction
-- external audit
+- sustained real-world operational burn-in across varied environments
+- stronger external confidence signals (independent review, reproducibility maturity)
+- continued operator-side hardening for release and infrastructure management
 
 Related docs:
 
 - [THREAT_MODEL.md](THREAT_MODEL.md)
 - [SECURITY_CHECKLIST.md](SECURITY_CHECKLIST.md)
+- [BETA_RELEASE_CHECKLIST.md](BETA_RELEASE_CHECKLIST.md)
+- [STABLE_RELEASE_CHECKLIST.md](STABLE_RELEASE_CHECKLIST.md)
 - [CRYPTO_SPEC.md](CRYPTO_SPEC.md)
 - [PROTOCOL_MIGRATION.md](PROTOCOL_MIGRATION.md)
 - [SECURITY_RELEASE.md](SECURITY_RELEASE.md)
+- [ATTESTATION_SETUP.md](ATTESTATION_SETUP.md)
 - [DISCLAIMER.md](DISCLAIMER.md)
 - [LEGAL.md](LEGAL.md)

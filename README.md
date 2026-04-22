@@ -14,18 +14,18 @@ Current production-target protocol choices:
 
 This repository is native-only. The earlier browser client is not part of the current product surface.
 
-## Alpha Status
+## Beta Status
 
-Notrus is still alpha software.
+Notrus is currently **beta software**.
 
 That means:
 
-- the codebase is functional, but still changing
-- release hardening is incomplete
-- external audit is not complete
-- operators are responsible for their own relay and release hygiene
+- the core architecture and security paths are implemented and test-gated
+- the real clients use the intended privacy/auth routing path
+- major trust-model controls are in place
+- remaining work is focused on stable-release maturity, operations, and external confidence signals
 
-Do not treat the current build as a finished, audited, or emergency-grade secure messenger.
+Do not treat this as a finished, externally audited, warranty-backed messenger.
 
 Read before use:
 
@@ -33,8 +33,10 @@ Read before use:
 - [DISCLAIMER.md](DISCLAIMER.md)
 - [LEGAL.md](LEGAL.md)
 - [SECURITY.md](SECURITY.md)
+- [BETA_RELEASE_CHECKLIST.md](BETA_RELEASE_CHECKLIST.md)
 - [RELEASE_NOTES.md](RELEASE_NOTES.md)
 - [ROADMAP.md](ROADMAP.md)
+- [ATTESTATION_SETUP.md](ATTESTATION_SETUP.md)
 - [LICENSE](LICENSE)
 
 ## What Notrus Uses
@@ -82,6 +84,12 @@ Optional witness:
 RELAY_ORIGIN=http://127.0.0.1:3000 npm run start:witness
 ```
 
+Optional attestation service (recommended for production-like trust posture):
+
+```bash
+npm run start:attestation
+```
+
 Build/package both native clients:
 
 ```bash
@@ -94,11 +102,11 @@ Artifacts:
 
 - `dist/Notrus.app`
 - `dist/Notrus.zip`
-- `dist/Notrus-0.2.0-alpha2.zip`
+- `dist/Notrus-0.3.1-beta2.zip`
 - `dist/android/Notrus-debug.apk`
 - `dist/android/Notrus-release.apk`
-- `dist/android/Notrus-0.2.0-alpha2-debug.apk`
-- `dist/android/Notrus-0.2.0-alpha2-release.apk`
+- `dist/android/Notrus-0.3.1-beta2-debug.apk`
+- `dist/android/Notrus-0.3.1-beta2-release.apk`
 
 ## Current Product Boundary
 
@@ -126,6 +134,12 @@ Routine delivery traffic is intentionally narrower than the old model:
 
 Both native clients also expose an optional privacy mode that adds short random delays to routine network actions to weaken simple timing correlation.
 
+Attestation posture:
+
+- relay attestation verification support exists, but enforcement is operator-configured
+- default startup does not enforce vendor attestation checks
+- see [ATTESTATION_SETUP.md](ATTESTATION_SETUP.md) for current state, env flags, and strict-mode setup
+
 Current native-client boundary:
 
 - direct chats work across macOS and Android
@@ -143,6 +157,12 @@ The supported account-move path is native recovery export/import.
 4. Revoke the old device or perform a recovery-authorized reset if needed.
 
 ## Verification Commands
+
+```bash
+npm run test:beta-readiness
+```
+
+Extended command set:
 
 ```bash
 npm run generate:crypto-vectors
@@ -172,12 +192,14 @@ cd native/android/NotrusAndroid && ./gradlew testDebugUnitTest connectedDebugAnd
 - Threat model: [THREAT_MODEL.md](THREAT_MODEL.md)
 - Security model: [SECURITY.md](SECURITY.md)
 - Security checklist: [SECURITY_CHECKLIST.md](SECURITY_CHECKLIST.md)
+- Beta release checklist: [BETA_RELEASE_CHECKLIST.md](BETA_RELEASE_CHECKLIST.md)
 - Stable release checklist: [STABLE_RELEASE_CHECKLIST.md](STABLE_RELEASE_CHECKLIST.md)
 - Crypto contract: [CRYPTO_SPEC.md](CRYPTO_SPEC.md)
 - Protocol migration: [PROTOCOL_MIGRATION.md](PROTOCOL_MIGRATION.md)
 - Metadata policy: [METADATA_POLICY.md](METADATA_POLICY.md)
 - Device model: [DEVICE_MODEL.md](DEVICE_MODEL.md)
 - Integrity policy: [INTEGRITY_POLICY.md](INTEGRITY_POLICY.md)
+- Attestation setup: [ATTESTATION_SETUP.md](ATTESTATION_SETUP.md)
 - Release security: [SECURITY_RELEASE.md](SECURITY_RELEASE.md)
 - Release notes: [RELEASE_NOTES.md](RELEASE_NOTES.md)
 - Product roadmap: [ROADMAP.md](ROADMAP.md)

@@ -30,8 +30,8 @@ android {
         applicationId = "com.notrus.android"
         minSdk = 31
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0-alpha2"
+        versionCode = 4
+        versionName = "0.3.1-beta2"
         buildConfigField("String", "DEFAULT_RELAY_ORIGIN", "\"$defaultRelayOrigin\"")
         buildConfigField("long", "PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER", "${playIntegrityCloudProjectNumber}L")
         ndk {

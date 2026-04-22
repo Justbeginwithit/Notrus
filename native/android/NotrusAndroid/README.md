@@ -14,12 +14,15 @@
 - linked-device visibility and revocation
 - multiple local profiles in one vault for testing and account switching
 
+Current maturity: beta
+
 ## Current Boundary
 
 - direct chats follow the standards Signal path
 - standards-group threads support compatible fanout transport on Android (per-recipient Signal envelopes inside `mls-rfc9420-v1` delivery)
 - native MLS state processing still exists as a separate path in the protocol core and macOS client
-- release packaging exists, but production signing and attestation rollout still need hardening work
+- release packaging and governance gates are active; production signing custody and operator attestation posture still require deployment-side hardening for stable
+- attestation posture and enforcement setup are documented in [`ATTESTATION_SETUP.md`](../../../ATTESTATION_SETUP.md)
 
 ## Build
 
