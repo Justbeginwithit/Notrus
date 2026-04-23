@@ -345,6 +345,7 @@ data class CachedMessageState(
 data class ConversationThreadRecord(
     val hiddenAt: String? = null,
     val localTitle: String? = null,
+    val purgedAt: String? = null,
     val messageCache: Map<String, CachedMessageState> = emptyMap(),
     val lastProcessedMessageId: String? = null,
     val processedMessageCount: Int = 0,
@@ -465,9 +466,44 @@ data class ConversationThread(
     val warning: String? = null,
 )
 
+enum class NotificationContentVisibility(
+    val key: String,
+    val label: String,
+) {
+    Hidden("hidden", "Hidden"),
+    SenderOnly("sender-only", "Show sender"),
+    FullPreview("full-preview", "Show sender and preview");
+
+    companion object {
+        fun fromKey(key: String?): NotificationContentVisibility =
+            entries.firstOrNull { it.key == key } ?: Hidden
+    }
+}
+
+enum class NotificationLockscreenVisibility(
+    val key: String,
+    val label: String,
+) {
+    Secret("secret", "Hide on lock screen"),
+    Private("private", "Private on lock screen"),
+    Public("public", "Show on lock screen");
+
+    companion object {
+        fun fromKey(key: String?): NotificationLockscreenVisibility =
+            entries.firstOrNull { it.key == key } ?: Private
+    }
+}
+
 data class AppUiState(
     val relayOriginInput: String = "",
     val privacyModeEnabled: Boolean = false,
+    val notificationsEnabled: Boolean = true,
+    val notificationContentVisibility: String = "hidden",
+    val notificationLockscreenVisibility: String = "private",
+    val notificationGroupPreviewEnabled: Boolean = false,
+    val notificationPrivacyModeOverride: Boolean = false,
+    val notificationSoundEnabled: Boolean = true,
+    val notificationVibrationEnabled: Boolean = true,
     val visualEffectsEnabled: Boolean = true,
     val colorThemePreset: String = "ocean",
     val themeMode: String = "system",

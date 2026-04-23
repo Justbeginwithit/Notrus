@@ -135,6 +135,17 @@ class DeviceIdentityProvider(
 
     fun hasAlias(appInstanceId: String): Boolean = keyStore.containsAlias(alias(appInstanceId))
 
+    fun deleteAlias(alias: String) {
+        if (!alias.startsWith("notrus:device:")) {
+            return
+        }
+        runCatching {
+            if (keyStore.containsAlias(alias)) {
+                keyStore.deleteEntry(alias)
+            }
+        }
+    }
+
     fun listDeviceAliases(): List<DeviceAliasSnapshot> =
         java.util.Collections.list(keyStore.aliases())
             .filter { it.startsWith("notrus:device:") }

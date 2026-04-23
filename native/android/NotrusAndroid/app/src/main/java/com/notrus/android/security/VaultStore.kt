@@ -224,6 +224,7 @@ class VaultStore(context: Context) {
         JSONObject()
             .put("hiddenAt", record.hiddenAt)
             .put("localTitle", record.localTitle)
+            .put("purgedAt", record.purgedAt)
             .put("lastProcessedMessageId", record.lastProcessedMessageId)
             .put("processedMessageCount", record.processedMessageCount)
             .put("protocol", record.protocol)
@@ -245,6 +246,7 @@ class VaultStore(context: Context) {
         return ConversationThreadRecord(
             hiddenAt = json.optString("hiddenAt").ifBlank { null },
             localTitle = json.optString("localTitle").ifBlank { null },
+            purgedAt = json.optString("purgedAt").ifBlank { null },
             lastProcessedMessageId = json.optString("lastProcessedMessageId").ifBlank { null },
             messageCache = messageCache,
             processedMessageCount = json.optInt("processedMessageCount", 0),

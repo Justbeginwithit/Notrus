@@ -1,22 +1,23 @@
 # Notrus Push Policy
 
-The current shipping production path in this repository is the native macOS client.
-
 ## Current rule
 
-- Notrus Mac does not ship APNs, FCM, or provider-rendered push notifications.
-- The packaged app does not declare push entitlements.
-- The native source tree intentionally avoids remote-notification frameworks and local notification surfaces that would expose message timing or content on the lock screen by default.
+- Notrus does not ship APNs or FCM provider push in this repository.
+- Android uses local background notifications driven by periodic WorkManager wake-ups plus relay sync across all local device profiles.
+- Notification payload generation happens on-device after sync and local decrypt (when preview mode allows it).
+- Notification content is hidden by default and user-configurable.
+- Current beta status: notification controls and sync plumbing are present, but delivery reliability still needs polish on some devices/background scheduling cases.
 
-## Why this is the current secure choice
+## Security and privacy boundary
 
-- No message bodies are sent through third-party push infrastructure.
-- No contact names are rendered by a notification provider outside the app.
-- There is no lock-screen preview surface to misconfigure in the current shipping path.
+- No plaintext message bodies are sent through third-party push payloads.
+- Wake-up registration data on the relay is metadata-minimized and device-bound.
+- If privacy mode is enabled, notifications default to hidden content unless explicitly overridden.
+- Device revocation invalidates wake-up registration state for that device.
 
-## Future rule if push is added
+## Rule for future provider push
 
-- Push payloads must contain only a minimal wake-up token or queue hint.
-- Message content must be fetched from the relay and decrypted inside the app.
-- Contact names and previews must stay privacy-first and user-configurable.
-- Any future push implementation must add dedicated notification-privacy tests before it can ship.
+- Provider push payloads must remain minimal wake-up signals only.
+- Message content must always be fetched from the relay and decrypted on-device.
+- Sender/body preview must remain opt-in and privacy-first.
+- Any provider push integration must ship with dedicated notification-privacy regression tests.

@@ -37,6 +37,7 @@ Read before use:
 - [RELEASE_NOTES.md](RELEASE_NOTES.md)
 - [ROADMAP.md](ROADMAP.md)
 - [ATTESTATION_SETUP.md](ATTESTATION_SETUP.md)
+- [ADMIN_GUI.md](ADMIN_GUI.md)
 - [LICENSE](LICENSE)
 
 ## What Notrus Uses
@@ -71,6 +72,29 @@ Start the relay:
 node server.js
 ```
 
+Optional relay-operator API (disabled by default):
+
+```bash
+NOTRUS_ENABLE_ADMIN_API=true \
+NOTRUS_ADMIN_API_TOKEN="replace-with-long-random-token" \
+node server.js
+```
+
+When enabled, the relay exposes token-protected operator routes:
+
+- `GET /api/admin/users`
+- `POST /api/admin/users/:userId/unblock`
+- `POST /api/admin/users/:userId/block`
+- `POST /api/admin/users/:userId/delete`
+
+Relay also serves a built-in admin GUI at:
+
+- `/admin`
+
+Use header `X-Notrus-Admin-Token: <token>`.
+
+Admin GUI capabilities and limits are documented in [ADMIN_GUI.md](ADMIN_GUI.md).
+
 Local development relay origins:
 
 - `http://127.0.0.1:3000`
@@ -102,11 +126,11 @@ Artifacts:
 
 - `dist/Notrus.app`
 - `dist/Notrus.zip`
-- `dist/Notrus-0.3.1-beta2.zip`
+- `dist/Notrus-0.3.2-beta3.zip`
 - `dist/android/Notrus-debug.apk`
 - `dist/android/Notrus-release.apk`
-- `dist/android/Notrus-0.3.1-beta2-debug.apk`
-- `dist/android/Notrus-0.3.1-beta2-release.apk`
+- `dist/android/Notrus-0.3.2-beta3-debug.apk`
+- `dist/android/Notrus-0.3.2-beta3-release.apk`
 
 ## Current Product Boundary
 
@@ -155,6 +179,15 @@ The supported account-move path is native recovery export/import.
 2. Move it through a trusted channel.
 3. Import it on the replacement device.
 4. Revoke the old device or perform a recovery-authorized reset if needed.
+
+Current beta limitation:
+
+- recovery import/export restores account identity material, but does not yet provide full historical plaintext chat restoration across devices. Older chats may appear as unavailable/invalid local plaintext on the destination device.
+
+## Known Beta Limitations
+
+- Android notifications are implemented in code and UI but still require reliability polish on some devices/OS scheduling conditions.
+- Recovery import/export is currently identity-first and not a full conversation-history migration path.
 
 ## Verification Commands
 

@@ -135,6 +135,17 @@ class StrongBoxIdentityProvider(
         }
     }
 
+    fun deleteAlias(alias: String) {
+        if (!alias.startsWith("notrus:") || alias.startsWith("notrus:device:")) {
+            return
+        }
+        runCatching {
+            if (keyStore.containsAlias(alias)) {
+                keyStore.deleteEntry(alias)
+            }
+        }
+    }
+
     fun listIdentityAliases(): List<HardwareAliasSnapshot> {
         val aliases = Collections.list(keyStore.aliases())
         return aliases

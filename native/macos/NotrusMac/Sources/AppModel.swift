@@ -624,6 +624,10 @@ final class AppModel: ObservableObject {
             errorMessage = "Username must be 3-24 lowercase characters using letters, numbers, dots, dashes, or underscores."
             return
         }
+        if let existing = localProfiles.first(where: { $0.username.caseInsensitiveCompare(username) == .orderedSame }) {
+            errorMessage = "That username is already stored locally on this Mac as \(existing.displayName) (\(existing.id)). Switch to that profile or delete it first."
+            return
+        }
 
         beginBlockingBusy("Creating a device-protected macOS identity...")
         defer { endBlockingBusy() }
@@ -663,8 +667,31 @@ final class AppModel: ObservableObject {
             try await registerAndSync()
             statusMessage = "Created a device-protected macOS profile with \(unlockMethod)."
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = renderCreateIdentityError(error, attemptedUsername: username)
         }
+    }
+
+    private func renderCreateIdentityError(_ error: Error, attemptedUsername: String) -> String {
+        let message = error.localizedDescription
+        let normalized = message.lowercased()
+        let localSummary = localProfiles
+            .sorted { $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending }
+            .map { "@\($0.username) (\($0.id))" }
+            .joined(separator: "; ")
+        if
+            normalized.contains("already bound to a different device identity") ||
+            normalized.contains("device identity does not match the stored account record")
+        {
+            let sameUsername = localProfiles.contains { $0.username.caseInsensitiveCompare(attemptedUsername) == .orderedSame }
+            if !sameUsername {
+                return "That username is already registered on the relay by a different account identity. Local profiles on this Mac: \(localSummary.isEmpty ? "none" : localSummary)."
+            }
+            if sameUsername {
+                return "\(message) Local profiles on this Mac: \(localSummary.isEmpty ? "none" : localSummary). The same username already exists in the local vault."
+            }
+            return "\(message) Local profiles on this Mac: \(localSummary.isEmpty ? "none" : localSummary)."
+        }
+        return message
     }
 
     private func ensureStandardsIdentityMaterial(for identity: LocalIdentity) async throws -> LocalIdentity {
@@ -1274,7 +1301,7 @@ final class AppModel: ObservableObject {
                 if let restoredThreadId = threadRecords.first(where: { $0.value.standardsSignalPeerUserId == remoteUserId && $0.value.hiddenAt == nil })?.key {
                     selectedThreadID = restoredThreadId
                 }
-                statusMessage = "Restored the local direct conversation on this Mac."
+                statusMessage = "Reopened the local direct conversation on this Mac. Older locally-deleted history stays removed."
                 return
             }
             let prepared = try await NativeExecution.run {
@@ -1930,7 +1957,13 @@ final class AppModel: ObservableObject {
             return
         }
 
-        record.hiddenAt = NotrusCrypto.isoNow()
+        let purgeAt = NotrusCrypto.isoNow()
+        let currentMessageCount = threads.first(where: { $0.id == threadId })?.rawThread.messages.count ?? 0
+        record.hiddenAt = purgeAt
+        record.purgedAt = purgeAt
+        record.messageCache.removeAll()
+        record.processedMessageCount = max(record.processedMessageCount, currentMessageCount)
+        record.lastProcessedMessageId = threads.first(where: { $0.id == threadId })?.rawThread.messages.last?.id ?? record.lastProcessedMessageId
         threadRecords[threadId] = record
         threads.removeAll { $0.id == threadId }
         if selectedThreadID == threadId {
@@ -2416,6 +2449,9 @@ final class AppModel: ObservableObject {
         }
         var record = entry.value
         record.hiddenAt = nil
+        if record.purgedAt != nil {
+            record.messageCache.removeAll()
+        }
         threadRecords[entry.key] = record
         try? persistThreadStore()
         return true
@@ -2648,6 +2684,20 @@ final class AppModel: ObservableObject {
         return []
     }
 
+    private func shouldDisplayMessage(
+        _ message: RelayMessage,
+        cached: CachedMessageState?,
+        record: ThreadStoreRecord?
+    ) -> Bool {
+        if cached?.hidden == true {
+            return false
+        }
+        guard let purgedAt = record?.purgedAt, cached == nil else {
+            return true
+        }
+        return message.createdAt > purgedAt
+    }
+
     private func materialize(
         thread: RelayThread,
         usersById: [String: RelayUser],
@@ -2874,7 +2924,7 @@ final class AppModel: ObservableObject {
 
         let messages = thread.messages.compactMap { message -> DecryptedMessage? in
             let cached = record.messageCache[message.id]
-            if cached?.hidden == true {
+            if !shouldDisplayMessage(message, cached: cached, record: record) {
                 return nil
             }
 
@@ -2932,6 +2982,7 @@ final class AppModel: ObservableObject {
             {
                 record = ThreadStoreRecord(
                     hiddenAt: record.hiddenAt,
+                    purgedAt: record.purgedAt,
                     localTitle: record.localTitle,
                     messageCache: [:],
                     processedMessageCount: 0,
@@ -2994,7 +3045,7 @@ final class AppModel: ObservableObject {
             threadRecords[thread.id] = record
             let messages = thread.messages.compactMap { message -> DecryptedMessage? in
                 let cached = record.messageCache[message.id]
-                if cached?.hidden == true {
+                if !shouldDisplayMessage(message, cached: cached, record: record) {
                     return nil
                 }
                 return DecryptedMessage(
@@ -3163,7 +3214,7 @@ final class AppModel: ObservableObject {
 
         let messages = thread.messages.compactMap { message -> DecryptedMessage? in
             let cached = record.messageCache[message.id]
-            if cached?.hidden == true {
+            if !shouldDisplayMessage(message, cached: cached, record: record) {
                 return nil
             }
 
@@ -3199,7 +3250,11 @@ final class AppModel: ObservableObject {
         warnings: [String]
     ) throws -> ConversationThread {
         var threadWarnings = warnings
-        let messages = thread.messages.map { message -> DecryptedMessage in
+        let historyRecord = threadRecords[thread.id]
+        let messages = thread.messages.compactMap { message -> DecryptedMessage? in
+            if !shouldDisplayMessage(message, cached: nil, record: historyRecord) {
+                return nil
+            }
             guard let sender = usersById[message.senderId] else {
                 return DecryptedMessage(
                     id: message.id,
@@ -3287,8 +3342,12 @@ final class AppModel: ObservableObject {
         }
 
         guard let roomKey else {
-            let messages = thread.messages.map { message in
-                DecryptedMessage(
+            let historyRecord = threadRecords[thread.id]
+            let messages = thread.messages.compactMap { message -> DecryptedMessage? in
+                if !shouldDisplayMessage(message, cached: nil, record: historyRecord) {
+                    return nil
+                }
+                return DecryptedMessage(
                     id: message.id,
                     senderId: message.senderId,
                     senderName: usersById[message.senderId]?.displayName ?? "Unknown user",
@@ -3313,8 +3372,12 @@ final class AppModel: ObservableObject {
         if record == nil {
             if thread.createdBy == identity.id {
                 threadWarnings.append("Local ratchet bootstrap state is missing for this direct thread on this Mac.")
-                let messages = thread.messages.map { message in
-                    DecryptedMessage(
+                let historyRecord = threadRecords[thread.id]
+                let messages = thread.messages.compactMap { message -> DecryptedMessage? in
+                    if !shouldDisplayMessage(message, cached: nil, record: historyRecord) {
+                        return nil
+                    }
+                    return DecryptedMessage(
                         id: message.id,
                         senderId: message.senderId,
                         senderName: usersById[message.senderId]?.displayName ?? "Unknown user",
@@ -3428,7 +3491,7 @@ final class AppModel: ObservableObject {
 
         let messages = thread.messages.compactMap { message -> DecryptedMessage? in
             let cached = resolvedRecord.messageCache[message.id]
-            if cached?.hidden == true {
+            if !shouldDisplayMessage(message, cached: cached, record: resolvedRecord) {
                 return nil
             }
 
@@ -3465,8 +3528,12 @@ final class AppModel: ObservableObject {
         var threadWarnings = warnings
 
         guard let roomKey else {
-            let messages = thread.messages.map { message in
-                DecryptedMessage(
+            let historyRecord = threadRecords[thread.id]
+            let messages = thread.messages.compactMap { message -> DecryptedMessage? in
+                if !shouldDisplayMessage(message, cached: nil, record: historyRecord) {
+                    return nil
+                }
+                return DecryptedMessage(
                     id: message.id,
                     senderId: message.senderId,
                     senderName: usersById[message.senderId]?.displayName ?? "Unknown user",
@@ -3602,7 +3669,7 @@ final class AppModel: ObservableObject {
 
         let messages = thread.messages.compactMap { message -> DecryptedMessage? in
             let cached = resolvedRecord.messageCache[message.id]
-            if cached?.hidden == true {
+            if !shouldDisplayMessage(message, cached: cached, record: resolvedRecord) {
                 return nil
             }
 
@@ -3637,8 +3704,12 @@ final class AppModel: ObservableObject {
         reason: String,
         warnings: [String]
     ) -> ConversationThread {
-        let messages = thread.messages.map { message in
-            DecryptedMessage(
+        let historyRecord = threadRecords[thread.id]
+        let messages = thread.messages.compactMap { message -> DecryptedMessage? in
+            if !shouldDisplayMessage(message, cached: nil, record: historyRecord) {
+                return nil
+            }
+            return DecryptedMessage(
                 id: message.id,
                 senderId: message.senderId,
                 senderName: usersById[message.senderId]?.displayName ?? "Unknown",

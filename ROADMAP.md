@@ -1,8 +1,8 @@
 # Notrus Roadmap
 
-This roadmap tracks next work after the `v0.3.1-beta2` release.
+This roadmap tracks next work after the `v0.3.2-beta3` release.
 
-## Current state (Beta 2)
+## Current state (Beta 3)
 
 - Native clients: macOS + Android
 - Relay + witness + attestation service in one repository
@@ -12,8 +12,8 @@ This roadmap tracks next work after the `v0.3.1-beta2` release.
   - Compatibility path: standards-thread fanout transport when native MLS state is unavailable
 - Opaque routine routing active: session token + mailbox handle + delivery capability
 - Release labels aligned for current artifacts:
-  - macOS: `Notrus-0.3.1-beta2.zip`
-  - Android: `Notrus-0.3.1-beta2-release.apk`
+  - macOS: `Notrus-0.3.2-beta3.zip`
+  - Android: `Notrus-0.3.2-beta3-release.apk`
 
 ## Near-term release-candidate track
 
@@ -26,6 +26,8 @@ This roadmap tracks next work after the `v0.3.1-beta2` release.
   - Android trust/device screen polish after beta-device feedback
 - Reliability:
   - continue burn-in across profile import/export, linked-device, and relay session-expiry edges
+  - improve Android background notification reliability consistency across OEM/device scheduling behavior
+  - improve import/export follow-up behavior for conversation-history portability expectations
 
 ## Stable track
 

@@ -24,12 +24,17 @@ import com.notrus.android.model.IdentityCatalog
 import com.notrus.android.model.LocalDeviceInventory
 import com.notrus.android.model.LocalAttachmentDraft
 import com.notrus.android.model.LocalIdentity
+import com.notrus.android.model.NotificationContentVisibility
+import com.notrus.android.model.NotificationLockscreenVisibility
 import com.notrus.android.model.RelayMessage
 import com.notrus.android.model.RelayThread
 import com.notrus.android.model.RelayUser
 import com.notrus.android.model.SecureAttachmentReference
 import com.notrus.android.model.StoredIdentityRecord
 import com.notrus.android.model.selectedThread
+import com.notrus.android.notifications.NotrusBackgroundSyncWorker
+import com.notrus.android.notifications.NotrusNotificationCenter
+import com.notrus.android.notifications.NotrusNotificationPrefs
 import com.notrus.android.protocol.ProtocolCatalog
 import com.notrus.android.protocol.StandardsSignalClient
 import com.notrus.android.relay.RelayClient
@@ -48,8 +53,10 @@ import com.notrus.android.ui.theme.NotrusColorTheme
 import com.notrus.android.ui.theme.NotrusThemeMode
 import java.time.Instant
 import java.util.UUID
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.random.Random
@@ -95,6 +102,11 @@ private enum class PrivacyDelayKind {
     Delivery,
 }
 
+private enum class SyncPresentation {
+    Interactive,
+    Silent,
+}
+
 class NotrusViewModel(application: Application) : AndroidViewModel(application) {
     var state by mutableStateOf(AppUiState())
         private set
@@ -106,12 +118,17 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
     private val settings = applicationContext.getSharedPreferences("notrus_settings", Context.MODE_PRIVATE)
     private val defaultRemoteRelayOrigin = BuildConfig.DEFAULT_RELAY_ORIGIN.trim()
     private val defaultEnhancedVisualsEnabled = !isLowRamDevice(applicationContext)
-    private val appInstanceId = settings.getString(KEY_APP_INSTANCE_ID, null)
+    private val appInstanceId = settings.getString(NotrusNotificationPrefs.KEY_APP_INSTANCE_ID, null)
         ?: UUID.randomUUID().toString().also {
-            settings.edit().putString(KEY_APP_INSTANCE_ID, it).apply()
+            settings.edit().putString(NotrusNotificationPrefs.KEY_APP_INSTANCE_ID, it).apply()
         }
     private var lastSensitiveAuthAtMs: Long = 0L
-    private var relaySession: com.notrus.android.model.RelaySession? = null
+    private var relaySession: com.notrus.android.model.RelaySession? =
+        NotrusNotificationPrefs.loadRelaySession(applicationContext)
+    private var liveEventsJob: Job? = null
+    private var liveSyncDebounceJob: Job? = null
+    private var appInForeground: Boolean = false
+    private var pendingNotificationThreadId: String? = null
 
     init {
         val integrity = DeviceRiskSignals.capture(applicationContext)
@@ -119,6 +136,19 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             currentDevice = deviceIdentityProvider.descriptor(applicationContext, appInstanceId),
             integrityReport = integrity,
             privacyModeEnabled = settings.getBoolean(KEY_PRIVACY_MODE_ENABLED, false),
+            notificationsEnabled = settings.getBoolean(NotrusNotificationPrefs.KEY_NOTIFICATIONS_ENABLED, true),
+            notificationContentVisibility = settings.getString(
+                NotrusNotificationPrefs.KEY_NOTIFICATION_CONTENT_VISIBILITY,
+                NotificationContentVisibility.Hidden.key,
+            ) ?: NotificationContentVisibility.Hidden.key,
+            notificationLockscreenVisibility = settings.getString(
+                NotrusNotificationPrefs.KEY_NOTIFICATION_LOCKSCREEN_VISIBILITY,
+                NotificationLockscreenVisibility.Private.key,
+            ) ?: NotificationLockscreenVisibility.Private.key,
+            notificationGroupPreviewEnabled = settings.getBoolean(NotrusNotificationPrefs.KEY_NOTIFICATION_GROUP_PREVIEW_ENABLED, false),
+            notificationPrivacyModeOverride = settings.getBoolean(NotrusNotificationPrefs.KEY_NOTIFICATION_PRIVACY_MODE_OVERRIDE, false),
+            notificationSoundEnabled = settings.getBoolean(NotrusNotificationPrefs.KEY_NOTIFICATION_SOUND_ENABLED, true),
+            notificationVibrationEnabled = settings.getBoolean(NotrusNotificationPrefs.KEY_NOTIFICATION_VIBRATION_ENABLED, true),
             visualEffectsEnabled = settings.getBoolean(KEY_VISUAL_EFFECTS_ENABLED, defaultEnhancedVisualsEnabled),
             colorThemePreset = settings.getString(
                 KEY_COLOR_THEME_PRESET,
@@ -131,12 +161,20 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             relayOriginInput = bootstrapRelayOrigin(settings.getString(KEY_RELAY_ORIGIN, null)),
             witnessOriginsInput = settings.getString(KEY_WITNESS_ORIGINS, "") ?: "",
         )
+        NotrusNotificationCenter.ensureChannels(applicationContext)
+        if (state.notificationsEnabled) {
+            NotrusBackgroundSyncWorker.schedulePeriodic(applicationContext)
+            NotrusBackgroundSyncWorker.scheduleRolling(applicationContext)
+        } else {
+            NotrusBackgroundSyncWorker.cancelAll(applicationContext)
+        }
         refreshDeviceInventory()
         bootstrap()
     }
 
     fun updateRelayOrigin(value: String) {
-        relaySession = null
+        updateRelaySession(null)
+        stopLiveEvents()
         state = state.copy(relayOriginInput = value, errorMessage = null, relayHealth = null)
         settings.edit().putString(KEY_RELAY_ORIGIN, value).apply()
     }
@@ -144,6 +182,68 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
     fun updatePrivacyMode(enabled: Boolean) {
         state = state.copy(privacyModeEnabled = enabled, errorMessage = null)
         settings.edit().putBoolean(KEY_PRIVACY_MODE_ENABLED, enabled).apply()
+    }
+
+    fun updateNotificationsEnabled(enabled: Boolean) {
+        state = state.copy(notificationsEnabled = enabled, errorMessage = null)
+        settings.edit().putBoolean(NotrusNotificationPrefs.KEY_NOTIFICATIONS_ENABLED, enabled).apply()
+        if (enabled) {
+            NotrusNotificationCenter.ensureChannels(applicationContext)
+            NotrusBackgroundSyncWorker.schedulePeriodic(applicationContext)
+            NotrusBackgroundSyncWorker.scheduleRolling(applicationContext)
+            NotrusBackgroundSyncWorker.enqueueImmediate(applicationContext)
+            startLiveEventsIfPossible()
+        } else {
+            val currentDeviceId = state.currentDevice?.id
+            if (sessionIsUsable() && !currentDeviceId.isNullOrBlank()) {
+                viewModelScope.launch {
+                    runCatching {
+                        relayClient().unregisterNotificationWakeup(
+                            registrationId = NotrusNotificationPrefs.wakeupRegistrationId(
+                                applicationContext,
+                                currentDeviceId,
+                            ),
+                        )
+                    }
+                }
+            }
+            if (!appInForeground) {
+                stopLiveEvents()
+            }
+            NotrusBackgroundSyncWorker.cancelAll(applicationContext)
+        }
+    }
+
+    fun updateNotificationContentVisibility(value: String) {
+        val resolved = NotificationContentVisibility.fromKey(value).key
+        state = state.copy(notificationContentVisibility = resolved, errorMessage = null)
+        settings.edit().putString(NotrusNotificationPrefs.KEY_NOTIFICATION_CONTENT_VISIBILITY, resolved).apply()
+    }
+
+    fun updateNotificationLockscreenVisibility(value: String) {
+        val resolved = NotificationLockscreenVisibility.fromKey(value).key
+        state = state.copy(notificationLockscreenVisibility = resolved, errorMessage = null)
+        settings.edit().putString(NotrusNotificationPrefs.KEY_NOTIFICATION_LOCKSCREEN_VISIBILITY, resolved).apply()
+    }
+
+    fun updateNotificationGroupPreviewEnabled(enabled: Boolean) {
+        state = state.copy(notificationGroupPreviewEnabled = enabled, errorMessage = null)
+        settings.edit().putBoolean(NotrusNotificationPrefs.KEY_NOTIFICATION_GROUP_PREVIEW_ENABLED, enabled).apply()
+    }
+
+    fun updateNotificationPrivacyModeOverride(enabled: Boolean) {
+        state = state.copy(notificationPrivacyModeOverride = enabled, errorMessage = null)
+        settings.edit().putBoolean(NotrusNotificationPrefs.KEY_NOTIFICATION_PRIVACY_MODE_OVERRIDE, enabled).apply()
+    }
+
+    fun updateNotificationSoundEnabled(enabled: Boolean) {
+        state = state.copy(notificationSoundEnabled = enabled, errorMessage = null)
+        settings.edit().putBoolean(NotrusNotificationPrefs.KEY_NOTIFICATION_SOUND_ENABLED, enabled).apply()
+    }
+
+    fun updateNotificationVibrationEnabled(enabled: Boolean) {
+        state = state.copy(notificationVibrationEnabled = enabled, errorMessage = null)
+        settings.edit().putBoolean(NotrusNotificationPrefs.KEY_NOTIFICATION_VIBRATION_ENABLED, enabled).apply()
     }
 
     fun updateVisualEffects(enabled: Boolean) {
@@ -291,6 +391,79 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
+    fun onAppForegroundChanged(inForeground: Boolean) {
+        appInForeground = inForeground
+        NotrusNotificationPrefs.setAppForeground(applicationContext, inForeground)
+        if (inForeground) {
+            val identity = state.currentIdentity
+            if (identity != null && !state.isBusy) {
+                viewModelScope.launch {
+                    if (sessionIsUsable()) {
+                        startLiveEventsIfPossible()
+                    } else {
+                        registerAndSync(identity, presentation = SyncPresentation.Silent)
+                    }
+                }
+            } else {
+                startLiveEventsIfPossible()
+            }
+        } else {
+            if (state.notificationsEnabled) {
+                startLiveEventsIfPossible()
+                NotrusBackgroundSyncWorker.enqueueImmediate(applicationContext)
+            } else {
+                stopLiveEvents()
+            }
+        }
+    }
+
+    fun onNotificationPermissionResult(granted: Boolean) {
+        if (!granted) {
+            updateNotificationsEnabled(false)
+            state = state.copy(
+                errorMessage = "Android notification permission is required for background message alerts.",
+            )
+            return
+        }
+        if (!state.notificationsEnabled) {
+            return
+        }
+        NotrusNotificationCenter.ensureChannels(applicationContext)
+        NotrusBackgroundSyncWorker.enqueueImmediate(applicationContext)
+        startLiveEventsIfPossible()
+    }
+
+    fun openThreadFromNotification(threadId: String?, identityId: String?) {
+        val normalizedThreadId = threadId?.trim().orEmpty()
+        if (normalizedThreadId.isBlank()) {
+            return
+        }
+        if (!identityId.isNullOrBlank() && state.currentIdentity?.id != identityId) {
+            val targetIdentity = state.profiles.firstOrNull { it.id == identityId }
+            if (targetIdentity != null) {
+                pendingNotificationThreadId = normalizedThreadId
+                switchProfile(identityId)
+                return
+            }
+        }
+
+        if (state.threads.any { it.id == normalizedThreadId }) {
+            selectThread(normalizedThreadId)
+            return
+        }
+
+        pendingNotificationThreadId = normalizedThreadId
+        state.currentIdentity?.let { identity ->
+            viewModelScope.launch {
+                registerAndSync(
+                    identity = identity,
+                    preferredThreadId = normalizedThreadId,
+                    presentation = SyncPresentation.Silent,
+                )
+            }
+        }
+    }
+
     fun dismissStatusMessage(expectedMessage: String? = null) {
         if (expectedMessage == null || state.statusMessage == expectedMessage) {
             state = state.copy(statusMessage = DefaultStatusMessage)
@@ -345,7 +518,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             val profiles = catalog.identities.map { it.identity }
             val current = catalog.identities.firstOrNull { it.identity.id == catalog.activeIdentityId }?.identity
                 ?: profiles.firstOrNull()
-            relaySession = null
+            updateRelaySession(null)
 
                 state = state.copy(
                     currentDevice = deviceIdentityProvider.descriptor(applicationContext, appInstanceId),
@@ -373,6 +546,15 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
 
         if (displayName.length < 2 || username.length < 3) {
             state = state.copy(errorMessage = "Choose a display name and a username with at least 3 characters.")
+            return
+        }
+        val localCatalog = vaultStore.loadCatalog()
+        val existingLocal = localCatalog.identities.firstOrNull { it.identity.username.equals(username, ignoreCase = true) }
+        if (existingLocal != null) {
+            state = state.copy(
+                errorMessage = "That username is already stored locally on this device as ${existingLocal.identity.displayName} (${existingLocal.identity.id}). Delete or switch that profile first.",
+            )
+            refreshDeviceInventory(catalog = localCatalog, currentDevice = state.currentDevice)
             return
         }
 
@@ -409,7 +591,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             }.onFailure { error ->
                 state = state.copy(
                     isBusy = false,
-                    errorMessage = error.message ?: "Unable to create the Android profile.",
+                    errorMessage = renderProfileCreationError(error, username),
                 )
             }
         }
@@ -538,7 +720,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     recoverySignature = RecoveryKeyManager.signAccountReset(unsignedRequest, snapshot.recoveryRepresentation),
                 )
                 val resetResponse = relayClient().resetAccount(resetRequest)
-                relaySession = resetResponse.session
+                updateRelaySession(resetResponse.session)
 
                 val mergedIdentity = mergeRegisteredIdentity(rebuiltIdentity, resetResponse.user)
                 persistStoredRecord(
@@ -580,10 +762,11 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun switchProfile(identityId: String) {
+        stopLiveEvents()
         val catalog = vaultStore.loadCatalog()
         val updatedCatalog = catalog.copy(activeIdentityId = identityId)
         vaultStore.saveCatalog(updatedCatalog)
-        relaySession = null
+        updateRelaySession(null)
         val current = updatedCatalog.identities.firstOrNull { it.identity.id == identityId }?.identity
         state = state.copy(
             currentIdentity = current,
@@ -614,8 +797,16 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 val deletingCurrentIdentity = state.currentIdentity?.id == identityId
                 if (deletingCurrentIdentity) {
                     val activeIdentity = ensureRegisteredIdentity(record.identity)
+                    val currentDeviceId = state.currentDevice?.id
+                    runCatching {
+                        relayClient().unregisterNotificationWakeup(
+                            registrationId = currentDeviceId?.let {
+                                NotrusNotificationPrefs.wakeupRegistrationId(applicationContext, it)
+                            },
+                        )
+                    }
                     relayClient().deleteAccount()
-                    relaySession = null
+                    updateRelaySession(null)
                     state = state.copy(
                         currentIdentity = activeIdentity,
                         currentDirectoryCode = activeIdentity.directoryCode,
@@ -633,10 +824,11 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     identities = remaining,
                 )
                 vaultStore.saveCatalog(updatedCatalog)
-                relaySession = null
+                updateRelaySession(null)
 
                 val nextIdentity = remaining.firstOrNull { it.identity.id == nextActiveId }?.identity
                 if (nextIdentity == null) {
+                    stopLiveEvents()
                     state = state.copy(
                         currentIdentity = null,
                         currentDirectoryCode = null,
@@ -672,6 +864,46 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             }.onFailure { error ->
                 state = state.copy(isBusy = false, errorMessage = error.message)
                 refreshDeviceInventory(currentDevice = state.currentDevice)
+            }
+        }
+    }
+
+    fun purgeStaleLocalAliases(activity: FragmentActivity) {
+        val staleAliases = state.deviceInventory.hardwareAliases.filter { it.linkedProfileId == null }
+        if (staleAliases.isEmpty()) {
+            state = state.copy(
+                statusMessage = "No stale Android Keystore aliases were found.",
+                errorMessage = null,
+            )
+            return
+        }
+
+        viewModelScope.launch {
+            if (!authorizeSensitiveOperation(activity, "Authorize deleting stale Android Keystore aliases.", maxAgeMs = 0L)) {
+                return@launch
+            }
+
+            state = state.copy(isBusy = true, errorMessage = null)
+            runCatching {
+                staleAliases.forEach { alias ->
+                    if (alias.alias.startsWith("notrus:device:")) {
+                        deviceIdentityProvider.deleteAlias(alias.alias)
+                    } else {
+                        identityProvider.deleteAlias(alias.alias)
+                    }
+                }
+                refreshDeviceInventory(currentDevice = state.currentDevice)
+                state = state.copy(
+                    isBusy = false,
+                    statusMessage = "Removed ${staleAliases.size} stale Android Keystore alias${if (staleAliases.size == 1) "" else "es"}.",
+                    errorMessage = null,
+                )
+            }.onFailure { error ->
+                refreshDeviceInventory(currentDevice = state.currentDevice)
+                state = state.copy(
+                    isBusy = false,
+                    errorMessage = error.message ?: "Android could not delete stale Keystore aliases.",
+                )
             }
         }
     }
@@ -770,11 +1002,21 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         val identity = state.currentIdentity ?: return
         val record = currentStoredRecord(identity.id) ?: return
         val existing = record.threadRecords[threadId] ?: return
-        val threadTitle = state.threads.firstOrNull { it.id == threadId }?.title?.ifBlank { "conversation" } ?: "conversation"
+        val thread = state.threads.firstOrNull { it.id == threadId }
+        val threadTitle = thread?.title?.ifBlank { "conversation" } ?: "conversation"
+        val purgeAt = Instant.now().toString()
+        val preservedCount = maxOf(existing.processedMessageCount, thread?.messageCount ?: existing.processedMessageCount)
+        val preservedLastMessageId = thread?.messages?.lastOrNull()?.id ?: existing.lastProcessedMessageId
         persistStoredRecord(
             record.copy(
                 threadRecords = record.threadRecords + mapOf(
-                    threadId to existing.copy(hiddenAt = Instant.now().toString()),
+                    threadId to existing.copy(
+                        hiddenAt = purgeAt,
+                        purgedAt = purgeAt,
+                        messageCache = emptyMap(),
+                        processedMessageCount = preservedCount,
+                        lastProcessedMessageId = preservedLastMessageId,
+                    ),
                 ),
             ),
         )
@@ -838,7 +1080,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 val hiddenThreadId = restoreHiddenDirectThreadIfPresent(activeIdentity.id, user.id)
                 if (hiddenThreadId != null) {
                     registerAndSync(activeIdentity, preferredThreadId = hiddenThreadId)
-                    state = state.copy(statusMessage = "Restored the local Android conversation with ${user.displayName}.")
+                    state = state.copy(statusMessage = "Reopened the local Android conversation with ${user.displayName}. Older locally-deleted history stays removed.")
                     return@runCatching
                 }
                 applyPrivacyDelayIfEnabled(PrivacyDelayKind.Interactive)
@@ -1197,8 +1439,22 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private suspend fun registerAndSync(identity: LocalIdentity, preferredThreadId: String? = state.selectedThreadId) {
-        state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Registering profile and syncing relay state...")
+    private suspend fun registerAndSync(
+        identity: LocalIdentity,
+        preferredThreadId: String? = state.selectedThreadId,
+        presentation: SyncPresentation = SyncPresentation.Interactive,
+    ) {
+        val interactiveSync = presentation == SyncPresentation.Interactive
+        val previousStatusMessage = state.statusMessage
+        if (interactiveSync) {
+            state = state.copy(
+                isBusy = true,
+                errorMessage = null,
+                statusMessage = "Registering profile and syncing relay state...",
+            )
+        } else {
+            state = state.copy(errorMessage = null)
+        }
         var latestKnownIdentity = identity
         runCatching {
             var workingIdentity = identity
@@ -1226,7 +1482,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             val registered = if (sessionIsUsable()) {
                 null
             } else {
-                bootstrapRelay.register(workingIdentity).also { relaySession = it.session }
+                bootstrapRelay.register(workingIdentity).also { updateRelaySession(it.session, identityId = workingIdentity.id) }
             }
             workingIdentity = registered?.let { mergeRegisteredIdentity(workingIdentity, it.user) } ?: workingIdentity
             latestKnownIdentity = workingIdentity
@@ -1240,6 +1496,28 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             val sync = routineRelay.sync()
             val transparencySnapshot = routineRelay.transparency()
             val securitySnapshot = routineRelay.securityDevices()
+            runCatching {
+                val registrationId = NotrusNotificationPrefs.wakeupRegistrationId(applicationContext, currentDevice.id)
+                if (state.notificationsEnabled) {
+                    routineRelay.registerNotificationWakeup(
+                        mode = "workmanager-poll-v1",
+                        platform = "android",
+                        registrationId = registrationId,
+                    )
+                } else {
+                    routineRelay.unregisterNotificationWakeup(registrationId = registrationId)
+                }
+            }
+            if (state.notificationsEnabled) {
+                val seenIds = NotrusNotificationPrefs.loadSeenMessageIds(applicationContext, workingIdentity.id)
+                sync.threads.asSequence()
+                    .flatMap { it.messages.asSequence() }
+                    .filter { it.senderId != workingIdentity.id }
+                    .mapNotNull { message -> message.id.trim().takeIf(String::isNotBlank) }
+                    .forEach { seenIds.add(it) }
+                NotrusNotificationPrefs.saveSeenMessageIds(applicationContext, workingIdentity.id, seenIds)
+                NotrusNotificationPrefs.markIdentityNotificationPrimed(applicationContext, workingIdentity.id)
+            }
             val remoteUsers = sync.users.filter { it.id != workingIdentity.id }
             val currentDirectoryCode = sync.users.firstOrNull { it.id == workingIdentity.id }?.directoryCode ?: registered?.user?.directoryCode
             if (currentDirectoryCode != null && currentDirectoryCode != workingIdentity.directoryCode) {
@@ -1278,10 +1556,13 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             )
             persistStoredRecord(updatedRecord)
             val profiles = vaultStore.loadCatalog().identities.map { it.identity }
-            val selectedThreadId = preferredThreadId
+            val selectedThreadId = pendingNotificationThreadId
+                ?.takeIf { pending -> materialized.threads.any { it.id == pending } }
+                ?: preferredThreadId
                 ?.takeIf { preferred -> materialized.threads.any { it.id == preferred } }
                 ?: state.selectedThreadId?.takeIf { current -> materialized.threads.any { it.id == current } }
                 ?: materialized.threads.firstOrNull()?.id
+            pendingNotificationThreadId = null
 
             state = state.copy(
                 currentIdentity = materialized.identity,
@@ -1297,24 +1578,42 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 relayHealth = relayHealth,
                 selectedThreadId = selectedThreadId,
                 pendingAttachments = if (selectedThreadId == state.selectedThreadId) state.pendingAttachments else emptyList(),
-                statusMessage = if (!transparency.chainValid) {
-                    "Android sync completed, but transparency verification needs attention before you trust new keys or create new chats."
-                } else if (sync.directoryDiscoveryMode == "exact-username-or-invite" || sync.directoryDiscoveryMode == "username-or-invite") {
-                    "Android sync complete. Search contacts by username or invite code, save them locally, then open secure chats and compatible group threads from this device."
+                statusMessage = if (interactiveSync) {
+                    if (!transparency.chainValid) {
+                        "Android sync completed, but transparency verification needs attention before you trust new keys or create new chats."
+                    } else if (sync.directoryDiscoveryMode == "exact-username-or-invite" || sync.directoryDiscoveryMode == "username-or-invite") {
+                        "Android sync complete. Search contacts by username or invite code, save them locally, then open secure chats and compatible group threads from this device."
+                    } else {
+                        "Android sync complete. Contacts, secure direct chats, and compatible group threads are ready on this device."
+                    }
                 } else {
-                    "Android sync complete. Contacts, secure direct chats, and compatible group threads are ready on this device."
+                    previousStatusMessage
                 },
                 errorMessage = null,
-                isBusy = false,
+                isBusy = if (interactiveSync) false else state.isBusy,
             )
             refreshDeviceInventory(currentDevice = currentDevice)
+            startLiveEventsIfPossible()
+            if (!appInForeground && state.notificationsEnabled) {
+                NotrusBackgroundSyncWorker.enqueueImmediate(applicationContext)
+            }
         }.onFailure { error ->
-            state = state.copy(
-                isBusy = false,
-                currentIdentity = latestKnownIdentity,
-                currentDirectoryCode = latestKnownIdentity.directoryCode,
-                errorMessage = error.message ?: "Relay sync failed.",
-            )
+            state = if (interactiveSync) {
+                state.copy(
+                    isBusy = false,
+                    currentIdentity = latestKnownIdentity,
+                    currentDirectoryCode = latestKnownIdentity.directoryCode,
+                    errorMessage = error.message ?: "Relay sync failed.",
+                )
+            } else {
+                state.copy(
+                    currentIdentity = latestKnownIdentity,
+                    currentDirectoryCode = latestKnownIdentity.directoryCode,
+                )
+            }
+            if (interactiveSync) {
+                stopLiveEvents()
+            }
             refreshDeviceInventory(currentDevice = state.currentDevice)
         }
     }
@@ -1420,16 +1719,15 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     thread.messages.getOrNull(record.processedMessageCount - 1)?.id != record.lastProcessedMessageId
                 )
         ) {
-            return MaterializedThread(
-                identity = identity,
-                record = record,
-                thread = materializeUnsupportedThread(
-                    thread = thread,
-                    participants = participants,
-                    existingRecord = record,
-                    identityId = identity.id,
-                    warning = "The local Signal session state no longer matches the relay transcript on this Android device.",
-                ),
+            record = ConversationThreadRecord(
+                hiddenAt = record.hiddenAt,
+                localTitle = record.localTitle,
+                purgedAt = record.purgedAt,
+                messageCache = emptyMap(),
+                lastProcessedMessageId = null,
+                processedMessageCount = 0,
+                protocol = DIRECT_PROTOCOL,
+                signalPeerUserId = remoteUser.id,
             )
         }
 
@@ -1472,7 +1770,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                         record.copy(
                             messageCache = record.messageCache + (
                                 message.id to CachedMessageState(
-                                    body = normalizeLegacyDisplayBody(error.message ?: "Signal decryption failed."),
+                                    body = normalizeSignalDecryptionFailure(error),
                                     status = "invalid",
                                 )
                             ),
@@ -1502,7 +1800,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         )
         val decryptedMessages = thread.messages.mapNotNull { message ->
             val cached = record.messageCache[message.id]
-            if (cached?.hidden == true) {
+            if (!shouldDisplayMessageAfterLocalPurge(record, message, cached)) {
                 null
             } else {
                 DecryptedMessage(
@@ -1570,6 +1868,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             record = ConversationThreadRecord(
                 hiddenAt = record.hiddenAt,
                 localTitle = record.localTitle,
+                purgedAt = record.purgedAt,
                 messageCache = emptyMap(),
                 lastProcessedMessageId = null,
                 processedMessageCount = 0,
@@ -1657,7 +1956,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                                 record.copy(
                                     messageCache = record.messageCache + (
                                         message.id to CachedMessageState(
-                                            body = normalizeLegacyDisplayBody(error.message ?: "Android could not decrypt that group envelope."),
+                                            body = normalizeSignalDecryptionFailure(error),
                                             status = "invalid",
                                         )
                                     ),
@@ -1696,7 +1995,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
 
         val fallbackMessages = thread.messages.mapNotNull { message ->
             val cached = record.messageCache[message.id]
-            if (cached?.hidden == true) {
+            if (!shouldDisplayMessageAfterLocalPurge(record, message, cached)) {
                 null
             } else {
                 DecryptedMessage(
@@ -1764,8 +2063,11 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         identityId: String,
         warning: String? = null,
     ): ConversationThread {
-        val fallbackMessages = thread.messages.map { message ->
+        val fallbackMessages = thread.messages.mapNotNull { message ->
             val cached = existingRecord?.messageCache?.get(message.id)
+            if (!shouldDisplayMessageAfterLocalPurge(existingRecord, message, cached)) {
+                return@mapNotNull null
+            }
             DecryptedMessage(
                 attachments = cached?.attachments ?: emptyList(),
                 body = normalizeLegacyDisplayBody(cached?.body ?: "This thread can be viewed on Android, but only standards direct chats are writable right now."),
@@ -1920,15 +2222,56 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
     private fun currentStoredRecord(identityId: String): StoredIdentityRecord? =
         vaultStore.loadCatalog().identities.firstOrNull { it.identity.id == identityId }
 
+    private fun renderProfileCreationError(error: Throwable, attemptedUsername: String): String {
+        val baseMessage = error.message?.trim().orEmpty()
+        val normalized = baseMessage.lowercase()
+        val localProfiles = vaultStore.loadCatalog().identities
+            .map { it.identity }
+            .sortedBy { it.username }
+        val sameUsernameLocal = localProfiles.filter { it.username.equals(attemptedUsername, ignoreCase = true) }
+        val profileSummary = localProfiles.joinToString(separator = "; ") { profile ->
+            "@${profile.username} (${profile.id})"
+        }
+        return when {
+            normalized.contains("already bound to a different device identity") ||
+                normalized.contains("device identity does not match the stored account record") -> {
+                val relayConflict = sameUsernameLocal.isEmpty()
+                buildString {
+                    append(
+                        if (relayConflict) {
+                            "That username is already registered on the relay by a different account identity."
+                        } else if (baseMessage.isNotBlank()) {
+                            baseMessage
+                        } else {
+                            "That username is already bound to a different identity."
+                        },
+                    )
+                    append(" Local profiles on this Android device: ")
+                    append(if (profileSummary.isBlank()) "none" else profileSummary)
+                    if (sameUsernameLocal.isNotEmpty()) {
+                        append(". The same username is already present in your local vault.")
+                    }
+                }
+            }
+
+            baseMessage.isNotBlank() -> baseMessage
+            else -> "Unable to create the Android profile."
+        }
+    }
+
     private fun restoreHiddenDirectThreadIfPresent(identityId: String, remoteUserId: String): String? {
         val record = currentStoredRecord(identityId) ?: return null
         val hiddenEntry = record.threadRecords.entries.firstOrNull { entry ->
             entry.value.signalPeerUserId == remoteUserId && entry.value.hiddenAt != null
         } ?: return null
+        val preserved = hiddenEntry.value
         persistStoredRecord(
             record.copy(
                 threadRecords = record.threadRecords + mapOf(
-                    hiddenEntry.key to hiddenEntry.value.copy(hiddenAt = null),
+                    hiddenEntry.key to preserved.copy(
+                        hiddenAt = null,
+                        messageCache = if (preserved.purgedAt != null) emptyMap() else preserved.messageCache,
+                    ),
                 ),
             ),
         )
@@ -2011,7 +2354,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
 
     private suspend fun ensureRegisteredIdentity(identity: LocalIdentity): LocalIdentity {
         val registered = relayClient().register(identity)
-        relaySession = registered.session
+        updateRelaySession(registered.session, identityId = identity.id)
         val updated = mergeRegisteredIdentity(identity, registered.user)
         if (updated != identity) {
             currentStoredRecord(identity.id)?.let { persistStoredRecord(it.copy(identity = updated)) }
@@ -2038,11 +2381,86 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             sessionToken = relaySession?.token,
         )
 
+    private fun updateRelaySession(
+        session: com.notrus.android.model.RelaySession?,
+        identityId: String? = state.currentIdentity?.id,
+    ) {
+        relaySession = session
+        NotrusNotificationPrefs.saveRelaySession(applicationContext, session)
+        identityId?.takeIf { it.isNotBlank() }?.let {
+            NotrusNotificationPrefs.saveRelaySessionForIdentity(applicationContext, it, session)
+        }
+    }
+
     private fun sessionIsUsable(): Boolean {
-        val expiry = relaySession?.expiresAt ?: return false
-        return runCatching { Instant.parse(expiry) }
-            .map { it.isAfter(Instant.now().plusSeconds(30)) }
-            .getOrDefault(false)
+        return NotrusNotificationPrefs.sessionIsUsable(relaySession)
+    }
+
+    private fun startLiveEventsIfPossible() {
+        val keepLive = appInForeground || state.notificationsEnabled
+        if (!keepLive) {
+            return
+        }
+        val identity = state.currentIdentity ?: return
+        if (!sessionIsUsable()) {
+            return
+        }
+        if (liveEventsJob?.isActive == true) {
+            return
+        }
+
+        val identityId = identity.id
+        liveEventsJob = viewModelScope.launch {
+            var backoffMs = 1_200L
+            while (isActive && (appInForeground || state.notificationsEnabled) && state.currentIdentity?.id == identityId) {
+                val activeIdentity = state.currentIdentity ?: break
+                try {
+                    relayClient().streamEvents { _, threadId ->
+                        if (appInForeground) {
+                            scheduleLiveSync(threadId)
+                        } else if (state.notificationsEnabled) {
+                            NotrusBackgroundSyncWorker.enqueueImmediate(applicationContext)
+                        }
+                    }
+                    backoffMs = 1_200L
+                } catch (_: Exception) {
+                    if (
+                        !isActive ||
+                        (!(appInForeground || state.notificationsEnabled)) ||
+                        state.currentIdentity?.id != activeIdentity.id
+                    ) {
+                        break
+                    }
+                    if (appInForeground) {
+                        scheduleLiveSync(null)
+                    } else if (state.notificationsEnabled) {
+                        NotrusBackgroundSyncWorker.enqueueImmediate(applicationContext)
+                    }
+                    delay(backoffMs)
+                    backoffMs = (backoffMs * 2).coerceAtMost(15_000L)
+                }
+            }
+        }
+    }
+
+    private fun stopLiveEvents() {
+        liveEventsJob?.cancel()
+        liveEventsJob = null
+        liveSyncDebounceJob?.cancel()
+        liveSyncDebounceJob = null
+    }
+
+    private fun scheduleLiveSync(preferredThreadId: String?) {
+        liveSyncDebounceJob?.cancel()
+        liveSyncDebounceJob = viewModelScope.launch {
+            delay(360L)
+            val identity = state.currentIdentity ?: return@launch
+            registerAndSync(
+                identity = identity,
+                preferredThreadId = preferredThreadId ?: state.selectedThreadId,
+                presentation = SyncPresentation.Silent,
+            )
+        }
     }
 
     private suspend fun applyPrivacyDelayIfEnabled(kind: PrivacyDelayKind) {
@@ -2059,7 +2477,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
 
     private suspend fun bootstrapRelaySession(identity: LocalIdentity): LocalIdentity {
         val registration = relayClient().register(identity)
-        relaySession = registration.session
+        updateRelaySession(registration.session, identityId = identity.id)
         state = state.copy(
             currentDirectoryCode = registration.user.directoryCode ?: state.currentDirectoryCode,
             linkedDeviceEvents = registration.deviceEvents,
@@ -2312,6 +2730,27 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
+    private fun normalizeSignalDecryptionFailure(error: Throwable): String {
+        val message = error.message?.trim().orEmpty()
+        val normalized = message.lowercase()
+        return when {
+            normalized.contains("counter") ||
+                normalized.contains("duplicate") ||
+                normalized.contains("chain key") ->
+                "This secure message could not be opened with the current local session history. Send a new message to re-establish the session."
+
+            normalized.contains("no session") ||
+                normalized.contains("missing session") ->
+                "This secure session is out of sync on this device. Send a new message to re-establish encryption state."
+
+            normalized.contains("prekey") ->
+                "The sender must publish fresh prekeys before this device can open that secure message."
+
+            message.isNotBlank() -> normalizeLegacyDisplayBody(message)
+            else -> "Android could not decrypt that secure message."
+        }
+    }
+
     private fun normalizeLegacyDisplayBody(raw: String): String {
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) {
@@ -2361,6 +2800,27 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         return source.substring(valueStart, valueEnd)
             .trim()
             .trim('"')
+    }
+
+    private fun shouldDisplayMessageAfterLocalPurge(
+        record: ConversationThreadRecord?,
+        message: RelayMessage,
+        cached: CachedMessageState?,
+    ): Boolean {
+        if (cached?.hidden == true) {
+            return false
+        }
+        val purgedAt = record?.purgedAt ?: return true
+        if (cached != null) {
+            return true
+        }
+        return !isoTimestampAtOrBefore(message.createdAt, purgedAt)
+    }
+
+    private fun isoTimestampAtOrBefore(left: String, right: String): Boolean {
+        val leftInstant = runCatching { Instant.parse(left) }.getOrNull() ?: return left <= right
+        val rightInstant = runCatching { Instant.parse(right) }.getOrNull() ?: return left <= right
+        return !leftInstant.isAfter(rightInstant)
     }
 
     private fun deviceActionPayload(
@@ -2485,9 +2945,13 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             "Transparency verification needs attention $context."
         }
 
+    override fun onCleared() {
+        stopLiveEvents()
+        super.onCleared()
+    }
+
     companion object {
         private const val DefaultStatusMessage = "Android native client ready."
-        private const val KEY_APP_INSTANCE_ID = "app_instance_id"
         private const val KEY_PRIVACY_MODE_ENABLED = "privacy_mode_enabled"
         private const val KEY_VISUAL_EFFECTS_ENABLED = "visual_effects_enabled"
         private const val KEY_COLOR_THEME_PRESET = "color_theme_preset"

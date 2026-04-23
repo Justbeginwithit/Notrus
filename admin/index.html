@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Notrus Admin</title>
+    <link rel="stylesheet" href="/admin/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>Notrus Relay Admin</h1>
+          <p class="subtitle">Inspect all relay users and run unblock, block, or delete actions on self-hosted relay instances.</p>
+        </div>
+        <button id="refreshHealth" class="button subtle" type="button">Refresh Health</button>
+      </header>
+
+      <section class="card">
+        <h2>Connection</h2>
+        <div class="grid two">
+          <label class="field">
+            <span>Relay origin</span>
+            <input id="originInput" type="url" />
+          </label>
+          <label class="field">
+            <span>Admin token</span>
+            <input id="tokenInput" type="password" placeholder="X-Notrus-Admin-Token" />
+          </label>
+        </div>
+        <div class="row">
+          <button id="saveConfig" class="button" type="button">Save</button>
+          <button id="loadUsers" class="button" type="button">Load Users</button>
+          <button id="listAllUsers" class="button subtle" type="button">List All Users</button>
+          <span id="healthBadge" class="badge muted">Health: unknown</span>
+          <span id="adminBadge" class="badge muted">Admin API: unknown</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>User Query</h2>
+        <div class="grid three">
+          <label class="field">
+            <span>Search</span>
+            <input id="searchInput" type="text" placeholder="username / displayName / id" />
+          </label>
+          <label class="field">
+            <span>Limit</span>
+            <input id="limitInput" type="number" min="1" max="1000" step="1" />
+          </label>
+          <label class="field checkbox">
+            <input id="includeDeactivatedInput" type="checkbox" />
+            <span>Include deactivated users</span>
+          </label>
+        </div>
+        <div class="row">
+          <button id="queryUsers" class="button" type="button">Query</button>
+          <span id="statsText" class="muted"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="table-head">
+          <h2>Users</h2>
+          <span id="userCountText" class="muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>Display</th>
+                <th>User ID</th>
+                <th>Devices</th>
+                <th>Threads</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="usersBody">
+              <tr>
+                <td colspan="7" class="muted">No data loaded.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Log</h2>
+        <pre id="logBox" class="log-box"></pre>
+      </section>
+    </main>
+
+    <script src="/admin/app.js"></script>
+  </body>
+</html>

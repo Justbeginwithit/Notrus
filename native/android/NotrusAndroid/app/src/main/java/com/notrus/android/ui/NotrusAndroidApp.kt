@@ -114,6 +114,8 @@ import com.notrus.android.model.ConversationThread
 import com.notrus.android.model.DecryptedMessage
 import com.notrus.android.model.DeviceInventoryAlias
 import com.notrus.android.model.DeviceInventoryProfile
+import com.notrus.android.model.NotificationContentVisibility
+import com.notrus.android.model.NotificationLockscreenVisibility
 import com.notrus.android.model.RelayLinkedDevice
 import com.notrus.android.model.RelayUser
 import com.notrus.android.model.SecureAttachmentReference
@@ -1659,6 +1661,193 @@ private fun SettingsScreen(
         }
 
         SectionCard(
+            title = "Notifications",
+            subtitle = "Message previews are decrypted on this device. Hiding content reduces exposure on lock screen and in notification history.",
+            enhanced = enhancedVisuals,
+            accent = MaterialTheme.colorScheme.secondary,
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = "Notifications",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = if (state.notificationsEnabled) {
+                            "On. Background sync can alert you to new secure messages."
+                        } else {
+                            "Off. The app will not post message notifications."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = state.notificationsEnabled,
+                    onCheckedChange = viewModel::updateNotificationsEnabled,
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+
+            Text(
+                text = "Notification content",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                NotificationContentVisibility.entries.forEach { option ->
+                    FilterChip(
+                        selected = state.notificationContentVisibility == option.key,
+                        onClick = { viewModel.updateNotificationContentVisibility(option.key) },
+                        label = { Text(option.label) },
+                    )
+                }
+            }
+
+            Text(
+                text = "When privacy mode is enabled, hidden notifications stay the default unless you explicitly override it below.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = "Allow preview in privacy mode",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "Off keeps hidden notifications while privacy mode is active.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = state.notificationPrivacyModeOverride,
+                    onCheckedChange = viewModel::updateNotificationPrivacyModeOverride,
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+
+            Text(
+                text = "Lock-screen visibility",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                NotificationLockscreenVisibility.entries.forEach { option ->
+                    FilterChip(
+                        selected = state.notificationLockscreenVisibility == option.key,
+                        onClick = { viewModel.updateNotificationLockscreenVisibility(option.key) },
+                        label = { Text(option.label) },
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = "Group preview content",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "Disable to keep group notifications generic.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = state.notificationGroupPreviewEnabled,
+                    onCheckedChange = viewModel::updateNotificationGroupPreviewEnabled,
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = "Sound",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "Play default alert sound for message notifications.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = state.notificationSoundEnabled,
+                    onCheckedChange = viewModel::updateNotificationSoundEnabled,
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = "Vibration",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "Use vibration for message notifications.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = state.notificationVibrationEnabled,
+                    onCheckedChange = viewModel::updateNotificationVibrationEnabled,
+                )
+            }
+        }
+
+        SectionCard(
             title = "Appearance",
             subtitle = "Choose light, dark, or system mode plus the global color theme and visual intensity.",
             enhanced = enhancedVisuals,
@@ -1826,6 +2015,11 @@ private fun SettingsScreen(
             subtitle = "Local vault and Keystore inventory for device-level troubleshooting and testing.",
             enhanced = enhancedVisuals,
         ) {
+            Text(
+                text = "This section lists data stored on this Android device only. Relay health totals (Users/Threads) are network-wide and shown in Relay settings.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             DetailLine(
                 label = "Vault catalog",
                 value = if (state.deviceInventory.vaultCatalogPresent) "Present" else "Missing",
@@ -1860,6 +2054,17 @@ private fun SettingsScreen(
                 )
                 state.deviceInventory.hardwareAliases.forEach { alias ->
                     DeviceInventoryAliasRow(alias = alias)
+                }
+
+                val staleAliasCount = state.deviceInventory.hardwareAliases.count { it.linkedProfileId == null }
+                if (staleAliasCount > 0) {
+                    FilledTonalButton(
+                        onClick = { viewModel.purgeStaleLocalAliases(activity) },
+                        enabled = !state.isBusy,
+                        shape = RoundedCornerShape(16.dp),
+                    ) {
+                        Text("Remove $staleAliasCount stale alias${if (staleAliasCount == 1) "" else "es"}")
+                    }
                 }
             }
         }
@@ -2443,6 +2648,16 @@ private fun DeviceInventoryProfileRow(profile: DeviceInventoryProfile) {
             Text(
                 text = "@${profile.username}",
                 style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = profile.id,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = profile.fingerprint,
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             FlowRow(

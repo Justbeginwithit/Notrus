@@ -1071,6 +1071,7 @@ struct ThreadStoreRecord: Codable, Hashable {
     var currentState: PairwiseThreadState?
     var groupTreeState: GroupTreeThreadState?
     var hiddenAt: String?
+    var purgedAt: String?
     var lastProcessedMessageId: String?
     var localTitle: String?
     var messageCache: [String: CachedMessageState]
@@ -1085,6 +1086,7 @@ struct ThreadStoreRecord: Codable, Hashable {
         case currentState
         case groupTreeState = "state"
         case hiddenAt
+        case purgedAt
         case lastProcessedMessageId
         case localTitle
         case messageCache
@@ -1104,6 +1106,7 @@ struct ThreadStoreRecord: Codable, Hashable {
         currentState: PairwiseThreadState? = nil,
         groupTreeState: GroupTreeThreadState? = nil,
         hiddenAt: String? = nil,
+        purgedAt: String? = nil,
         lastProcessedMessageId: String? = nil,
         localTitle: String? = nil,
         messageCache: [String: CachedMessageState] = [:],
@@ -1117,6 +1120,7 @@ struct ThreadStoreRecord: Codable, Hashable {
         self.currentState = currentState
         self.groupTreeState = groupTreeState
         self.hiddenAt = hiddenAt
+        self.purgedAt = purgedAt
         self.lastProcessedMessageId = lastProcessedMessageId
         self.localTitle = localTitle
         self.messageCache = messageCache
@@ -1145,6 +1149,7 @@ struct ThreadStoreRecord: Codable, Hashable {
             currentState: currentState,
             groupTreeState: groupTreeState,
             hiddenAt: try container.decodeIfPresent(String.self, forKey: .hiddenAt),
+            purgedAt: try container.decodeIfPresent(String.self, forKey: .purgedAt),
             lastProcessedMessageId: try container.decodeIfPresent(String.self, forKey: .lastProcessedMessageId),
             localTitle: try container.decodeIfPresent(String.self, forKey: .localTitle),
             messageCache: messageCache,

@@ -1,6 +1,64 @@
 # Notrus Release Notes
 
-## v0.3.1-beta2 (current beta release)
+## v0.3.2-beta3 (current beta release)
+
+Release date: 2026-04-23
+
+This release publishes the current relay + macOS + Android state, including relay operator Admin GUI capabilities, account continuity fixes, and updated beta boundary documentation.
+
+### Included artifacts
+
+- macOS:
+  - `dist/Notrus.app`
+  - `dist/Notrus.zip`
+  - `dist/Notrus-0.3.2-beta3.zip`
+- Android:
+  - `dist/android/Notrus-debug.apk`
+  - `dist/android/Notrus-release.apk`
+  - `dist/android/Notrus-0.3.2-beta3-debug.apk`
+  - `dist/android/Notrus-0.3.2-beta3-release.apk`
+
+### What changed
+
+- Relay/admin:
+  - added built-in Admin GUI at `/admin` for relay-wide user listing and operator actions
+  - documented admin API and GUI boundaries in [ADMIN_GUI.md](ADMIN_GUI.md)
+  - improved blocked-account continuity and reactivation handling to reduce legacy split-account behavior
+- Client UX/safety:
+  - clearer username-conflict messaging differentiating relay conflict vs local vault conflict
+  - improved decryption failure messaging for counter/session mismatch cases
+- Android notification pipeline:
+  - background sync and notification controls are wired in the app and relay routes
+  - rolling/immediate WorkManager scheduling improvements included
+- Docs:
+  - updated beta boundary docs for admin controls, notification caveats, and import/export limitations
+  - synchronized beta version labels (`0.3.2-beta3` / `0.3.2-beta.3`) across packaging metadata
+
+### Known beta limitations (important)
+
+- Android notifications are implemented and configurable, but delivery reliability is still inconsistent on some devices and needs additional polish.
+- Recovery import/export restores account identity material; it is not yet a full historical plaintext conversation migration path across devices.
+
+### Verification snapshot
+
+Executed and passing for this release refresh:
+
+- `node --check server.js`
+- `./gradlew :app:compileDebugKotlin`
+- `zsh scripts/build-mac-app.sh`
+- `zsh scripts/package-android-app.sh`
+- `zsh scripts/package-mac-app.sh`
+
+### Boundary reminder
+
+- This is a beta release, not a warranty-backed stable/GA release.
+- Stable checklist section 12 remains maturity/operations evidence work, and section 13 remains external by definition.
+- See:
+  - [BETA_RELEASE_CHECKLIST.md](BETA_RELEASE_CHECKLIST.md)
+  - [STABLE_RELEASE_CHECKLIST.md](STABLE_RELEASE_CHECKLIST.md)
+  - [SECURITY_RELEASE.md](SECURITY_RELEASE.md)
+
+## v0.3.1-beta2
 
 Release date: 2026-04-22
 

@@ -42,9 +42,13 @@ Normal sync, search, message, and attachment delivery must not resend the full i
 These routes require `Authorization: Bearer <session-token>`:
 
 - `GET /api/sync/state`
+- `GET /api/events`
 - `GET /api/directory/search`
 - `GET /api/security/devices`
 - `GET /api/security/transparency`
+- `GET /api/notifications/status`
+- `POST /api/notifications/register`
+- `POST /api/notifications/unregister`
 - `POST /api/routing/threads`
 - `POST /api/reports`
 - `POST /api/devices/revoke`

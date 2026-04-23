@@ -11,6 +11,7 @@ import {
   randomBytes,
   randomUUID,
   sign as signPayload,
+  timingSafeEqual,
   verify as verifySignature,
 } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -66,6 +67,9 @@ const MAILBOX_HANDLE_TTL_MS = Number(process.env.MAILBOX_HANDLE_TTL_MS || 10 * 6
 const MAILBOX_CAPABILITY_TTL_MS = Number(process.env.MAILBOX_CAPABILITY_TTL_MS || 10 * 60 * 1000);
 const RATE_LIMIT_HMAC_KEY = process.env.RATE_LIMIT_HMAC_KEY || randomUUID();
 const POW_HMAC_KEY = process.env.POW_HMAC_KEY || randomUUID();
+const ENABLE_ADMIN_API = env("NOTRUS_ENABLE_ADMIN_API") === "true";
+const ADMIN_API_TOKEN = env("NOTRUS_ADMIN_API_TOKEN")?.trim() ?? "";
+const ADMIN_USERS_LIMIT = Number(env("NOTRUS_ADMIN_USERS_LIMIT") || 1_000);
 const POW_DIFFICULTY_BITS = Number(process.env.POW_DIFFICULTY_BITS || 18);
 const POW_EXPIRY_MS = Number(process.env.POW_EXPIRY_MS || 5 * 60 * 1000);
 const RATE_LIMITS = {
@@ -131,7 +135,7 @@ const CONTACT_HANDLE_INDEX = new Map();
 const MAILBOX_ROUTING = new Map();
 const MAILBOX_CAPABILITIES = new Map();
 const MAILBOX_CAPABILITY_INDEX = new Map();
-const SNAKE_ASSETS = new Map([
+const STATIC_ASSETS = new Map([
   [
     "/snake",
     {
@@ -169,6 +173,38 @@ const SNAKE_ASSETS = new Map([
       filePath: path.join(__dirname, "snake", "styles.css"),
     },
   ],
+  [
+    "/admin",
+    {
+      contentSecurityPolicy:
+        "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self'; connect-src 'self'",
+      contentType: "text/html; charset=utf-8",
+      filePath: path.join(__dirname, "admin", "index.html"),
+    },
+  ],
+  [
+    "/admin/",
+    {
+      contentSecurityPolicy:
+        "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self'; connect-src 'self'",
+      contentType: "text/html; charset=utf-8",
+      filePath: path.join(__dirname, "admin", "index.html"),
+    },
+  ],
+  [
+    "/admin/app.js",
+    {
+      contentType: "text/javascript; charset=utf-8",
+      filePath: path.join(__dirname, "admin", "app.js"),
+    },
+  ],
+  [
+    "/admin/styles.css",
+    {
+      contentType: "text/css; charset=utf-8",
+      filePath: path.join(__dirname, "admin", "styles.css"),
+    },
+  ],
 ]);
 let persistQueue = Promise.resolve();
 let store = await loadStore();
@@ -192,7 +228,7 @@ function setApiHeaders(request, response) {
   setSharedHeaders(response);
   response.setHeader(
     "Access-Control-Allow-Headers",
-    "Authorization,Content-Type,X-Notrus-Capability,X-Notrus-Integrity,X-Notrus-Instance-Id,X-Notrus-Pow-Nonce,X-Notrus-Pow-Token,X-Notrus-Device-Id,X-Notrus-Session"
+    "Authorization,Content-Type,X-Notrus-Admin-Token,X-Notrus-Capability,X-Notrus-Integrity,X-Notrus-Instance-Id,X-Notrus-Pow-Nonce,X-Notrus-Pow-Token,X-Notrus-Device-Id,X-Notrus-Session"
   );
   response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
 
@@ -525,6 +561,43 @@ function readAuthorizationToken(request) {
   return null;
 }
 
+function readAdminToken(request) {
+  const headerToken = request.headers["x-notrus-admin-token"];
+  if (typeof headerToken === "string" && isNonEmptyString(headerToken, 4_096)) {
+    return headerToken.trim();
+  }
+  return null;
+}
+
+function secureTokenMatch(expected, provided) {
+  if (!isNonEmptyString(expected, 4_096) || !isNonEmptyString(provided, 4_096)) {
+    return false;
+  }
+  const left = Buffer.from(expected, "utf8");
+  const right = Buffer.from(provided, "utf8");
+  if (left.length !== right.length) {
+    return false;
+  }
+  return timingSafeEqual(left, right);
+}
+
+function requireAdminCapability(request, response) {
+  if (!ENABLE_ADMIN_API) {
+    sendError(request, response, 404, "That relay admin route is disabled.");
+    return false;
+  }
+  if (!isNonEmptyString(ADMIN_API_TOKEN, 4_096)) {
+    sendError(request, response, 503, "This relay did not configure an admin API token.");
+    return false;
+  }
+  const provided = readAdminToken(request);
+  if (!secureTokenMatch(ADMIN_API_TOKEN, provided)) {
+    sendError(request, response, 401, "A valid relay admin token is required.");
+    return false;
+  }
+  return true;
+}
+
 function requireSessionCapability(request, response) {
   pruneEphemeralPrivacyState();
   const token = readAuthorizationToken(request);
@@ -562,6 +635,24 @@ function requireSessionCapability(request, response) {
   }
 
   return session;
+}
+
+function requireSessionDeviceRecord(session, request, response) {
+  if (!session?.deviceId) {
+    sendError(request, response, 403, "This relay operation requires a device-bound session.");
+    return null;
+  }
+  const user = store.users[session.userId];
+  const device = findUserDevice(user, session.deviceId);
+  if (!device) {
+    sendError(request, response, 403, "That device is not linked to this account.");
+    return null;
+  }
+  if (device.revokedAt) {
+    sendError(request, response, 403, "That linked device has been revoked.");
+    return null;
+  }
+  return { device, user };
 }
 
 function ensureLegacyRouteEnabled(request, response, routeName) {
@@ -943,7 +1034,7 @@ function sendText(response, statusCode, message) {
 }
 
 async function sendStaticAsset(request, response, pathname) {
-  const asset = SNAKE_ASSETS.get(pathname);
+  const asset = STATIC_ASSETS.get(pathname);
   if (!asset) {
     return false;
   }
@@ -978,6 +1069,10 @@ function isNonEmptyString(value, maxLength = 500) {
 
 function normalizeUsername(value) {
   return value.trim().toLowerCase();
+}
+
+function isValidUsername(value) {
+  return /^[a-z0-9._-]{3,24}$/.test(value);
 }
 
 function normalizeSearchText(value) {
@@ -1374,6 +1469,40 @@ function sanitizeIntegrityProofTokens(observation) {
   };
 }
 
+function notificationRegistrationHash(registrationId) {
+  return createHmac("sha256", RATE_LIMIT_HMAC_KEY)
+    .update(`notification:${registrationId}`)
+    .digest("hex");
+}
+
+function sanitizeNotificationRegistrationRecord(registration) {
+  if (!registration || typeof registration !== "object") {
+    return null;
+  }
+
+  const mode = isNonEmptyString(registration.mode, 80) ? registration.mode.trim() : null;
+  const platform = isNonEmptyString(registration.platform, 40) ? registration.platform.trim() : null;
+  const registrationHash = isNonEmptyString(registration.registrationHash, 160)
+    ? registration.registrationHash.trim()
+    : null;
+  const createdAt = isNonEmptyString(registration.createdAt, 60) ? registration.createdAt.trim() : null;
+  const updatedAt = isNonEmptyString(registration.updatedAt, 60) ? registration.updatedAt.trim() : createdAt;
+  const revokedAt = isNonEmptyString(registration.revokedAt, 60) ? registration.revokedAt.trim() : null;
+
+  if (!mode || !platform || !registrationHash || !createdAt || !updatedAt) {
+    return null;
+  }
+
+  return {
+    createdAt,
+    mode,
+    platform,
+    registrationHash,
+    revokedAt,
+    updatedAt,
+  };
+}
+
 function sanitizeDeviceRecord(device) {
   if (
     !device ||
@@ -1394,6 +1523,7 @@ function sanitizeDeviceRecord(device) {
   const attestationNote = isNonEmptyString(device.attestationNote, 300) ? device.attestationNote.trim() : null;
   const attestationStatus = isNonEmptyString(device.attestationStatus, 60) ? device.attestationStatus.trim() : null;
   const attestedAt = isNonEmptyString(device.attestedAt, 60) ? device.attestedAt.trim() : null;
+  const notificationRegistration = sanitizeNotificationRegistrationRecord(device.notificationRegistration);
 
   return {
     attestationNote,
@@ -1407,6 +1537,7 @@ function sanitizeDeviceRecord(device) {
     revokedAt,
     riskLevel,
     storageMode,
+    notificationRegistration,
     updatedAt,
   };
 }
@@ -1627,6 +1758,11 @@ function publicDeviceRecord(device, { currentDeviceId = null } = {}) {
     revokedAt: device.revokedAt ?? null,
     riskLevel: device.riskLevel ?? "unknown",
     storageMode: device.storageMode ?? null,
+    notificationMode: device.notificationRegistration?.mode ?? null,
+    notificationPlatform: device.notificationRegistration?.platform ?? null,
+    notificationRegisteredAt: device.notificationRegistration?.createdAt ?? null,
+    notificationUpdatedAt: device.notificationRegistration?.updatedAt ?? null,
+    notificationRevokedAt: device.notificationRegistration?.revokedAt ?? null,
     updatedAt: device.updatedAt ?? device.createdAt,
   };
 }
@@ -1701,6 +1837,7 @@ function upsertUserDevice(user, enrollment, { actorDeviceId = null, attestationS
     existing.publicJwk = enrollment.publicJwk;
     existing.riskLevel = riskLevel;
     existing.storageMode = enrollment.storageMode ?? existing.storageMode ?? null;
+    existing.notificationRegistration = sanitizeNotificationRegistrationRecord(existing.notificationRegistration);
     existing.updatedAt = now;
     return { added: false, device: existing };
   }
@@ -1717,6 +1854,7 @@ function upsertUserDevice(user, enrollment, { actorDeviceId = null, attestationS
     revokedAt: null,
     riskLevel,
     storageMode: enrollment.storageMode ?? null,
+    notificationRegistration: null,
     updatedAt: now,
   };
   user.devices.push(deviceRecord);
@@ -2231,7 +2369,18 @@ function storedAccountMatchesRegistration(user, body, { username, fingerprint, r
     user.recoveryFingerprint === recoveryFingerprint &&
     publicJwksEqual(user.signingPublicJwk, body.signingPublicJwk) &&
     publicJwksEqual(user.encryptionPublicJwk, body.encryptionPublicJwk) &&
-    publicJwksEqual(user.recoveryPublicJwk, body.recoveryPublicJwk)
+      publicJwksEqual(user.recoveryPublicJwk, body.recoveryPublicJwk)
+  );
+}
+
+function storedIdentityMaterialMatchesRegistration(user, body, { fingerprint, recoveryFingerprint }) {
+  return Boolean(
+    user &&
+      user.fingerprint === fingerprint &&
+      user.recoveryFingerprint === recoveryFingerprint &&
+      publicJwksEqual(user.signingPublicJwk, body.signingPublicJwk) &&
+      publicJwksEqual(user.encryptionPublicJwk, body.encryptionPublicJwk) &&
+      publicJwksEqual(user.recoveryPublicJwk, body.recoveryPublicJwk)
   );
 }
 
@@ -2338,7 +2487,7 @@ function invalidateUserMailboxCapabilities(userId) {
 
 function deactivateUserAccount(user, now) {
   const priorUsername = user.username;
-  const tombstoneUsername = `deleted-${user.id.slice(0, 8)}`;
+  const tombstoneUsername = null;
   user.deactivatedAt = now;
   user.directoryCode = null;
   user.displayName = "Deleted user";
@@ -2350,10 +2499,16 @@ function deactivateUserAccount(user, now) {
   user.signalBundle = null;
   user.signalBundleDigest = null;
   user.updatedAt = now;
-  user.username = tombstoneUsername;
   user.devices = Array.isArray(user.devices)
     ? user.devices.map((device) => ({
         ...device,
+        notificationRegistration: device.notificationRegistration
+          ? {
+              ...device.notificationRegistration,
+              revokedAt: now,
+              updatedAt: now,
+            }
+          : null,
         revokedAt: device.revokedAt ?? now,
         updatedAt: now,
       }))
@@ -2374,6 +2529,140 @@ function deactivateUserAccount(user, now) {
   return {
     priorUsername,
     tombstoneUsername,
+  };
+}
+
+function reactivateUserAccountForRegistration(user, { username, displayName, deviceEnrollment = null, now }) {
+  if (!user?.deactivatedAt) {
+    return false;
+  }
+
+  user.deactivatedAt = null;
+  user.username = username;
+  user.displayName = displayName;
+  user.directoryCode = isNonEmptyString(user.directoryCode, 20) ? user.directoryCode : generateDirectoryCode();
+  user.updatedAt = now;
+
+  if (deviceEnrollment) {
+    const existingDevice = findUserDevice(user, deviceEnrollment.id);
+    if (existingDevice?.revokedAt) {
+      existingDevice.revokedAt = null;
+      existingDevice.updatedAt = now;
+      if (existingDevice.notificationRegistration) {
+        existingDevice.notificationRegistration = {
+          ...existingDevice.notificationRegistration,
+          revokedAt: null,
+          updatedAt: now,
+        };
+      }
+    }
+    recordDeviceEvent(user, {
+      actorDeviceId: deviceEnrollment.id,
+      createdAt: now,
+      deviceId: deviceEnrollment.id,
+      kind: "account-reactivated",
+      label: deviceEnrollment.label,
+      platform: deviceEnrollment.platform,
+      revokedAt: null,
+    });
+  }
+
+  appendTransparencyEntry({
+    createdAt: now,
+    fingerprint: user.fingerprint,
+    kind: "account-reactivated",
+    prekeyFingerprint: user.prekeyFingerprint ?? null,
+    userId: user.id,
+    username: user.username,
+  });
+  return true;
+}
+
+function mostRecentAccountDeactivatedEvent(user) {
+  const events = Array.isArray(user?.deviceEvents) ? user.deviceEvents : [];
+  return events
+    .filter((event) => event?.kind === "account-deactivated" && isNonEmptyString(event?.label, 60))
+    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0] ?? null;
+}
+
+function deriveOriginalUsernameForUnblock(user) {
+  const latestDeactivation = mostRecentAccountDeactivatedEvent(user);
+  if (!latestDeactivation) {
+    return null;
+  }
+  const candidate = normalizeUsername(latestDeactivation.label);
+  return isValidUsername(candidate) ? candidate : null;
+}
+
+function usernameBoundToOtherUser(username, currentUserId) {
+  return Object.values(store.users).some(
+    (candidate) => candidate.id !== currentUserId && candidate.username === username
+  );
+}
+
+function adminUserRecord(user, { threadCountByUser = new Map() } = {}) {
+  const devices = Array.isArray(user.devices) ? user.devices : [];
+  const activeDeviceCount = devices.filter((device) => !device.revokedAt).length;
+  const revokedDeviceCount = devices.filter((device) => Boolean(device.revokedAt)).length;
+  const notificationRegisteredDeviceCount = devices.filter(
+    (device) => device.notificationRegistration && !device.notificationRegistration.revokedAt
+  ).length;
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+    deactivatedAt: user.deactivatedAt ?? null,
+    previousUsernameHint: deriveOriginalUsernameForUnblock(user),
+    canUnblock: Boolean(user.deactivatedAt),
+    threadCount: threadCountByUser.get(user.id) ?? 0,
+    activeDeviceCount,
+    revokedDeviceCount,
+    notificationRegisteredDeviceCount,
+    integrityRiskLevel: user.integrityObservation?.riskLevel ?? "unknown",
+  };
+}
+
+function purgeUserFromRelay(userId) {
+  const user = store.users[userId];
+  if (!user) {
+    return null;
+  }
+
+  const impactedUserIds = new Set();
+  let removedThreadCount = 0;
+  for (const [threadId, thread] of Object.entries(store.threads)) {
+    if (!thread.participantIds.includes(userId)) {
+      continue;
+    }
+    removedThreadCount += 1;
+    thread.participantIds
+      .filter((participantId) => participantId !== userId)
+      .forEach((participantId) => impactedUserIds.add(participantId));
+
+    delete store.threads[threadId];
+    MAILBOX_ROUTING.delete(threadId);
+    for (const [token, record] of MAILBOX_CAPABILITIES.entries()) {
+      if (record?.threadId === threadId) {
+        MAILBOX_CAPABILITIES.delete(token);
+        MAILBOX_CAPABILITY_INDEX.delete(`${record?.threadId ?? ""}:${record?.userId ?? ""}`);
+      }
+    }
+  }
+
+  const previousReportCount = store.reports.length;
+  store.reports = store.reports.filter((report) => report.reporterId !== userId && report.targetUserId !== userId);
+  const removedReportCount = previousReportCount - store.reports.length;
+
+  delete store.users[userId];
+  invalidateUserEphemeralState(userId);
+  impactedUserIds.forEach((participantId) => invalidateUserMailboxCapabilities(participantId));
+
+  return {
+    removedReportCount,
+    removedThreadCount,
+    impactedUserIds: [...impactedUserIds],
   };
 }
 
@@ -2440,6 +2729,28 @@ function sendSseEvent(response, eventName, payload) {
   response.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
+function sseListenerStillAuthorized(userId, listener) {
+  if (!listener?.sessionToken) {
+    return true;
+  }
+  const session = SESSION_CAPABILITIES.get(listener.sessionToken);
+  if (!session || session.kind !== "session" || Date.now() >= session.expiresAtMs || session.userId !== userId) {
+    SESSION_CAPABILITIES.delete(listener.sessionToken);
+    return false;
+  }
+  const user = store.users[userId];
+  if (!user || user.deactivatedAt) {
+    return false;
+  }
+  if (session.deviceId) {
+    const device = findUserDevice(user, session.deviceId);
+    if (!device || device.revokedAt) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function broadcastSync(userIds, reason, threadId = null) {
   const timestamp = new Date().toISOString();
 
@@ -2450,22 +2761,46 @@ function broadcastSync(userIds, reason, threadId = null) {
       continue;
     }
 
-    for (const response of listeners) {
-      sendSseEvent(response, "sync", {
+    for (const listener of [...listeners]) {
+      if (!sseListenerStillAuthorized(userId, listener)) {
+        listeners.delete(listener);
+        try {
+          listener.response.end();
+        } catch {}
+        continue;
+      }
+      sendSseEvent(listener.response, "sync", {
         reason,
         threadId,
         timestamp,
       });
     }
+    if (listeners.size === 0) {
+      SSE_CLIENTS.delete(userId);
+    }
   }
 }
 
-function handleSse(request, response, url) {
-  const userId = url.searchParams.get("userId");
+function handleSse(request, response, url, { allowLegacyQuery = false } = {}) {
   const ip = privacyPreservingRateLimitKey(getRequestIp(request));
-
-  if (!isNonEmptyString(userId, 120) || !store.users[userId]) {
-    sendError(request, response, 400, "A known userId is required to open the event stream.");
+  const sessionToken = readAuthorizationToken(request);
+  let session = null;
+  let userId = null;
+  if (sessionToken) {
+    session = requireSessionCapability(request, response);
+    if (!session) {
+      return;
+    }
+    userId = session.userId;
+  } else if (allowLegacyQuery && ENABLE_LEGACY_API_ROUTES) {
+    const legacyUserId = url.searchParams.get("userId");
+    if (!isNonEmptyString(legacyUserId, 120) || !store.users[legacyUserId]) {
+      sendError(request, response, 400, "A known userId is required to open the event stream.");
+      return;
+    }
+    userId = legacyUserId;
+  } else {
+    sendError(request, response, 401, "A current Notrus session token is required.");
     return;
   }
 
@@ -2495,13 +2830,20 @@ function handleSse(request, response, url) {
     SSE_CLIENTS.set(userId, listeners);
   }
 
-  listeners.add(response);
+  const listener = {
+    connectedAt: new Date().toISOString(),
+    deviceId: session?.deviceId ?? null,
+    response,
+    sessionToken: sessionToken ?? null,
+  };
+  listeners.add(listener);
   sendSseEvent(response, "hello", {
+    mode: sessionToken ? "session-v2" : "legacy-query",
     timestamp: new Date().toISOString(),
   });
 
   request.on("close", () => {
-    listeners.delete(response);
+    listeners.delete(listener);
 
     if (listeners.size === 0) {
       SSE_CLIENTS.delete(userId);
@@ -2560,6 +2902,9 @@ async function handleRegister(request, response) {
 
   const existingByUsername = Object.values(store.users).find((user) => user.username === username);
   const existingById = requestedUserId ? store.users[requestedUserId] : null;
+  const existingByIdentityMaterial = Object.values(store.users).find((user) =>
+    storedIdentityMaterialMatchesRegistration(user, body, { fingerprint, recoveryFingerprint })
+  );
   const isExistingMatchingRegistration =
     (existingById && storedAccountMatchesRegistration(existingById, body, { username, fingerprint, recoveryFingerprint })) ||
     (existingByUsername &&
@@ -2567,7 +2912,8 @@ async function handleRegister(request, response) {
         username,
         fingerprint,
         recoveryFingerprint,
-      }));
+      })) ||
+    Boolean(existingByIdentityMaterial);
 
   const registerLimits = isExistingMatchingRegistration
     ? [
@@ -2682,8 +3028,12 @@ async function handleRegister(request, response) {
   let appendTransparency = null;
 
   if (existingById) {
+    const storedUsernameHint = existingById.deactivatedAt ? deriveOriginalUsernameForUnblock(existingById) : null;
+    const usernameMatchesStoredRecord =
+      existingById.username === username ||
+      (existingById.deactivatedAt && storedUsernameHint === username);
     if (
-      existingById.username !== username ||
+      !usernameMatchesStoredRecord ||
       existingById.fingerprint !== fingerprint ||
       existingById.recoveryFingerprint !== recoveryFingerprint ||
       !publicJwksEqual(existingById.signingPublicJwk, body.signingPublicJwk) ||
@@ -2694,6 +3044,12 @@ async function handleRegister(request, response) {
       return;
     }
 
+    reactivateUserAccountForRegistration(existingById, {
+      username,
+      displayName,
+      deviceEnrollment,
+      now,
+    });
     existingById.displayName = displayName;
     if (
       body.prekeyPublicJwk &&
@@ -2747,10 +3103,25 @@ async function handleRegister(request, response) {
       !publicJwksEqual(existingByUsername.encryptionPublicJwk, body.encryptionPublicJwk) ||
       !publicJwksEqual(existingByUsername.recoveryPublicJwk, body.recoveryPublicJwk)
     ) {
-      sendError(request, response, 409, "That username is already bound to a different device identity.");
+      if (existingByUsername.deactivatedAt) {
+        sendError(
+          request,
+          response,
+          409,
+          "That username is reserved by a deactivated relay account. Unblock or delete that account before re-registering."
+        );
+      } else {
+        sendError(request, response, 409, "That username is already bound to another relay account.");
+      }
       return;
     }
 
+    reactivateUserAccountForRegistration(existingByUsername, {
+      username,
+      displayName,
+      deviceEnrollment,
+      now,
+    });
     existingByUsername.displayName = displayName;
     if (
       body.prekeyPublicJwk &&
@@ -2796,6 +3167,43 @@ async function handleRegister(request, response) {
       return;
     }
     userRecord = existingByUsername;
+  } else if (existingByIdentityMaterial?.deactivatedAt) {
+    if (usernameBoundToOtherUser(username, existingByIdentityMaterial.id)) {
+      sendError(
+        request,
+        response,
+        409,
+        "That username is already bound to another relay account. Remove that account before reactivating this identity."
+      );
+      return;
+    }
+
+    reactivateUserAccountForRegistration(existingByIdentityMaterial, {
+      username,
+      displayName,
+      deviceEnrollment,
+      now,
+    });
+    existingByIdentityMaterial.prekeyCreatedAt = prekeyCreatedAt;
+    existingByIdentityMaterial.prekeyFingerprint = prekeyFingerprint;
+    existingByIdentityMaterial.prekeyPublicJwk = normalizePublicJwk(body.prekeyPublicJwk);
+    existingByIdentityMaterial.prekeySignature = prekeySignature;
+    existingByIdentityMaterial.signalBundle = sanitizeSignalBundle(body.signalBundle) ?? existingByIdentityMaterial.signalBundle ?? null;
+    existingByIdentityMaterial.signalBundleDigest = signalBundleDigest(body.signalBundle);
+    existingByIdentityMaterial.mlsKeyPackage = sanitizeMlsKeyPackage(body.mlsKeyPackage) ?? existingByIdentityMaterial.mlsKeyPackage ?? null;
+    existingByIdentityMaterial.integrityObservation = integrityObservation ?? existingByIdentityMaterial.integrityObservation ?? null;
+    existingByIdentityMaterial.updatedAt = now;
+    const deviceUpsert = upsertUserDevice(existingByIdentityMaterial, deviceEnrollment, {
+      actorDeviceId: deviceEnrollment?.id ?? null,
+      attestationSummary,
+      integrityObservation,
+      now,
+    });
+    if (deviceUpsert?.error) {
+      sendError(request, response, 403, deviceUpsert.error);
+      return;
+    }
+    userRecord = existingByIdentityMaterial;
   } else {
     const userId = requestedUserId ?? randomUUID();
     userRecord = {
@@ -3123,6 +3531,13 @@ async function handleRevokeDevice(request, response) {
 
   const revokedAt = new Date().toISOString();
   targetDevice.revokedAt = revokedAt;
+  targetDevice.notificationRegistration = targetDevice.notificationRegistration
+    ? {
+        ...targetDevice.notificationRegistration,
+        revokedAt,
+        updatedAt: revokedAt,
+      }
+    : null;
   targetDevice.updatedAt = revokedAt;
   invalidateDeviceSessionCapabilities(userId, targetDeviceId);
   invalidateUserMailboxCapabilities(userId);
@@ -3297,6 +3712,13 @@ async function handleAccountReset(request, response) {
   existing.updatedAt = new Date().toISOString();
   existing.devices = (existing.devices ?? []).map((device) => ({
     ...device,
+    notificationRegistration: device.notificationRegistration
+      ? {
+          ...device.notificationRegistration,
+          revokedAt: existing.updatedAt,
+          updatedAt: existing.updatedAt,
+        }
+      : null,
     revokedAt: existing.updatedAt,
     updatedAt: existing.updatedAt,
   }));
@@ -3877,6 +4299,369 @@ async function handleSecurityDevices(request, response) {
   sendJson(request, response, 200, publicDeviceSnapshot(session.userId, session.deviceId));
 }
 
+async function handleNotificationRegister(request, response) {
+  const session = requireSessionCapability(request, response);
+  if (!session) {
+    return;
+  }
+  const sessionDevice = requireSessionDeviceRecord(session, request, response);
+  if (!sessionDevice) {
+    return;
+  }
+
+  if (
+    !enforceRateLimits(
+      request,
+      response,
+      [{ config: RATE_LIMITS.eventsPerIp, key: sessionBucketKey(session, "notification-register"), scope: "notification-register-v2" }],
+      "Notification registration"
+    )
+  ) {
+    return;
+  }
+
+  const body = await readJsonBody(request);
+  const registrationId = isNonEmptyString(body.registrationId, 8_000) ? body.registrationId.trim() : "";
+  const mode = isNonEmptyString(body.mode, 80) ? body.mode.trim() : "";
+  const platform = isNonEmptyString(body.platform, 40) ? body.platform.trim() : "";
+  const createdAt = isNonEmptyString(body.createdAt, 60) ? body.createdAt.trim() : new Date().toISOString();
+  if (!registrationId || !mode || !platform || Number.isNaN(new Date(createdAt).getTime())) {
+    sendError(request, response, 400, "Notification registration requires registrationId, mode, platform, and a valid timestamp.");
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const existing = sanitizeNotificationRegistrationRecord(sessionDevice.device.notificationRegistration);
+  sessionDevice.device.notificationRegistration = {
+    createdAt: existing?.createdAt ?? createdAt,
+    mode,
+    platform,
+    registrationHash: notificationRegistrationHash(registrationId),
+    revokedAt: null,
+    updatedAt: now,
+  };
+  sessionDevice.device.updatedAt = now;
+  await queuePersist();
+  sendJson(request, response, 200, {
+    ok: true,
+    registeredAt: now,
+  });
+}
+
+async function handleNotificationUnregister(request, response) {
+  const session = requireSessionCapability(request, response);
+  if (!session) {
+    return;
+  }
+  const sessionDevice = requireSessionDeviceRecord(session, request, response);
+  if (!sessionDevice) {
+    return;
+  }
+
+  if (
+    !enforceRateLimits(
+      request,
+      response,
+      [{ config: RATE_LIMITS.eventsPerIp, key: sessionBucketKey(session, "notification-unregister"), scope: "notification-unregister-v2" }],
+      "Notification registration"
+    )
+  ) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const existing = sanitizeNotificationRegistrationRecord(sessionDevice.device.notificationRegistration);
+  sessionDevice.device.notificationRegistration = existing
+    ? {
+        ...existing,
+        revokedAt: now,
+        updatedAt: now,
+      }
+    : null;
+  sessionDevice.device.updatedAt = now;
+  await queuePersist();
+  sendJson(request, response, 200, {
+    ok: true,
+    unregisteredAt: now,
+  });
+}
+
+async function handleNotificationStatus(request, response) {
+  const session = requireSessionCapability(request, response);
+  if (!session) {
+    return;
+  }
+  const sessionDevice = requireSessionDeviceRecord(session, request, response);
+  if (!sessionDevice) {
+    return;
+  }
+
+  const registration = sanitizeNotificationRegistrationRecord(sessionDevice.device.notificationRegistration);
+  sendJson(request, response, 200, {
+    mode: registration?.mode ?? null,
+    platform: registration?.platform ?? null,
+    registeredAt: registration?.createdAt ?? null,
+    revokedAt: registration?.revokedAt ?? null,
+    updatedAt: registration?.updatedAt ?? null,
+  });
+}
+
+async function handleAdminUsersList(request, response, url) {
+  if (!requireAdminCapability(request, response)) {
+    return;
+  }
+
+  if (
+    !enforceRateLimits(
+      request,
+      response,
+      [{ config: RATE_LIMITS.eventsPerIp, key: privacyPreservingRateLimitKey(`admin-users:${getRequestIp(request)}`), scope: "admin-users" }],
+      "Relay admin users"
+    )
+  ) {
+    return;
+  }
+
+  const includeDeactivated = url.searchParams.get("includeDeactivated") === "true";
+  const listAll = url.searchParams.get("all") === "true" || (url.searchParams.get("limit") ?? "").trim().toLowerCase() === "all";
+  const normalizedQuery = listAll ? "" : (url.searchParams.get("q") ?? "").trim().toLowerCase();
+  const requestedLimit = Number(url.searchParams.get("limit") ?? 200);
+  const limit = listAll
+    ? ADMIN_USERS_LIMIT
+    : Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 200, 1), ADMIN_USERS_LIMIT);
+  const threadCountByUser = new Map();
+  for (const thread of Object.values(store.threads)) {
+    for (const participantId of thread.participantIds) {
+      threadCountByUser.set(participantId, (threadCountByUser.get(participantId) ?? 0) + 1);
+    }
+  }
+
+  const matchingUsers = Object.values(store.users)
+    .filter((user) => includeDeactivated || !user.deactivatedAt)
+    .filter((user) => {
+      if (!normalizedQuery) {
+        return true;
+      }
+      return (
+        user.id.toLowerCase().includes(normalizedQuery) ||
+        user.username.toLowerCase().includes(normalizedQuery) ||
+        user.displayName.toLowerCase().includes(normalizedQuery)
+      );
+    })
+    .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
+  const users = matchingUsers
+    .slice(0, limit)
+    .map((user) => adminUserRecord(user, { threadCountByUser }));
+
+  sendJson(request, response, 200, {
+    generatedAt: new Date().toISOString(),
+    relayThreads: Object.keys(store.threads).length,
+    relayUsers: Object.keys(store.users).length,
+    totalMatched: matchingUsers.length,
+    truncated: users.length < matchingUsers.length,
+    users,
+  });
+}
+
+async function handleAdminBlockUser(request, response, userId) {
+  if (!requireAdminCapability(request, response)) {
+    return;
+  }
+
+  if (
+    !enforceRateLimits(
+      request,
+      response,
+      [{ config: RATE_LIMITS.eventsPerIp, key: privacyPreservingRateLimitKey(`admin-block:${getRequestIp(request)}`), scope: "admin-user-block" }],
+      "Relay admin user block"
+    )
+  ) {
+    return;
+  }
+
+  if (!isNonEmptyString(userId, 120) || !store.users[userId]) {
+    sendError(request, response, 404, "That relay user is unknown.");
+    return;
+  }
+
+  const user = store.users[userId];
+  if (user.deactivatedAt) {
+    sendJson(request, response, 200, {
+      alreadyDeactivated: true,
+      ok: true,
+      user: adminUserRecord(user),
+    });
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const { priorUsername, tombstoneUsername } = deactivateUserAccount(user, now);
+  await queuePersist();
+  broadcastSync(Object.keys(store.users), "admin-user-deactivated", null);
+  sendJson(request, response, 200, {
+    deactivatedAt: now,
+    ok: true,
+    priorUsername,
+    tombstoneUsername,
+    user: adminUserRecord(user),
+  });
+}
+
+async function handleAdminDeleteUser(request, response, userId) {
+  if (!requireAdminCapability(request, response)) {
+    return;
+  }
+
+  if (
+    !enforceRateLimits(
+      request,
+      response,
+      [{ config: RATE_LIMITS.eventsPerIp, key: privacyPreservingRateLimitKey(`admin-delete:${getRequestIp(request)}`), scope: "admin-user-delete" }],
+      "Relay admin user delete"
+    )
+  ) {
+    return;
+  }
+
+  if (!isNonEmptyString(userId, 120) || !store.users[userId]) {
+    sendError(request, response, 404, "That relay user is unknown.");
+    return;
+  }
+
+  const result = purgeUserFromRelay(userId);
+  if (!result) {
+    sendError(request, response, 404, "That relay user is unknown.");
+    return;
+  }
+  await queuePersist();
+  if (result.impactedUserIds.length > 0) {
+    broadcastSync(result.impactedUserIds, "admin-user-deleted", null);
+  }
+  sendJson(request, response, 200, {
+    deletedAt: new Date().toISOString(),
+    ok: true,
+    removedReportCount: result.removedReportCount,
+    removedThreadCount: result.removedThreadCount,
+    userId,
+  });
+}
+
+async function handleAdminUnblockUser(request, response, userId) {
+  if (!requireAdminCapability(request, response)) {
+    return;
+  }
+
+  if (
+    !enforceRateLimits(
+      request,
+      response,
+      [{ config: RATE_LIMITS.eventsPerIp, key: privacyPreservingRateLimitKey(`admin-unblock:${getRequestIp(request)}`), scope: "admin-user-unblock" }],
+      "Relay admin user unblock"
+    )
+  ) {
+    return;
+  }
+
+  if (!isNonEmptyString(userId, 120) || !store.users[userId]) {
+    sendError(request, response, 404, "That relay user is unknown.");
+    return;
+  }
+
+  const user = store.users[userId];
+  if (!user.deactivatedAt) {
+    sendJson(request, response, 200, {
+      alreadyActive: true,
+      ok: true,
+      user: adminUserRecord(user),
+    });
+    return;
+  }
+
+  const body = await readJsonBody(request);
+  const requestedUsername = isNonEmptyString(body.username, 30) ? normalizeUsername(body.username) : null;
+  const fallbackUsername = deriveOriginalUsernameForUnblock(user);
+  const restoredUsername = requestedUsername ?? fallbackUsername;
+  if (!restoredUsername || !isValidUsername(restoredUsername)) {
+    sendError(
+      request,
+      response,
+      400,
+      "Unblock requires a valid username (3-24 lowercase letters, numbers, dots, dashes, or underscores)."
+    );
+    return;
+  }
+
+  const conflictingUsernameOwner = Object.values(store.users).find(
+    (candidate) => candidate.id !== user.id && candidate.username === restoredUsername
+  );
+  if (conflictingUsernameOwner) {
+    sendError(
+      request,
+      response,
+      409,
+      `That username is already bound to another relay account (${conflictingUsernameOwner.id}).`
+    );
+    return;
+  }
+
+  const restoredDisplayName = isNonEmptyString(body.displayName, 60)
+    ? body.displayName.trim()
+    : user.displayName === "Deleted user"
+      ? restoredUsername
+      : user.displayName;
+  const restoreDevices = body.restoreDevices !== false;
+  const now = new Date().toISOString();
+
+  user.deactivatedAt = null;
+  user.username = restoredUsername;
+  user.displayName = restoredDisplayName;
+  user.directoryCode = isNonEmptyString(user.directoryCode, 20) ? user.directoryCode : generateDirectoryCode();
+  user.updatedAt = now;
+
+  if (restoreDevices) {
+    user.devices = Array.isArray(user.devices)
+      ? user.devices.map((device) => ({
+          ...device,
+          notificationRegistration: device.notificationRegistration
+            ? {
+                ...device.notificationRegistration,
+                revokedAt: null,
+                updatedAt: now,
+              }
+            : null,
+          revokedAt: null,
+          updatedAt: now,
+        }))
+      : [];
+  }
+
+  recordDeviceEvent(user, {
+    actorDeviceId: null,
+    createdAt: now,
+    deviceId: null,
+    kind: "account-reactivated",
+    label: restoredUsername,
+    platform: null,
+    revokedAt: null,
+  });
+  appendTransparencyEntry({
+    createdAt: now,
+    fingerprint: user.fingerprint,
+    kind: "account-reactivated",
+    prekeyFingerprint: user.prekeyFingerprint ?? null,
+    userId: user.id,
+    username: user.username,
+  });
+
+  await queuePersist();
+  broadcastSync([user.id], "admin-user-reactivated", null);
+  sendJson(request, response, 200, {
+    ok: true,
+    restoredUsername,
+    user: adminUserRecord(user),
+  });
+}
+
 async function handleDirectorySearchV2(request, response, url) {
   const session = requireSessionCapability(request, response);
   if (!session) {
@@ -4070,10 +4855,37 @@ async function requestListener(request, response) {
           routineRequestShape: "capability-token + mailbox handle + encrypted blob",
           sessionBootstrap: "registration/bootstrap only",
         },
+        adminApi: {
+          enabled: ENABLE_ADMIN_API && Boolean(ADMIN_API_TOKEN),
+          mode: ENABLE_ADMIN_API ? "token-header" : "disabled",
+        },
         directoryDiscoveryMode: "username-or-invite",
         users: Object.keys(store.users).length,
         threads: Object.keys(store.threads).length,
       });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/admin/users") {
+      await handleAdminUsersList(request, response, url);
+      return;
+    }
+
+    const adminUserBlockMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/block$/);
+    if (request.method === "POST" && adminUserBlockMatch) {
+      await handleAdminBlockUser(request, response, decodeURIComponent(adminUserBlockMatch[1]));
+      return;
+    }
+
+    const adminUserDeleteMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/delete$/);
+    if (request.method === "POST" && adminUserDeleteMatch) {
+      await handleAdminDeleteUser(request, response, decodeURIComponent(adminUserDeleteMatch[1]));
+      return;
+    }
+
+    const adminUserUnblockMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/unblock$/);
+    if (request.method === "POST" && adminUserUnblockMatch) {
+      await handleAdminUnblockUser(request, response, decodeURIComponent(adminUserUnblockMatch[1]));
       return;
     }
 
@@ -4089,6 +4901,26 @@ async function requestListener(request, response) {
 
     if (request.method === "GET" && pathname === "/api/security/devices") {
       await handleSecurityDevices(request, response);
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/events") {
+      handleSse(request, response, url, { allowLegacyQuery: false });
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/api/notifications/status") {
+      await handleNotificationStatus(request, response);
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/api/notifications/register") {
+      await handleNotificationRegister(request, response);
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/api/notifications/unregister") {
+      await handleNotificationUnregister(request, response);
       return;
     }
 
@@ -4122,7 +4954,7 @@ async function requestListener(request, response) {
     }
 
     if (request.method === "GET" && pathname === "/events") {
-      handleSse(request, response, url);
+      handleSse(request, response, url, { allowLegacyQuery: true });
       return;
     }
 

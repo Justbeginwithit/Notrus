@@ -41,6 +41,8 @@ import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -309,6 +311,88 @@ class RelayClient(
             tombstonedUsername = nullableString(response, "tombstonedUsername"),
             userId = response.optString("userId"),
         )
+    }
+
+    suspend fun registerNotificationWakeup(
+        mode: String,
+        platform: String,
+        registrationId: String,
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (mode.isBlank() || platform.isBlank() || registrationId.isBlank()) {
+            return@withContext false
+        }
+        val response = request(
+            "/api/notifications/register",
+            method = "POST",
+            authorizationToken = requireSessionToken(),
+            body = JSONObject()
+                .put("createdAt", Instant.now().toString())
+                .put("mode", mode)
+                .put("platform", platform)
+                .put("registrationId", registrationId),
+        )
+        response.optBoolean("ok", false)
+    }
+
+    suspend fun unregisterNotificationWakeup(registrationId: String? = null): Boolean = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("createdAt", Instant.now().toString())
+        registrationId?.takeIf { it.isNotBlank() }?.let { body.put("registrationId", it.trim()) }
+        val response = request(
+            "/api/notifications/unregister",
+            method = "POST",
+            authorizationToken = requireSessionToken(),
+            body = body,
+        )
+        response.optBoolean("ok", false)
+    }
+
+    suspend fun streamEvents(onSync: (reason: String?, threadId: String?) -> Unit) = withContext(Dispatchers.IO) {
+        val connection = URL(resolve("/api/events")).openConnection() as HttpURLConnection
+        connection.requestMethod = "GET"
+        connection.connectTimeout = 10_000
+        connection.readTimeout = 0
+        connection.setRequestProperty("Accept", "text/event-stream")
+        connection.setRequestProperty("Cache-Control", "no-store")
+        connection.setRequestProperty("Authorization", "Bearer ${requireSessionToken()}")
+
+        val status = connection.responseCode
+        if (status !in 200..299) {
+            val payload = connection.errorStream?.use { BufferedReader(InputStreamReader(it)).readText() }.orEmpty()
+            throw IllegalStateException(
+                decodePayload(payload).optString("error", "Relay returned HTTP $status"),
+            )
+        }
+
+        var currentEvent: String? = null
+        val dataLines = mutableListOf<String>()
+        connection.inputStream.use { stream ->
+            BufferedReader(InputStreamReader(stream)).use { reader ->
+                while (currentCoroutineContext().isActive) {
+                    val line = reader.readLine() ?: break
+                    when {
+                        line.isBlank() -> {
+                            if ((currentEvent ?: "message") == "sync" && dataLines.isNotEmpty()) {
+                                val payload = decodePayload(dataLines.joinToString("\n"))
+                                onSync(
+                                    payload.optString("reason").ifBlank { null },
+                                    payload.optString("threadId").ifBlank { null },
+                                )
+                            }
+                            currentEvent = null
+                            dataLines.clear()
+                        }
+
+                        line.startsWith("event:") -> {
+                            currentEvent = line.removePrefix("event:").trim()
+                        }
+
+                        line.startsWith("data:") -> {
+                            dataLines += line.removePrefix("data:").trim()
+                        }
+                    }
+                }
+            }
+        }
     }
 
     suspend fun fetchWitnessHead(witnessOrigin: String, relayOrigin: String): WitnessObservation? = withContext(Dispatchers.IO) {

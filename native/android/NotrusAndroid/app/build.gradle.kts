@@ -30,8 +30,8 @@ android {
         applicationId = "com.notrus.android"
         minSdk = 31
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.3.1-beta2"
+        versionCode = 5
+        versionName = "0.3.2-beta3"
         buildConfigField("String", "DEFAULT_RELAY_ORIGIN", "\"$defaultRelayOrigin\"")
         buildConfigField("long", "PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER", "${playIntegrityCloudProjectNumber}L")
         ndk {
@@ -123,6 +123,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.signal:libsignal-client:$signalVersion")

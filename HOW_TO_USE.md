@@ -50,6 +50,39 @@ node server.js
 
 See full details in [ATTESTATION_SETUP.md](ATTESTATION_SETUP.md).
 
+## Optional relay operator controls (disabled by default)
+
+If you self-host and need operational cleanup tooling, enable the relay operator API:
+
+```bash
+NOTRUS_ENABLE_ADMIN_API=true \
+NOTRUS_ADMIN_API_TOKEN="replace-with-long-random-token" \
+node server.js
+```
+
+Call routes with header `X-Notrus-Admin-Token: <token>`:
+
+- `GET /api/admin/users` for relay-wide account inspection
+- `POST /api/admin/users/:userId/unblock` to reactivate a blocked/tombstoned account (and restore a username)
+- `POST /api/admin/users/:userId/block` to deactivate/tombstone an account
+- `POST /api/admin/users/:userId/delete` to hard-delete a relay account plus its threads
+
+Or open the built-in GUI:
+
+- `http://127.0.0.1:3000/admin`
+- `https://<your-ngrok-or-domain>/admin`
+
+Note: local profile lists in Android/macOS only show identities stored on that device, not all relay accounts.
+
+Admin GUI capability boundary:
+
+- can inspect/block/unblock/delete relay accounts
+- cannot create users
+- cannot decrypt message content
+- cannot access local hardware-protected keys from client devices
+
+See [ADMIN_GUI.md](ADMIN_GUI.md) for full details.
+
 ## 4. Build and install the clients
 
 macOS:
@@ -60,7 +93,7 @@ macOS:
 Android:
 
 - package with `npm run package:android-app`
-- install `dist/android/Notrus-0.3.1-beta2-release.apk`
+- install `dist/android/Notrus-0.3.2-beta3-release.apk`
   (or unversioned `dist/android/Notrus-release.apk`)
 
 ## 5. Create or import a profile
@@ -128,6 +161,10 @@ Import on replacement device:
 3. Enter archive passphrase
 4. Complete local device setup
 
+Current limitation:
+
+- import/export currently restores account identity state, not full historical plaintext transcript portability. Some old messages may remain unavailable on the destination device.
+
 ## 11. Common recovery actions
 
 If transparency reports trust issues:
@@ -155,8 +192,11 @@ Beta-ready:
 - username/invite discovery
 - direct messaging between macOS and Android
 - standards-group messaging with compatibility transport
+- admin relay GUI for operator account cleanup and reactivation
 
 Still required before stable:
 
 - sustained multi-operator real-world burn-in
 - external confidence boosters (independent review/audit, reproducibility maturity)
+- Android notification delivery reliability polish across broader device conditions
+- stronger cross-device conversation-history portability after import/export

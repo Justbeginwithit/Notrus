@@ -2068,6 +2068,9 @@ struct AccountCenterSheet: View {
                             Text("Inspect the local vault backend, current device key state, and every profile stored on this Mac before creating or importing another account.")
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
+                            Text("This view is local-only. Relay totals shown in health status are network-wide and can be much larger than what is stored on this Mac.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
 
                             HStack(spacing: 10) {
                                 MetadataChip(label: model.localDeviceInventory.vaultStorageMode)
@@ -2114,6 +2117,10 @@ struct AccountCenterSheet: View {
                                         }
                                         Text(profile.id)
                                             .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                            .foregroundStyle(NotrusPalette.muted)
+                                            .textSelection(.enabled)
+                                        Text(profile.fingerprint)
+                                            .font(.system(size: 11, weight: .regular, design: .monospaced))
                                             .foregroundStyle(NotrusPalette.muted)
                                             .textSelection(.enabled)
                                     }
