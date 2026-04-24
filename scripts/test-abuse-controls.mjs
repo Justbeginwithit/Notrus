@@ -325,7 +325,10 @@ async function main() {
 
     const threadResponse = await requestWithPow("/api/threads", {
       method: "POST",
-      headers: remoteHeaders,
+      headers: {
+        ...remoteHeaders,
+        Authorization: `Bearer ${challengedRegister.body.session.token}`,
+      },
       body: {
         createdAt: isoNow(),
         createdBy: alice.userId,

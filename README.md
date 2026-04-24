@@ -126,11 +126,11 @@ Artifacts:
 
 - `dist/Notrus.app`
 - `dist/Notrus.zip`
-- `dist/Notrus-0.3.2-beta3.zip`
+- `dist/Notrus-0.3.3-beta4.zip`
 - `dist/android/Notrus-debug.apk`
 - `dist/android/Notrus-release.apk`
-- `dist/android/Notrus-0.3.2-beta3-debug.apk`
-- `dist/android/Notrus-0.3.2-beta3-release.apk`
+- `dist/android/Notrus-0.3.3-beta4-debug.apk`
+- `dist/android/Notrus-0.3.3-beta4-release.apk`
 
 ## Current Product Boundary
 

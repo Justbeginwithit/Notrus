@@ -93,7 +93,7 @@ macOS:
 Android:
 
 - package with `npm run package:android-app`
-- install `dist/android/Notrus-0.3.2-beta3-release.apk`
+- install `dist/android/Notrus-0.3.3-beta4-release.apk`
   (or unversioned `dist/android/Notrus-release.apk`)
 
 ## 5. Create or import a profile

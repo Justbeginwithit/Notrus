@@ -1,12 +1,11 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
 @Suppress("UnstableApiUsage")
 
-val signalVersion = "0.91.0"
+val signalVersion = "0.92.2"
 val defaultRelayOrigin = System.getenv("NOTRUS_DEFAULT_RELAY_ORIGIN") ?: "https://ramal-paola-yolky.ngrok-free.dev"
 val releaseKeystorePath = System.getenv("NOTRUS_ANDROID_KEYSTORE_PATH")
 val releaseKeystorePassword = System.getenv("NOTRUS_ANDROID_KEYSTORE_PASSWORD")
@@ -30,8 +29,8 @@ android {
         applicationId = "com.notrus.android"
         minSdk = 31
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.3.2-beta3"
+        versionCode = 6
+        versionName = "0.3.3-beta4"
         buildConfigField("String", "DEFAULT_RELAY_ORIGIN", "\"$defaultRelayOrigin\"")
         buildConfigField("long", "PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER", "${playIntegrityCloudProjectNumber}L")
         ndk {
@@ -84,13 +83,6 @@ android {
         isCoreLibraryDesugaringEnabled = true
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-        freeCompilerArgs += listOf(
-            "-Xjvm-default=all"
-        )
-    }
-
     buildFeatures {
         compose = true
         buildConfig = true
@@ -114,6 +106,13 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+        freeCompilerArgs.add("-jvm-default=enable")
+    }
+}
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
 
@@ -122,8 +121,8 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.4")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
-    implementation("androidx.work:work-runtime-ktx:2.9.1")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
+    implementation("androidx.work:work-runtime-ktx:2.11.2")
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.signal:libsignal-client:$signalVersion")

@@ -3271,13 +3271,19 @@ async function handleRegister(request, response) {
   });
 }
 
-async function handleSync(request, response, url) {
-  const userId = url.searchParams.get("userId");
+async function handleSync(request, response, url, options = {}) {
+  const requestedUserId = url.searchParams.get("userId");
+  const userId = options.forcedUserId ?? requestedUserId;
   const ip = privacyPreservingRateLimitKey(getRequestIp(request));
   const requestDeviceId = getRequestDeviceId(request);
   const integrityObservation = sanitizeIntegrityObservation(parseIntegrityReportHeader(request));
 
   pruneExpiredArtifacts();
+
+  if (options.forcedUserId && isNonEmptyString(requestedUserId, 120) && requestedUserId !== options.forcedUserId) {
+    sendError(request, response, 403, "The requested sync account does not match the authenticated session.");
+    return;
+  }
 
   if (!isNonEmptyString(userId, 120) || !store.users[userId]) {
     sendError(request, response, 404, "Unknown user.");
@@ -4982,7 +4988,11 @@ async function requestListener(request, response) {
       if (!ensureLegacyRouteEnabled(request, response, "/api/sync")) {
         return;
       }
-      await handleSync(request, response, url);
+      const session = requireSessionCapability(request, response);
+      if (!session) {
+        return;
+      }
+      await handleSync(request, response, url, { forcedUserId: session.userId });
       return;
     }
 
@@ -4990,7 +5000,11 @@ async function requestListener(request, response) {
       if (!ensureLegacyRouteEnabled(request, response, "/api/threads")) {
         return;
       }
-      await handleCreateThread(request, response);
+      const session = requireSessionCapability(request, response);
+      if (!session) {
+        return;
+      }
+      await handleCreateThread(request, response, { actorUserId: session.userId });
       return;
     }
 
@@ -5025,24 +5039,50 @@ async function requestListener(request, response) {
 
     const threadMessageMatch = pathname.match(/^\/api\/threads\/([^/]+)\/messages$/);
     if (request.method === "POST" && threadMessageMatch) {
-      await handlePostMessage(request, response, decodeURIComponent(threadMessageMatch[1]));
+      if (!ensureLegacyRouteEnabled(request, response, "/api/threads/:threadId/messages")) {
+        return;
+      }
+      const session = requireSessionCapability(request, response);
+      if (!session) {
+        return;
+      }
+      await handlePostMessage(request, response, decodeURIComponent(threadMessageMatch[1]), {
+        forcedSenderId: session.userId,
+      });
       return;
     }
 
     const threadAttachmentUploadMatch = pathname.match(/^\/api\/threads\/([^/]+)\/attachments$/);
     if (request.method === "POST" && threadAttachmentUploadMatch) {
-      await handleUploadAttachment(request, response, decodeURIComponent(threadAttachmentUploadMatch[1]));
+      if (!ensureLegacyRouteEnabled(request, response, "/api/threads/:threadId/attachments")) {
+        return;
+      }
+      const session = requireSessionCapability(request, response);
+      if (!session) {
+        return;
+      }
+      await handleUploadAttachment(request, response, decodeURIComponent(threadAttachmentUploadMatch[1]), {
+        forcedSenderId: session.userId,
+      });
       return;
     }
 
     const threadAttachmentFetchMatch = pathname.match(/^\/api\/threads\/([^/]+)\/attachments\/([^/]+)$/);
     if (request.method === "GET" && threadAttachmentFetchMatch) {
+      if (!ensureLegacyRouteEnabled(request, response, "/api/threads/:threadId/attachments/:attachmentId")) {
+        return;
+      }
+      const session = requireSessionCapability(request, response);
+      if (!session) {
+        return;
+      }
       await handleFetchAttachment(
         request,
         response,
         decodeURIComponent(threadAttachmentFetchMatch[1]),
         decodeURIComponent(threadAttachmentFetchMatch[2]),
-        url
+        url,
+        { forcedUserId: session.userId }
       );
       return;
     }

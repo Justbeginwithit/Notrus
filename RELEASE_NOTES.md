@@ -1,6 +1,78 @@
 # Notrus Release Notes
 
-## v0.3.2-beta3 (current beta release)
+## v0.3.3-beta4 (current beta security release)
+
+Release date: 2026-04-25
+
+This is an important beta security update for the relay and refreshed native clients. It hardens legacy relay routes flagged by Semgrep AI, ships refreshed Android/macOS artifacts, and includes dependency updates from Dependabot.
+
+### Included artifacts
+
+- macOS:
+  - `dist/Notrus.app`
+  - `dist/Notrus.zip`
+  - `dist/Notrus-0.3.3-beta4.zip`
+- Android:
+  - `dist/android/Notrus-debug.apk`
+  - `dist/android/Notrus-release.apk`
+  - `dist/android/Notrus-0.3.3-beta4-debug.apk`
+  - `dist/android/Notrus-0.3.3-beta4-release.apk`
+
+### Security fixes
+
+- Hardened legacy relay routes that Semgrep AI flagged as IDOR / authorization risks:
+  - `/api/sync`
+  - `/api/threads`
+  - `/api/threads/:threadId/messages`
+  - `/api/threads/:threadId/attachments`
+  - `/api/threads/:threadId/attachments/:attachmentId`
+- Legacy routes now require a current session token when enabled and bind requested user/sender/fetch identity to the authenticated session.
+- Production relays still keep legacy routes disabled unless `NOTRUS_ENABLE_LEGACY_API=true`; the hardened checks protect development and compatibility deployments too.
+
+### Dependency updates
+
+- Android Gradle Plugin: `8.10.0` -> `9.2.0`
+- Gradle wrapper: `9.3.1` -> `9.4.1`
+- Kotlin Compose plugin: `2.2.20` -> `2.3.21`
+- Signal Android/libsignal: `0.91.0` -> `0.92.2`
+- AndroidX WorkManager: `2.9.1` -> `2.11.2`
+- AndroidX Lifecycle ViewModel Compose: `2.8.4` -> `2.10.0`
+- Rust protocol core now declares `rand_core 0.10.1` while using the compatible `rand 0.9` RNG path required by the current libsignal revision.
+
+### Verification snapshot
+
+Executed and passing for this security update:
+
+- `npm run test:retention-pruning`
+- `npm run test:device-membership`
+- `npm run test:abuse-controls`
+- `npm run test:production-api-boundary`
+- `npm run test:privacy-routing`
+- `npm run test:adversarial-inputs`
+- `npm run test:metadata-boundary`
+- `npm run test:content-boundary`
+- `cargo test --manifest-path native/protocol-core/Cargo.toml`
+- `./gradlew :app:compileDebugKotlin`
+- local Semgrep default error scan: `0 findings`
+- `npm run package:android-app`
+- `npm run package:mac-app`
+
+### Known beta limitations
+
+- Android notifications are implemented and configurable, but delivery reliability is still inconsistent on some devices and needs additional polish.
+- Recovery import/export restores account identity material; it is not yet a full historical plaintext conversation migration path across devices.
+- macOS local package builds are ad-hoc signed unless production signing/notarization credentials are configured; Apple may warn that local builds cannot be scanned for malware.
+
+### Boundary reminder
+
+- This is a beta security release, not a warranty-backed stable/GA release.
+- Semgrep Cloud will mark findings fixed only after GitHub receives this commit and Semgrep reruns on the updated branch/release.
+- See:
+  - [BETA_RELEASE_CHECKLIST.md](BETA_RELEASE_CHECKLIST.md)
+  - [STABLE_RELEASE_CHECKLIST.md](STABLE_RELEASE_CHECKLIST.md)
+  - [SECURITY_RELEASE.md](SECURITY_RELEASE.md)
+
+## v0.3.2-beta3
 
 Release date: 2026-04-23
 

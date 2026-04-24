@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_DIR="$ROOT_DIR/native/android/NotrusAndroid"
-APP_VERSION="${NOTRUS_ANDROID_VERSION:-0.3.2-beta3}"
+APP_VERSION="${NOTRUS_ANDROID_VERSION:-0.3.3-beta4}"
 ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}"
 JAVA_HOME="${JAVA_HOME:-/Applications/Android Studio.app/Contents/jbr/Contents/Home}"
 GRADLE_USER_HOME="${GRADLE_USER_HOME:-$ROOT_DIR/.build/gradle-home/android}"

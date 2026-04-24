@@ -3,12 +3,12 @@ pub mod bridge;
 use libsignal_protocol::{IdentityKeyPair, InMemSignalProtocolStore};
 use openmls::prelude::Ciphersuite;
 use openmls_rust_crypto::OpenMlsRustCrypto;
+use rand::rngs::OsRng;
+use rand::TryRngCore as _;
 use std::ffi::{CString, c_char};
 
 #[cfg(test)]
 use openmls_basic_credential::SignatureKeyPair;
-use rand_core::OsRng;
-use rand_core::TryRngCore as _;
 
 #[cfg(test)]
 use libsignal_protocol::{

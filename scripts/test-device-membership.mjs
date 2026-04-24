@@ -250,6 +250,7 @@ async function main() {
     const threadId = `device-thread-${suffix}`;
     const threadResponse = await request("/api/threads", {
       method: "POST",
+      headers: { Authorization: `Bearer ${sessionOne}` },
       body: {
         createdAt: isoNow(),
         createdBy: alice.payload.userId,

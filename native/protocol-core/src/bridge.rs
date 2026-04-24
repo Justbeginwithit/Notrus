@@ -16,7 +16,8 @@ use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as Tl
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
-use rand_core::{OsRng, RngCore, TryRngCore as _};
+use rand::rngs::OsRng;
+use rand::{RngCore, TryRngCore as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;

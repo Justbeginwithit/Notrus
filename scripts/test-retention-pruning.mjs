@@ -196,6 +196,7 @@ async function main() {
 
     await requestJson(origin, "/api/threads", {
       method: "POST",
+      headers: { Authorization: `Bearer ${aliceRegistration.session.token}` },
       body: {
         createdAt: isoNow(),
         createdBy: alice.userId,
@@ -212,6 +213,7 @@ async function main() {
 
     await requestJson(origin, `/api/threads/${threadId}/messages`, {
       method: "POST",
+      headers: { Authorization: `Bearer ${aliceRegistration.session.token}` },
       body: {
         createdAt: isoNow(),
         id: messageId,
@@ -225,6 +227,7 @@ async function main() {
 
     await requestJson(origin, `/api/threads/${threadId}/attachments`, {
       method: "POST",
+      headers: { Authorization: `Bearer ${aliceRegistration.session.token}` },
       body: {
         byteLength: 256,
         ciphertext: randomBytes(256).toString("base64"),
@@ -265,7 +268,14 @@ async function main() {
 
     relay = startRelay({ port, storePath, secretDir });
     await waitForHealth(origin);
-    await requestJson(origin, `/api/sync?userId=${alice.userId}`);
+    const aliceRebootstrap = await requestJson(origin, "/api/register", {
+      method: "POST",
+      headers: { "X-Notrus-Device-Id": alice.device.id },
+      body: alice,
+    });
+    await requestJson(origin, `/api/sync?userId=${alice.userId}`, {
+      headers: { Authorization: `Bearer ${aliceRebootstrap.session.token}` },
+    });
     await stopRelay(relay);
     relay = null;
 
