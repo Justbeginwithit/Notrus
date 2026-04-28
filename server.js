@@ -4960,7 +4960,7 @@ async function requestListener(request, response) {
     }
 
     if (request.method === "GET" && pathname === "/events") {
-      handleSse(request, response, url, { allowLegacyQuery: true });
+      handleSse(request, response, url);
       return;
     }
 
