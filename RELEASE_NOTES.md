@@ -1,6 +1,113 @@
 # Notrus Release Notes
 
-## v0.3.3-beta4 (current beta security release)
+## Unreleased
+
+- No changes yet.
+
+## v0.3.4-beta5 (draft security and reliability beta)
+
+Release date: 2026-04-30
+
+This draft beta release focuses on Android notification reliability, durable
+local message/session persistence, account recovery and chat-backup handling,
+archived-chat behavior, and refreshed Android/macOS artifacts. It also prepares
+F-Droid-compatible metadata without claiming that Notrus is audited, anonymous,
+or proven secure.
+
+### Included artifacts
+
+- macOS:
+  - `dist/Notrus.app`
+  - `dist/Notrus.zip`
+  - `dist/Notrus-0.3.4-beta5.zip`
+- Android:
+  - `dist/android/Notrus-debug.apk`
+  - `dist/android/Notrus-release.apk`
+  - `dist/android/Notrus-0.3.4-beta5-debug.apk`
+  - `dist/android/Notrus-0.3.4-beta5-release.apk`
+
+### Security and privacy fixes
+
+- Made Android notification preview decrypt non-committing, so background
+  notification rendering cannot silently advance local secure-message session
+  state before the foreground chat has durably cached the plaintext.
+- Persist Android relay message wire-envelope metadata into the encrypted vault
+  before notification acknowledgement/bookkeeping, preserving durable local
+  ciphertext for later foreground materialization.
+- Hardened Android sync/materialization so cached local plaintext is preserved
+  when sync ordering, relay retention, or app updates change message counters.
+- Changed Android foreground sync ordering so notification baseline state is
+  written only after thread/session materialization has been persisted.
+- Switched encrypted Android vault writes used by the notification/session path
+  to synchronous commits before dependent notification bookkeeping continues.
+- Fixed safety-number verification recovery on Android and macOS so verifying
+  a changed contact identity preserves readable local chat history and refreshes
+  secure-session material instead of deleting direct-thread records.
+- Fixed Android archive-state merge behavior so restoring a chat clears the old
+  `hiddenAt` state across later manual syncs and newly reopened direct chats.
+- Kept notification content hidden by default; sender/preview modes still render
+  only after local sync and local decrypt.
+
+### Android background notifications
+
+- Added a foreground `dataSync` background delivery service for the Android client. When Reliable background delivery is enabled, Notrus keeps an authenticated relay event listener alive and Android shows a persistent low-priority service notification.
+- Kept WorkManager as the fallback path with periodic, rolling, and expedited sync jobs.
+- Added boot/package-replaced rescheduling so notification workers and the optional background listener are restored after reboot or app update.
+- Added a Settings toggle for Reliable background delivery.
+- Kept hidden notification content as the default. Sender and preview modes still render only after local sync/decrypt.
+- Improved notification dedupe so messages are marked notified only after a notification is actually posted, reducing missed-notification cases after permission or channel failures.
+- Fixed a background-preview state bug where Android notification preview decrypt could advance local secure-message state before the foreground chat had cached the plaintext. Background preview decrypt is now non-committing, so opening the chat can still decrypt/cache the message normally.
+- Persist relay message wire-envelope metadata into the encrypted Android vault before posting or acknowledging notification delivery, so notification-received messages have durable local ciphertext state for later foreground materialization.
+- Hardened Android chat materialization so cached local plaintext is preserved when sync order/count changes across app updates or relay retention changes.
+- Changed Android foreground sync ordering so notification seen/baseline state is written only after thread/session materialization has been persisted.
+- Switched encrypted Android vault saves to synchronous commits so state writes complete before dependent notification bookkeeping continues.
+- Replaced user-facing “Signal message” wording with Notrus/secure-message wording in Android error notices.
+
+### Android chat management and UX
+
+- Added Android archived chats, restore, mute, local conversation deletion, and
+  single-message local deletion flows.
+- Added Android read receipts with a user setting to turn them off for others.
+- Added Android version/build identifiers in the app so repeated rebuilds of the
+  same version are easier to distinguish during testing.
+- Added Android About/settings surfaces with project and version information.
+- Fixed the Android archived-chat regression where restored chats went back into
+  Archived after manual sync, and deleted/recreated direct chats inherited old
+  archive state.
+
+### macOS recovery/import
+
+- Fixed macOS Account Center import handling by using one mode-aware file importer for account recovery and encrypted chat backup.
+- Added security-scoped file access while importing macOS recovery archives and chat backups, improving Finder/file-picker compatibility.
+- Fixed safety-number verification recovery so Android and macOS preserve readable local chat history instead of deleting direct-thread records when a contact identity changes after account import/reset.
+- Fixed Android archive-state persistence so restored chats stay restored after manual sync, and newly reopened direct chats no longer fall back into Archived because of an old `hiddenAt` timestamp.
+- Documented the supported recovery sequence: import account recovery first, restore encrypted chat backup second, sync both clients, verify any security-number change, then use Reset secure session only if sending still fails.
+
+### F-Droid preparation
+
+- Added draft F-Droid metadata for `com.notrus.android`.
+- Added Fastlane-compatible Android listing metadata and changelogs.
+- Documented F-Droid build verification, screenshot location, dependency audit
+  scope, and conservative security wording.
+- Kept the F-Droid metadata disabled until a matching public release tag exists
+  and the fdroiddata signing/build recipe is finalized.
+
+### Verification
+
+- `cd native/android/NotrusAndroid && ./gradlew clean assembleRelease`
+- `./gradlew testDebugUnitTest`
+- `npm run test:mac-app`
+- `npm run test:client-surfaces`
+- `npm run package:android-app`
+- `npm run package:mac-app`
+- F-Droid YAML parse and required-field check
+
+### Remaining validation boundary
+
+- Emulator validation passed, but physical-device closed-app/OEM battery behavior still needs device testing before this should be called fully production-reliable.
+- This release is still a beta, not a stable or externally audited release.
+
+## v0.3.3-beta4 (previous beta security release)
 
 Release date: 2026-04-25
 

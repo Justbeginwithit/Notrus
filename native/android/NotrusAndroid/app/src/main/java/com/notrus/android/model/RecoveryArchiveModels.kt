@@ -27,6 +27,26 @@ data class RecoveryTransferArchive(
     val identity: PortableArchiveIdentitySnapshot,
 )
 
+data class ChatBackupIdentitySnapshot(
+    val id: String,
+    val username: String,
+    val displayName: String,
+    val createdAt: String,
+    val recoveryFingerprint: String,
+    val standardsSignalBundle: PublicSignalBundle? = null,
+    val standardsSignalState: SignalProtocolState? = null,
+)
+
+data class ChatBackupArchive(
+    val version: Int,
+    val exportedAt: String,
+    val sourcePlatform: String,
+    val backupKind: String,
+    val identity: ChatBackupIdentitySnapshot,
+    val attachmentsIncluded: Boolean,
+    val threadRecords: Map<String, ConversationThreadRecord>,
+)
+
 sealed interface ImportedRecoveryPayload {
     val exportedAt: String
     val identity: PortableArchiveIdentitySnapshot

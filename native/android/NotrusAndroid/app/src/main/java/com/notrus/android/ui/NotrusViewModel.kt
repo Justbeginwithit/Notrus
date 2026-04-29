@@ -13,6 +13,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.notrus.android.model.AccountResetRequest
+import com.notrus.android.model.AndroidContactTrustRecord
 import com.notrus.android.model.AppUiState
 import com.notrus.android.model.CachedMessageState
 import com.notrus.android.model.ConversationThread
@@ -24,6 +25,7 @@ import com.notrus.android.model.IdentityCatalog
 import com.notrus.android.model.LocalDeviceInventory
 import com.notrus.android.model.LocalAttachmentDraft
 import com.notrus.android.model.LocalIdentity
+import com.notrus.android.model.MessageCachePolicy
 import com.notrus.android.model.NotificationContentVisibility
 import com.notrus.android.model.NotificationLockscreenVisibility
 import com.notrus.android.model.RelayMessage
@@ -35,6 +37,7 @@ import com.notrus.android.model.selectedThread
 import com.notrus.android.notifications.NotrusBackgroundSyncWorker
 import com.notrus.android.notifications.NotrusNotificationCenter
 import com.notrus.android.notifications.NotrusNotificationPrefs
+import com.notrus.android.notifications.NotrusNotificationService
 import com.notrus.android.protocol.ProtocolCatalog
 import com.notrus.android.protocol.StandardsSignalClient
 import com.notrus.android.relay.RelayClient
@@ -53,10 +56,12 @@ import com.notrus.android.ui.theme.NotrusColorTheme
 import com.notrus.android.ui.theme.NotrusThemeMode
 import java.time.Instant
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.random.Random
@@ -66,9 +71,11 @@ private const val GROUP_PROTOCOL = "mls-rfc9420-v1"
 private const val MLS_FANOUT_CIPHERSUITE = "MLS-compat-signal-fanout-v1"
 private const val MLS_FANOUT_FORMAT = "notrus-mls-signal-fanout-v1"
 private const val MAX_PENDING_ATTACHMENT_DRAFTS = 8
+private val localIpv4LoopbackHost = listOf(127, 0, 0, 1).joinToString(".")
+private val androidEmulatorHost = listOf(10, 0, 2, 2).joinToString(".")
 private val BOOTSTRAP_LOCAL_RELAY_ORIGINS = setOf(
-    "http://10.0.2.2:3000",
-    "http://127.0.0.1:3000",
+    "http://$androidEmulatorHost:3000",
+    "http://$localIpv4LoopbackHost:3000",
     "http://localhost:3000",
 )
 
@@ -76,6 +83,7 @@ private data class MaterializedSyncState(
     val identity: LocalIdentity,
     val threadRecords: Map<String, ConversationThreadRecord>,
     val threads: List<ConversationThread>,
+    val archivedThreads: List<ConversationThread>,
 )
 
 private data class StandardsMessagePayload(
@@ -107,6 +115,12 @@ private enum class SyncPresentation {
     Silent,
 }
 
+private data class PreparedAndroidArchiveExport(
+    val bytes: ByteArray,
+    val displayName: String,
+    val successMessage: String,
+)
+
 class NotrusViewModel(application: Application) : AndroidViewModel(application) {
     var state by mutableStateOf(AppUiState())
         private set
@@ -115,6 +129,8 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
     private val vaultStore = VaultStore(applicationContext)
     private val deviceIdentityProvider = DeviceIdentityProvider()
     private val identityProvider = StrongBoxIdentityProvider()
+    private var preparedProfileExport: PreparedAndroidArchiveExport? = null
+    private var preparedChatBackupExport: PreparedAndroidArchiveExport? = null
     private val settings = applicationContext.getSharedPreferences("notrus_settings", Context.MODE_PRIVATE)
     private val defaultRemoteRelayOrigin = BuildConfig.DEFAULT_RELAY_ORIGIN.trim()
     private val defaultEnhancedVisualsEnabled = !isLowRamDevice(applicationContext)
@@ -129,6 +145,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
     private var liveSyncDebounceJob: Job? = null
     private var appInForeground: Boolean = false
     private var pendingNotificationThreadId: String? = null
+    private val lastSentReadReceiptByThread = mutableMapOf<String, String>()
 
     init {
         val integrity = DeviceRiskSignals.capture(applicationContext)
@@ -137,6 +154,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             integrityReport = integrity,
             privacyModeEnabled = settings.getBoolean(KEY_PRIVACY_MODE_ENABLED, false),
             notificationsEnabled = settings.getBoolean(NotrusNotificationPrefs.KEY_NOTIFICATIONS_ENABLED, true),
+            notificationRealtimeEnabled = settings.getBoolean(NotrusNotificationPrefs.KEY_NOTIFICATION_REALTIME_ENABLED, true),
             notificationContentVisibility = settings.getString(
                 NotrusNotificationPrefs.KEY_NOTIFICATION_CONTENT_VISIBILITY,
                 NotificationContentVisibility.Hidden.key,
@@ -158,6 +176,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 KEY_THEME_MODE,
                 NotrusThemeMode.Default.key,
             ) ?: NotrusThemeMode.Default.key,
+            sendReadReceiptsToOthers = settings.getBoolean(KEY_SEND_READ_RECEIPTS_TO_OTHERS, true),
             relayOriginInput = bootstrapRelayOrigin(settings.getString(KEY_RELAY_ORIGIN, null)),
             witnessOriginsInput = settings.getString(KEY_WITNESS_ORIGINS, "") ?: "",
         )
@@ -165,8 +184,12 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         if (state.notificationsEnabled) {
             NotrusBackgroundSyncWorker.schedulePeriodic(applicationContext)
             NotrusBackgroundSyncWorker.scheduleRolling(applicationContext)
+            if (state.notificationRealtimeEnabled) {
+                NotrusNotificationService.startIfAllowed(applicationContext)
+            }
         } else {
             NotrusBackgroundSyncWorker.cancelAll(applicationContext)
+            NotrusNotificationService.stop(applicationContext)
         }
         refreshDeviceInventory()
         bootstrap()
@@ -192,6 +215,9 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             NotrusBackgroundSyncWorker.schedulePeriodic(applicationContext)
             NotrusBackgroundSyncWorker.scheduleRolling(applicationContext)
             NotrusBackgroundSyncWorker.enqueueImmediate(applicationContext)
+            if (state.notificationRealtimeEnabled) {
+                NotrusNotificationService.startIfAllowed(applicationContext)
+            }
             startLiveEventsIfPossible()
         } else {
             val currentDeviceId = state.currentDevice?.id
@@ -211,6 +237,20 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 stopLiveEvents()
             }
             NotrusBackgroundSyncWorker.cancelAll(applicationContext)
+            NotrusNotificationService.stop(applicationContext)
+        }
+    }
+
+    fun updateNotificationRealtimeEnabled(enabled: Boolean) {
+        state = state.copy(notificationRealtimeEnabled = enabled, errorMessage = null)
+        settings.edit().putBoolean(NotrusNotificationPrefs.KEY_NOTIFICATION_REALTIME_ENABLED, enabled).apply()
+        if (state.notificationsEnabled && enabled) {
+            NotrusBackgroundSyncWorker.schedulePeriodic(applicationContext)
+            NotrusBackgroundSyncWorker.scheduleRolling(applicationContext)
+            NotrusBackgroundSyncWorker.enqueueImmediate(applicationContext)
+            NotrusNotificationService.startIfAllowed(applicationContext)
+        } else {
+            NotrusNotificationService.stop(applicationContext)
         }
     }
 
@@ -246,6 +286,14 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         settings.edit().putBoolean(NotrusNotificationPrefs.KEY_NOTIFICATION_VIBRATION_ENABLED, enabled).apply()
     }
 
+    fun updateSendReadReceiptsToOthers(enabled: Boolean) {
+        state = state.copy(sendReadReceiptsToOthers = enabled, errorMessage = null)
+        settings.edit().putBoolean(KEY_SEND_READ_RECEIPTS_TO_OTHERS, enabled).apply()
+        if (enabled) {
+            state.selectedThreadId?.let(::sendReadReceiptForThreadId)
+        }
+    }
+
     fun updateVisualEffects(enabled: Boolean) {
         state = state.copy(visualEffectsEnabled = enabled, errorMessage = null)
         settings.edit().putBoolean(KEY_VISUAL_EFFECTS_ENABLED, enabled).apply()
@@ -279,6 +327,58 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
 
     fun updateImportPassphrase(value: String) {
         state = state.copy(importPassphrase = value)
+    }
+
+    fun updateChatBackupPassphrase(value: String) {
+        state = state.copy(chatBackupPassphrase = value)
+    }
+
+    fun updateChatBackupImportPassphrase(value: String) {
+        state = state.copy(chatBackupImportPassphrase = value)
+    }
+
+    fun canChooseRecoveryExportDestination(): Boolean {
+        if (state.currentIdentity == null) {
+            state = state.copy(errorMessage = "Choose a local Android profile before exporting account recovery.")
+            return false
+        }
+        if (state.exportPassphrase.trim().length < 8) {
+            state = state.copy(errorMessage = "Use an account-recovery export passphrase with at least 8 characters.")
+            return false
+        }
+        return true
+    }
+
+    fun canChooseRecoveryImportFile(): Boolean {
+        if (state.importPassphrase.trim().length < 8) {
+            state = state.copy(errorMessage = "Use the recovery archive passphrase before choosing a file.")
+            return false
+        }
+        return true
+    }
+
+    fun canChooseChatBackupExportDestination(): Boolean {
+        if (state.currentIdentity == null) {
+            state = state.copy(errorMessage = "Choose a local Android profile before exporting chat history.")
+            return false
+        }
+        if (state.chatBackupPassphrase.trim().length < 8) {
+            state = state.copy(errorMessage = "Use a chat-backup passphrase with at least 8 characters before choosing where to save.")
+            return false
+        }
+        return true
+    }
+
+    fun canChooseChatBackupImportFile(): Boolean {
+        if (state.currentIdentity == null) {
+            state = state.copy(errorMessage = "Recover or create the account before restoring chat history.")
+            return false
+        }
+        if (state.chatBackupImportPassphrase.trim().length < 8) {
+            state = state.copy(errorMessage = "Use the chat-backup passphrase before choosing a backup file.")
+            return false
+        }
+        return true
     }
 
     fun updateWitnessOrigins(value: String) {
@@ -380,6 +480,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             pendingAttachments = if (state.selectedThreadId == threadId) state.pendingAttachments else emptyList(),
             errorMessage = null,
         )
+        sendReadReceiptForThreadId(threadId)
     }
 
     fun clearSelectedThread() {
@@ -389,6 +490,62 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             pendingAttachments = emptyList(),
             errorMessage = null,
         )
+    }
+
+    private fun sendReadReceiptForThreadId(threadId: String) {
+        if (!state.sendReadReceiptsToOthers) {
+            return
+        }
+        val identity = state.currentIdentity ?: return
+        val thread = state.threads.firstOrNull { it.id == threadId } ?: return
+        val latestRemoteMessage = thread.messages.lastOrNull { it.senderId != identity.id } ?: return
+        if (lastSentReadReceiptByThread[thread.id] == latestRemoteMessage.id) {
+            return
+        }
+        val mailboxHandle = thread.mailboxHandle ?: return
+        val deliveryCapability = thread.deliveryCapability ?: return
+        viewModelScope.launch {
+            runCatching {
+                relayClient().postReadReceipt(
+                    mailboxHandle = mailboxHandle,
+                    deliveryCapability = deliveryCapability,
+                    lastReadMessageId = latestRemoteMessage.id,
+                    readAt = Instant.now().toString(),
+                )
+                lastSentReadReceiptByThread[thread.id] = latestRemoteMessage.id
+            }
+        }
+    }
+
+    private fun readReceiptSummaryFor(
+        message: RelayMessage,
+        thread: RelayThread,
+        participants: List<RelayUser>,
+        identityId: String,
+    ): String? {
+        if (message.senderId != identityId) {
+            return null
+        }
+        val messageIndex = thread.messages.indexOfFirst { it.id == message.id }
+        if (messageIndex < 0) {
+            return null
+        }
+        val indexByMessageId = thread.messages.mapIndexed { index, relayMessage ->
+            relayMessage.id to index
+        }.toMap()
+        val readers = thread.readReceipts
+            .asSequence()
+            .filter { it.userId != identityId }
+            .filter { receipt -> (indexByMessageId[receipt.lastReadMessageId] ?: -1) >= messageIndex }
+            .mapNotNull { receipt -> participants.firstOrNull { it.id == receipt.userId }?.displayName }
+            .distinct()
+            .sorted()
+            .toList()
+        return when (readers.size) {
+            0 -> null
+            1 -> "Read by ${readers.first()}"
+            else -> "Read by ${readers.size} people"
+        }
     }
 
     fun onAppForegroundChanged(inForeground: Boolean) {
@@ -409,8 +566,11 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             }
         } else {
             if (state.notificationsEnabled) {
-                startLiveEventsIfPossible()
+                if (state.notificationRealtimeEnabled) {
+                    NotrusNotificationService.startIfAllowed(applicationContext)
+                }
                 NotrusBackgroundSyncWorker.enqueueImmediate(applicationContext)
+                stopLiveEvents()
             } else {
                 stopLiveEvents()
             }
@@ -430,6 +590,9 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         }
         NotrusNotificationCenter.ensureChannels(applicationContext)
         NotrusBackgroundSyncWorker.enqueueImmediate(applicationContext)
+        if (state.notificationRealtimeEnabled) {
+            NotrusNotificationService.startIfAllowed(applicationContext)
+        }
         startLiveEventsIfPossible()
     }
 
@@ -560,9 +723,13 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
 
         viewModelScope.launch {
             state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Creating a hardware-backed Android identity...")
+            var generatedIdentityId: String? = null
             runCatching {
-                RelayClient.validateOrigin(state.relayOriginInput.ifBlank { defaultRemoteRelayOrigin })
+                val relayOrigin = RelayClient.validateOrigin(state.relayOriginInput.ifBlank { defaultRemoteRelayOrigin })
+                val currentDevice = deviceIdentityProvider.descriptor(applicationContext, appInstanceId)
+                state = state.copy(currentDevice = currentDevice)
                 val hardware = identityProvider.createIdentity(username = username, displayName = displayName)
+                generatedIdentityId = hardware.userId
                 val recovery = RecoveryKeyManager.create()
                 val standards = StandardsSignalClient.createIdentity()
                 val identity = LocalIdentity(
@@ -586,9 +753,22 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     standardsSignalBundle = standards.bundle,
                     standardsSignalState = standards.state,
                 )
-                saveIdentity(identity, recovery.recoveryRepresentation)
-                registerAndSync(identity)
+                val client = relayClient(relayOrigin)
+                val relayHealth = client.health()
+                val registered = client.register(identity)
+                updateRelaySession(registered.session, identityId = identity.id)
+                val registeredIdentity = mergeRegisteredIdentity(identity, registered.user)
+                saveIdentity(registeredIdentity, recovery.recoveryRepresentation)
+                state = state.copy(
+                    currentDevice = currentDevice,
+                    linkedDeviceEvents = registered.deviceEvents,
+                    linkedDevices = registered.devices,
+                    relayHealth = relayHealth,
+                )
+                registerAndSync(registeredIdentity)
             }.onFailure { error ->
+                generatedIdentityId?.let { identityProvider.deleteIdentityAliases(it) }
+                updateRelaySession(null, identityId = generatedIdentityId)
                 state = state.copy(
                     isBusy = false,
                     errorMessage = renderProfileCreationError(error, username),
@@ -597,7 +777,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun exportCurrentProfile(activity: FragmentActivity, destination: Uri) {
+    fun prepareCurrentProfileExport(activity: FragmentActivity, onReady: (String) -> Unit) {
         val identity = state.currentIdentity ?: run {
             state = state.copy(errorMessage = "Choose a local Android profile before exporting a recovery archive.")
             return
@@ -609,31 +789,102 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         viewModelScope.launch {
-            if (!authorizeSensitiveOperation(activity, "Authorize exporting this Android recovery archive.", maxAgeMs = 0L)) {
-                return@launch
+            try {
+                if (!authorizeSensitiveOperation(activity, "Authorize exporting this Android recovery archive.", maxAgeMs = 0L)) {
+                    return@launch
+                }
+                state = state.copy(
+                    isBusy = true,
+                    errorMessage = null,
+                    statusMessage = "Encrypting the Android recovery archive...",
+                )
+                val archiveBytes = withContext(Dispatchers.IO) {
+                    val record = currentStoredRecord(identity.id)
+                        ?: error("The local Android profile record is missing from the encrypted vault.")
+                    RecoveryArchiveManager.exportAndroidTransferArchive(record, passphrase)
+                }
+                require(archiveBytes.isNotEmpty()) {
+                    "Android refused to export an empty recovery archive."
+                }
+                preparedProfileExport = PreparedAndroidArchiveExport(
+                    bytes = archiveBytes,
+                    displayName = identity.displayName,
+                    successMessage = "Exported ${identity.displayName}'s encrypted Android recovery archive.",
+                )
+                state = state.copy(
+                    isBusy = false,
+                    statusMessage = "Choose where to save ${identity.displayName}'s encrypted recovery archive.",
+                    errorMessage = null,
+                )
+                onReady(RecoveryArchiveManager.suggestedExportFileName(identity.username))
+            } catch (error: Throwable) {
+                preparedProfileExport = null
+                state = state.copy(
+                    isBusy = false,
+                    errorMessage = error.message ?: "Android export failed.",
+                )
             }
+        }
+    }
+
+    fun completePreparedProfileExport(destination: Uri?) {
+        completePreparedExport(
+            prepared = preparedProfileExport,
+            destination = destination,
+            clearPrepared = { preparedProfileExport = null },
+            clearPassphrase = { state = state.copy(exportPassphrase = "") },
+            cancelledMessage = "Cancelled Android recovery archive export before writing a file.",
+        )
+    }
+
+    private fun completePreparedExport(
+        prepared: PreparedAndroidArchiveExport?,
+        destination: Uri?,
+        clearPrepared: () -> Unit,
+        clearPassphrase: () -> Unit,
+        cancelledMessage: String,
+    ) {
+        val export = prepared
+        clearPrepared()
+        if (destination == null) {
+            state = state.copy(
+                isBusy = false,
+                statusMessage = cancelledMessage,
+                errorMessage = null,
+            )
+            return
+        }
+        if (export == null) {
+            state = state.copy(errorMessage = "The encrypted archive was not prepared. Start export again.")
+            return
+        }
+        if (export.bytes.isEmpty()) {
+            state = state.copy(errorMessage = "Android refused to write an empty Notrus archive.")
+            return
+        }
+        viewModelScope.launch {
             state = state.copy(
                 isBusy = true,
                 errorMessage = null,
-                statusMessage = "Encrypting the Android recovery archive...",
+                statusMessage = "Writing encrypted Notrus archive...",
             )
             runCatching {
-                val record = currentStoredRecord(identity.id)
-                    ?: error("The local Android profile record is missing from the encrypted vault.")
-                val archiveBytes = RecoveryArchiveManager.exportAndroidTransferArchive(record, passphrase)
-                applicationContext.contentResolver.openOutputStream(destination, "w")?.use { output ->
-                    output.write(archiveBytes)
-                } ?: error("The selected Android document could not be opened for writing.")
+                withContext(Dispatchers.IO) {
+                    applicationContext.contentResolver.openOutputStream(destination, "w")?.use { output ->
+                        output.write(export.bytes)
+                        output.flush()
+                    } ?: error("The selected Android document could not be opened for writing.")
+                }
+                clearPassphrase()
                 state = state.copy(
                     isBusy = false,
-                    exportPassphrase = "",
-                    statusMessage = "Exported ${identity.displayName}'s encrypted Android recovery archive.",
+                    statusMessage = export.successMessage,
                     errorMessage = null,
                 )
             }.onFailure { error ->
                 state = state.copy(
                     isBusy = false,
-                    errorMessage = error.message ?: "Android export failed.",
+                    errorMessage = error.message ?: "Android archive write failed.",
                 )
             }
         }
@@ -659,6 +910,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 val bytes = applicationContext.contentResolver.openInputStream(source)?.use { input ->
                     input.readBytes()
                 } ?: error("The selected recovery archive could not be opened on Android.")
+                require(bytes.isNotEmpty()) { "The selected recovery archive is empty. Export it again from the source device." }
                 val imported = RecoveryArchiveManager.importArchive(bytes, passphrase)
                 val snapshot = imported.identity
                 require(snapshot.id.isNotBlank() && snapshot.username.isNotBlank() && snapshot.displayName.isNotBlank()) {
@@ -757,6 +1009,123 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     errorMessage = error.message ?: "Android import failed.",
                 )
                 refreshDeviceInventory(currentDevice = state.currentDevice)
+            }
+        }
+    }
+
+    fun prepareCurrentChatBackupExport(activity: FragmentActivity, onReady: (String) -> Unit) {
+        val identity = state.currentIdentity ?: run {
+            state = state.copy(errorMessage = "Choose a local Android profile before exporting chat history.")
+            return
+        }
+        val passphrase = state.chatBackupPassphrase.trim()
+        if (passphrase.length < 8) {
+            state = state.copy(errorMessage = "Use a chat-backup passphrase with at least 8 characters.")
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                if (!authorizeSensitiveOperation(activity, "Authorize exporting encrypted chat history from Android.", maxAgeMs = 0L)) {
+                    return@launch
+                }
+                state = state.copy(
+                    isBusy = true,
+                    errorMessage = null,
+                    statusMessage = "Encrypting Android chat backup...",
+                )
+                val archiveBytes = withContext(Dispatchers.IO) {
+                    val record = currentStoredRecord(identity.id)
+                        ?: error("The local Android profile record is missing from the encrypted vault.")
+                    RecoveryArchiveManager.exportChatBackup(record, passphrase)
+                }
+                require(archiveBytes.isNotEmpty()) {
+                    "Android refused to export an empty chat backup."
+                }
+                preparedChatBackupExport = PreparedAndroidArchiveExport(
+                    bytes = archiveBytes,
+                    displayName = identity.displayName,
+                    successMessage = "Exported ${identity.displayName}'s encrypted Android chat backup.",
+                )
+                state = state.copy(
+                    isBusy = false,
+                    statusMessage = "Choose where to save ${identity.displayName}'s encrypted chat backup.",
+                    errorMessage = null,
+                )
+                onReady(RecoveryArchiveManager.suggestedChatBackupFileName(identity.username))
+            } catch (error: Throwable) {
+                preparedChatBackupExport = null
+                state = state.copy(
+                    isBusy = false,
+                    errorMessage = error.message ?: "Android chat backup export failed.",
+                )
+            }
+        }
+    }
+
+    fun completePreparedChatBackupExport(destination: Uri?) {
+        completePreparedExport(
+            prepared = preparedChatBackupExport,
+            destination = destination,
+            clearPrepared = { preparedChatBackupExport = null },
+            clearPassphrase = { state = state.copy(chatBackupPassphrase = "") },
+            cancelledMessage = "Cancelled Android chat backup export before writing a file.",
+        )
+    }
+
+    fun importChatBackup(activity: FragmentActivity, source: Uri) {
+        val identity = state.currentIdentity ?: run {
+            state = state.copy(errorMessage = "Recover or create the account before restoring chat history.")
+            return
+        }
+        val passphrase = state.chatBackupImportPassphrase.trim()
+        if (passphrase.length < 8) {
+            state = state.copy(errorMessage = "Use the chat-backup passphrase to restore message history.")
+            return
+        }
+
+        viewModelScope.launch {
+            if (!authorizeSensitiveOperation(activity, "Authorize restoring encrypted chat history onto Android.", maxAgeMs = 0L)) {
+                return@launch
+            }
+            state = state.copy(
+                isBusy = true,
+                errorMessage = null,
+                statusMessage = "Restoring Android chat backup...",
+            )
+            runCatching {
+                val bytes = applicationContext.contentResolver.openInputStream(source)?.use { input ->
+                    input.readBytes()
+                } ?: error("The selected chat backup could not be opened on Android.")
+                require(bytes.isNotEmpty()) { "The selected chat backup is empty. Export it again from the source device." }
+                val backup = RecoveryArchiveManager.importChatBackup(bytes, passphrase)
+                require(backup.identity.id == identity.id) {
+                    "This chat backup belongs to @${backup.identity.username}, not the active account."
+                }
+                val record = currentStoredRecord(identity.id)
+                    ?: error("The local Android profile record is missing from the encrypted vault.")
+                val restoredIdentity = record.identity.copy(
+                    standardsSignalReady = backup.identity.standardsSignalState != null || record.identity.standardsSignalReady,
+                    standardsSignalBundle = backup.identity.standardsSignalBundle ?: record.identity.standardsSignalBundle,
+                    standardsSignalState = backup.identity.standardsSignalState ?: record.identity.standardsSignalState,
+                )
+                val restoredRecord = record.copy(
+                    identity = restoredIdentity,
+                    threadRecords = record.threadRecords + backup.threadRecords,
+                )
+                persistStoredRecord(restoredRecord, makeActive = true)
+                state = state.copy(
+                    isBusy = false,
+                    chatBackupImportPassphrase = "",
+                    statusMessage = "Restored ${backup.threadRecords.size} conversations from encrypted chat backup. Attachment blobs remain relay-backed unless separately available.",
+                    errorMessage = null,
+                )
+                registerAndSync(restoredRecord.identity, presentation = SyncPresentation.Silent)
+            }.onFailure { error ->
+                state = state.copy(
+                    isBusy = false,
+                    errorMessage = error.message ?: "Android chat backup import failed.",
+                )
             }
         }
     }
@@ -977,8 +1346,10 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         val record = currentStoredRecord(identity.id) ?: return
         val savedContacts = mergeUsers(record.savedContacts, listOf(user))
         persistStoredRecord(record.copy(savedContacts = savedContacts))
+        val contactTrustRecords = observeContactTrust(identity.id, user)
         state = state.copy(
             contacts = savedContacts,
+            contactTrustRecords = contactTrustRecords,
             statusMessage = "Saved ${user.displayName} for secure direct messaging.",
             errorMessage = null,
         )
@@ -998,11 +1369,206 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
-    fun deleteConversation(threadId: String) {
+    fun verifyContact(userId: String) {
+        val identity = state.currentIdentity ?: return
+        val record = contactTrustRecord(userId) ?: return
+        val now = Instant.now().toString()
+        val wasChanged = record.status == "changed"
+        val updatedTrust = record.copy(
+            lastVerifiedAt = now,
+            status = "verified",
+            trustedFingerprint = record.observedFingerprint,
+            trustedPrekeyFingerprint = record.observedPrekeyFingerprint,
+        )
+        val trustRecords = upsertContactTrust(identity.id, updatedTrust)
+        if (wasChanged) {
+            val storedRecord = currentStoredRecord(identity.id)
+            val currentSignalState = identity.standardsSignalState
+            if (storedRecord != null && currentSignalState != null) {
+                val resetSignalState = StandardsSignalClient.resetPeer(currentSignalState, userId)
+                val refreshed = StandardsSignalClient.refreshBundle(resetSignalState)
+                val updatedIdentity = identity.copy(
+                    standardsSignalReady = true,
+                    standardsSignalBundle = refreshed.bundle,
+                    standardsSignalState = refreshed.state,
+                )
+                persistStoredRecord(
+                    storedRecord.copy(
+                        identity = updatedIdentity,
+                    ),
+                )
+                state = state.copy(
+                    currentIdentity = updatedIdentity,
+                )
+                viewModelScope.launch {
+                    runCatching {
+                        registerAndSync(
+                            updatedIdentity,
+                            preferredThreadId = state.selectedThreadId,
+                            presentation = SyncPresentation.Silent,
+                        )
+                    }.onFailure { error ->
+                        state = state.copy(
+                            errorMessage = error.message ?: "Android verified the contact, but could not republish fresh secure-session keys.",
+                        )
+                    }
+                }
+            }
+        }
+        state = state.copy(
+            contactTrustRecords = trustRecords,
+            statusMessage = if (wasChanged) {
+                "Verified ${record.displayName}'s new security number, kept local chat history, and republished fresh secure-session keys."
+            } else {
+                "Marked ${record.displayName}'s current security number as verified on Android."
+            },
+            errorMessage = null,
+        )
+    }
+
+    fun blockContact(userId: String) {
+        val identity = state.currentIdentity ?: return
+        val record = contactTrustRecord(userId) ?: return
+        val updatedTrust = record.copy(blockedAt = Instant.now().toString())
+        state = state.copy(
+            contactTrustRecords = upsertContactTrust(identity.id, updatedTrust),
+            statusMessage = "Blocked ${record.displayName} on this Android device.",
+            errorMessage = null,
+        )
+    }
+
+    fun unblockContact(userId: String) {
+        val identity = state.currentIdentity ?: return
+        val record = contactTrustRecord(userId) ?: return
+        val updatedTrust = record.copy(blockedAt = null)
+        state = state.copy(
+            contactTrustRecords = upsertContactTrust(identity.id, updatedTrust),
+            statusMessage = "Unblocked ${record.displayName} on this Android device.",
+            errorMessage = null,
+        )
+    }
+
+    fun reportContact(userId: String) {
+        val identity = state.currentIdentity ?: return
+        val record = contactTrustRecord(userId) ?: return
+        viewModelScope.launch {
+            state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Submitting abuse report to the relay...")
+            runCatching {
+                val relevantThread = state.threads.firstOrNull { thread ->
+                    thread.participantIds.contains(identity.id) && thread.participantIds.contains(userId)
+                }
+                relayClient().reportAbuse(
+                    reporterId = identity.id,
+                    targetUserId = userId,
+                    threadId = relevantThread?.id,
+                    messageIds = relevantThread?.messages?.takeLast(10)?.map { it.id }.orEmpty(),
+                    reason = "abuse-or-spam",
+                )
+                val updatedTrust = record.copy(lastReportedAt = Instant.now().toString())
+                state = state.copy(
+                    isBusy = false,
+                    contactTrustRecords = upsertContactTrust(identity.id, updatedTrust),
+                    statusMessage = "Reported ${record.displayName} to the relay operator.",
+                    errorMessage = null,
+                )
+            }.onFailure { error ->
+                state = state.copy(isBusy = false, errorMessage = error.message ?: "Android could not submit that report.")
+            }
+        }
+    }
+
+    fun hideConversation(threadId: String) {
         val identity = state.currentIdentity ?: return
         val record = currentStoredRecord(identity.id) ?: return
         val existing = record.threadRecords[threadId] ?: return
-        val thread = state.threads.firstOrNull { it.id == threadId }
+        val thread = (state.threads + state.archivedThreads).firstOrNull { it.id == threadId }
+        val threadTitle = thread?.title?.ifBlank { "conversation" } ?: "conversation"
+        val hiddenAt = Instant.now().toString()
+        val archivedThread = thread?.copy(archived = true, muted = existing.mutedAt != null)
+        persistStoredRecord(
+            record.copy(
+                threadRecords = record.threadRecords + mapOf(
+                    threadId to existing.copy(hiddenAt = hiddenAt),
+                ),
+            ),
+        )
+        val hidingSelectedThread = state.selectedThreadId == threadId
+        state = state.copy(
+            threads = state.threads.filterNot { it.id == threadId },
+            archivedThreads = if (archivedThread == null) {
+                state.archivedThreads
+            } else {
+                (state.archivedThreads.filterNot { it.id == threadId } + archivedThread)
+                    .sortedByDescending { it.lastActivityAt }
+            },
+            selectedThreadId = if (hidingSelectedThread) null else state.selectedThreadId,
+            draftText = if (hidingSelectedThread) "" else state.draftText,
+            pendingAttachments = if (hidingSelectedThread) emptyList() else state.pendingAttachments,
+            statusMessage = "Archived ${threadTitle}. Message history and secure-session state were kept.",
+            errorMessage = null,
+        )
+    }
+
+    fun restoreConversation(threadId: String) {
+        val identity = state.currentIdentity ?: return
+        val record = currentStoredRecord(identity.id) ?: return
+        val existing = record.threadRecords[threadId] ?: return
+        val thread = state.archivedThreads.firstOrNull { it.id == threadId }
+        val threadTitle = thread?.title?.ifBlank { "conversation" } ?: "conversation"
+        persistStoredRecord(
+            record.copy(
+                threadRecords = record.threadRecords + mapOf(
+                    threadId to existing.copy(hiddenAt = null),
+                ),
+            ),
+        )
+        val restoredThread = thread?.copy(archived = false, muted = existing.mutedAt != null)
+        state = state.copy(
+            threads = if (restoredThread == null) {
+                state.threads
+            } else {
+                (state.threads.filterNot { it.id == threadId } + restoredThread)
+                    .sortedByDescending { it.lastActivityAt }
+            },
+            archivedThreads = state.archivedThreads.filterNot { it.id == threadId },
+            selectedThreadId = threadId,
+            pendingAttachments = emptyList(),
+            statusMessage = "Restored ${threadTitle}.",
+            errorMessage = null,
+        )
+    }
+
+    fun toggleConversationMuted(threadId: String) {
+        val identity = state.currentIdentity ?: return
+        val record = currentStoredRecord(identity.id) ?: return
+        val existing = record.threadRecords[threadId] ?: return
+        val mutedAt = if (existing.mutedAt == null) Instant.now().toString() else null
+        persistStoredRecord(
+            record.copy(
+                threadRecords = record.threadRecords + mapOf(
+                    threadId to existing.copy(mutedAt = mutedAt),
+                ),
+            ),
+        )
+        fun ConversationThread.updateMute(): ConversationThread =
+            if (id == threadId) copy(muted = mutedAt != null) else this
+        state = state.copy(
+            threads = state.threads.map { it.updateMute() },
+            archivedThreads = state.archivedThreads.map { it.updateMute() },
+            statusMessage = if (mutedAt == null) "Unmuted conversation notifications." else "Muted conversation notifications.",
+            errorMessage = null,
+        )
+    }
+
+    fun deleteConversation(threadId: String) {
+        deleteConversationHistory(threadId)
+    }
+
+    fun deleteConversationHistory(threadId: String) {
+        val identity = state.currentIdentity ?: return
+        val record = currentStoredRecord(identity.id) ?: return
+        val existing = record.threadRecords[threadId] ?: return
+        val thread = (state.threads + state.archivedThreads).firstOrNull { it.id == threadId }
         val threadTitle = thread?.title?.ifBlank { "conversation" } ?: "conversation"
         val purgeAt = Instant.now().toString()
         val preservedCount = maxOf(existing.processedMessageCount, thread?.messageCount ?: existing.processedMessageCount)
@@ -1020,13 +1586,112 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 ),
             ),
         )
+        lastSentReadReceiptByThread.remove(threadId)
         val visibleThreads = state.threads.filterNot { it.id == threadId }
+        val deletingSelectedThread = state.selectedThreadId == threadId
         state = state.copy(
             threads = visibleThreads,
-            selectedThreadId = state.selectedThreadId.takeUnless { it == threadId } ?: visibleThreads.firstOrNull()?.id,
-            draftText = if (state.selectedThreadId == threadId) "" else state.draftText,
-            pendingAttachments = if (state.selectedThreadId == threadId) emptyList() else state.pendingAttachments,
-            statusMessage = "Deleted the local Android copy of ${threadTitle}.",
+            archivedThreads = if (thread == null) {
+                state.archivedThreads
+            } else {
+                (state.archivedThreads.filterNot { it.id == threadId } + thread.copy(
+                    archived = true,
+                    muted = existing.mutedAt != null,
+                    messages = emptyList(),
+                    messageCount = 0,
+                )).sortedByDescending { it.lastActivityAt }
+            },
+            selectedThreadId = if (deletingSelectedThread) null else state.selectedThreadId,
+            draftText = if (deletingSelectedThread) "" else state.draftText,
+            pendingAttachments = if (deletingSelectedThread) emptyList() else state.pendingAttachments,
+            statusMessage = "Deleted local message history for ${threadTitle} and moved it to Archived. Secure-session state was kept for future messages.",
+            errorMessage = null,
+        )
+    }
+
+    fun resetConversationSession(threadId: String) {
+        val identity = state.currentIdentity ?: return
+        val record = currentStoredRecord(identity.id) ?: return
+        val existing = record.threadRecords[threadId] ?: return
+        val remoteUserId = existing.signalPeerUserId
+        val thread = state.threads.firstOrNull { it.id == threadId }
+        val threadTitle = thread?.title?.ifBlank { "conversation" } ?: "conversation"
+        val signalState = identity.standardsSignalState
+        if (remoteUserId == null || signalState == null) {
+            state = state.copy(errorMessage = "Only direct chats with local secure-message state can reset their secure session.")
+            return
+        }
+
+        val resetState = StandardsSignalClient.resetPeer(signalState, remoteUserId)
+        val refreshed = StandardsSignalClient.refreshBundle(resetState)
+        val resetIdentity = identity.copy(
+            standardsSignalReady = true,
+            standardsSignalBundle = refreshed.bundle,
+            standardsSignalState = refreshed.state,
+        )
+        persistStoredRecord(
+            record.copy(
+                identity = resetIdentity,
+                threadRecords = record.threadRecords + mapOf(
+                    threadId to existing.copy(protocol = DIRECT_PROTOCOL, signalPeerUserId = remoteUserId),
+                ),
+            ),
+        )
+        state = state.copy(
+            currentIdentity = resetIdentity,
+            statusMessage = "Reset the secure session for ${threadTitle}. Publishing a fresh pre-key bundle now.",
+            errorMessage = null,
+        )
+        viewModelScope.launch {
+            runCatching {
+                registerAndSync(
+                    resetIdentity,
+                    preferredThreadId = threadId,
+                    presentation = SyncPresentation.Silent,
+                )
+            }.onSuccess {
+                state = state.copy(
+                    statusMessage = "Reset and republished the secure session for ${threadTitle}. Existing local messages were kept.",
+                    errorMessage = null,
+                )
+            }.onFailure { error ->
+                state = state.copy(
+                    errorMessage = error.message ?: "Android reset the local secure session, but could not publish the fresh pre-key bundle.",
+                )
+            }
+        }
+    }
+
+    fun deleteMessageLocally(threadId: String, messageId: String) {
+        val identity = state.currentIdentity ?: return
+        val storedRecord = currentStoredRecord(identity.id) ?: return
+        val thread = state.threads.firstOrNull { it.id == threadId } ?: return
+        val existingRecord = storedRecord.threadRecords[threadId] ?: ConversationThreadRecord(protocol = thread.protocol)
+        val cached = existingRecord.messageCache[messageId]
+        val updatedThreadRecord = existingRecord.copy(
+            messageCache = existingRecord.messageCache + (
+                messageId to CachedMessageState(
+                    attachments = cached?.attachments ?: emptyList(),
+                    body = cached?.body.orEmpty(),
+                    hidden = true,
+                    status = cached?.status ?: "deleted-local",
+                )
+            ),
+        )
+        persistStoredRecord(
+            storedRecord.copy(
+                threadRecords = storedRecord.threadRecords + mapOf(threadId to updatedThreadRecord),
+            ),
+        )
+        state = state.copy(
+            threads = state.threads.map { existingThread ->
+                if (existingThread.id == threadId) {
+                    existingThread.copy(messages = existingThread.messages.filterNot { it.id == messageId })
+                } else {
+                    existingThread
+                }
+            },
+            statusMessage = "Deleted one local Android message.",
             errorMessage = null,
         )
     }
@@ -1047,8 +1712,21 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         if (user.signalBundle == null) {
-            state = state.copy(errorMessage = "${user.displayName} has not published a Signal bundle yet.")
+            state = state.copy(errorMessage = "${user.displayName} has not published a current secure-message bundle yet.")
             return
+        }
+        contactTrustRecord(user.id)?.let { trust ->
+            when {
+                trust.blockedAt != null -> {
+                    state = state.copy(errorMessage = "${user.displayName} is blocked on this Android device. Unblock the contact in Security before messaging.")
+                    return
+                }
+
+                trust.status == "changed" -> {
+                    state = state.copy(errorMessage = "${user.displayName}'s security number changed. Verify the contact in Security before starting another chat.")
+                    return
+                }
+            }
         }
 
         val existingThread = state.threads.firstOrNull { thread ->
@@ -1066,23 +1744,65 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
+        val archivedThread = state.archivedThreads.firstOrNull { thread ->
+            thread.protocol == DIRECT_PROTOCOL &&
+                thread.participantIds.toSet() == setOf(identity.id, user.id)
+        }
+        if (archivedThread != null) {
+            saveContact(user.id)
+            restoreConversation(archivedThread.id)
+            state = state.copy(
+                statusMessage = "Restored archived secure direct chat with ${user.displayName}.",
+                errorMessage = null,
+            )
+            return
+        }
+
+        val storedRecord = currentStoredRecord(identity.id)
+        val hiddenDirectThreadId = storedRecord?.threadRecords
+            ?.entries
+            ?.firstOrNull { (_, threadRecord) ->
+                threadRecord.protocol == DIRECT_PROTOCOL && threadRecord.signalPeerUserId == user.id
+            }
+            ?.key
+        if (storedRecord != null && hiddenDirectThreadId != null) {
+            val threadRecord = requireNotNull(storedRecord.threadRecords[hiddenDirectThreadId])
+            persistStoredRecord(
+                storedRecord.copy(
+                    threadRecords = storedRecord.threadRecords + mapOf(
+                        hiddenDirectThreadId to threadRecord.copy(hiddenAt = null),
+                    ),
+                ),
+            )
+            saveContact(user.id)
+            viewModelScope.launch {
+                registerAndSync(
+                    identity,
+                    preferredThreadId = hiddenDirectThreadId,
+                    presentation = SyncPresentation.Silent,
+                )
+                state = state.copy(
+                    selectedThreadId = hiddenDirectThreadId,
+                    pendingAttachments = emptyList(),
+                    statusMessage = "Reopened secure direct chat with ${user.displayName}.",
+                    errorMessage = null,
+                )
+            }
+            return
+        }
+
         viewModelScope.launch {
-            if (!authorizeSensitiveOperation(activity, "Authorize establishing or reopening a direct Signal session on this Android device.")) {
+            if (!authorizeSensitiveOperation(activity, "Authorize establishing or reopening a direct secure chat session on this Android device.")) {
                 return@launch
             }
-            state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Creating a direct Signal thread with ${user.displayName}...")
+            state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Creating a direct secure chat with ${user.displayName}...")
             runCatching {
                 var activeIdentity = ensureRegisteredIdentity(identity)
                 val routingUser = ensureRoutingUser(activeIdentity, user)
                 activeIdentity = routingUser.first
                 val resolvedUser = routingUser.second
                 saveResolvedContact(resolvedUser)
-                val hiddenThreadId = restoreHiddenDirectThreadIfPresent(activeIdentity.id, user.id)
-                if (hiddenThreadId != null) {
-                    registerAndSync(activeIdentity, preferredThreadId = hiddenThreadId)
-                    state = state.copy(statusMessage = "Reopened the local Android conversation with ${user.displayName}. Older locally-deleted history stays removed.")
-                    return@runCatching
-                }
+                activeIdentity = resetSignalPeerForFreshDirectChat(activeIdentity, resolvedUser.id)
                 applyPrivacyDelayIfEnabled(PrivacyDelayKind.Interactive)
                 val threadId = relayClient().createDirectThread(requireNotNull(resolvedUser.contactHandle))
                 registerAndSync(activeIdentity, preferredThreadId = threadId)
@@ -1114,12 +1834,26 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             state = state.copy(errorMessage = thread.warning ?: "This thread is not writable on Android yet.")
             return
         }
+        val blockedParticipant = thread.participants.firstOrNull { user ->
+            user.id != identity.id && contactTrustRecord(user.id)?.blockedAt != null
+        }
+        if (blockedParticipant != null) {
+            state = state.copy(errorMessage = "${blockedParticipant.displayName} is blocked on this Android device. Unblock them in Security before sending.")
+            return
+        }
+        val changedParticipant = thread.participants.firstOrNull { user ->
+            user.id != identity.id && contactTrustRecord(user.id)?.status == "changed"
+        }
+        if (changedParticipant != null) {
+            state = state.copy(errorMessage = "${changedParticipant.displayName}'s security number changed. Verify the contact in Security before sending.")
+            return
+        }
 
         when (thread.protocol) {
             DIRECT_PROTOCOL -> {
                 val remoteUser = thread.participants.firstOrNull { it.id != identity.id }
                 if (remoteUser == null || remoteUser.signalBundle == null) {
-                    state = state.copy(errorMessage = "The remote Signal bundle is missing for this thread.")
+                    state = state.copy(errorMessage = "The remote secure-message bundle is missing for this thread.")
                     return
                 }
                 sendDirectSelectedMessage(
@@ -1144,7 +1878,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 val missingSignal = remoteParticipants.firstOrNull { it.signalBundle == null }
                 if (missingSignal != null) {
-                    state = state.copy(errorMessage = "${missingSignal.displayName} is missing a Signal bundle for Android group fanout.")
+                    state = state.copy(errorMessage = "${missingSignal.displayName} is missing a secure-message bundle for Android group fanout.")
                     return
                 }
                 sendGroupSelectedMessage(
@@ -1178,7 +1912,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Encrypting and sending from Android...")
             runCatching {
                 val signalState = identity.standardsSignalState
-                    ?: error("This Android profile does not have local Signal state.")
+                    ?: error("This Android profile does not have local secure-message state.")
                 val mailboxHandle = thread.mailboxHandle
                     ?: error("This Android conversation is missing its current mailbox handle. Sync once, then send again.")
                 val deliveryCapability = thread.deliveryCapability
@@ -1224,10 +1958,17 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     protocol = DIRECT_PROTOCOL,
                     signalPeerUserId = remoteUser.id,
                     messageCache = threadRecord.messageCache + (
-                        messageId to CachedMessageState(
-                            attachments = attachmentReferences,
-                            body = body,
-                            status = "ok",
+                        messageId to MessageCachePolicy.mergeCachedStates(
+                            threadRecord.messageCache[messageId],
+                            CachedMessageState(
+                                attachments = attachmentReferences,
+                                body = body,
+                                relayCreatedAt = Instant.now().toString(),
+                                relayMessageKind = sealed.messageKind,
+                                relaySenderId = identity.id,
+                                relayWireMessage = sealed.wireMessage,
+                                status = "ok",
+                            ),
                         )
                     ),
                 )
@@ -1241,10 +1982,11 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     currentIdentity = updatedIdentity,
                     draftText = "",
                     pendingAttachments = emptyList(),
+                    isBusy = false,
                 )
-                registerAndSync(updatedIdentity, preferredThreadId = thread.id)
+                registerAndSync(updatedIdentity, preferredThreadId = thread.id, presentation = SyncPresentation.Silent)
             }.onFailure { error ->
-                state = state.copy(isBusy = false, errorMessage = error.message)
+                state = state.copy(isBusy = false, errorMessage = normalizeSignalSendFailure(error))
             }
         }
     }
@@ -1264,7 +2006,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Encrypting group fanout and sending from Android...")
             runCatching {
                 var signalState = identity.standardsSignalState
-                    ?: error("This Android profile does not have local Signal state.")
+                    ?: error("This Android profile does not have local secure-message state.")
                 val mailboxHandle = thread.mailboxHandle
                     ?: error("This Android group is missing its current mailbox handle. Sync once, then send again.")
                 val deliveryCapability = thread.deliveryCapability
@@ -1334,10 +2076,17 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     protocol = GROUP_PROTOCOL,
                     signalPeerUserId = null,
                     messageCache = threadRecord.messageCache + (
-                        messageId to CachedMessageState(
-                            attachments = attachmentReferences,
-                            body = body,
-                            status = "ok",
+                        messageId to MessageCachePolicy.mergeCachedStates(
+                            threadRecord.messageCache[messageId],
+                            CachedMessageState(
+                                attachments = attachmentReferences,
+                                body = body,
+                                relayCreatedAt = Instant.now().toString(),
+                                relayMessageKind = "mls-application",
+                                relaySenderId = identity.id,
+                                relayWireMessage = fanoutWire,
+                                status = "ok",
+                            ),
                         )
                     ),
                 )
@@ -1351,10 +2100,11 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     currentIdentity = updatedIdentity,
                     draftText = "",
                     pendingAttachments = emptyList(),
+                    isBusy = false,
                 )
-                registerAndSync(updatedIdentity, preferredThreadId = thread.id)
+                registerAndSync(updatedIdentity, preferredThreadId = thread.id, presentation = SyncPresentation.Silent)
             }.onFailure { error ->
-                state = state.copy(isBusy = false, errorMessage = error.message)
+                state = state.copy(isBusy = false, errorMessage = normalizeSignalSendFailure(error))
             }
         }
     }
@@ -1449,6 +2199,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         if (interactiveSync) {
             state = state.copy(
                 isBusy = true,
+                showSyncProgress = true,
                 errorMessage = null,
                 statusMessage = "Registering profile and syncing relay state...",
             )
@@ -1508,16 +2259,6 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     routineRelay.unregisterNotificationWakeup(registrationId = registrationId)
                 }
             }
-            if (state.notificationsEnabled) {
-                val seenIds = NotrusNotificationPrefs.loadSeenMessageIds(applicationContext, workingIdentity.id)
-                sync.threads.asSequence()
-                    .flatMap { it.messages.asSequence() }
-                    .filter { it.senderId != workingIdentity.id }
-                    .mapNotNull { message -> message.id.trim().takeIf(String::isNotBlank) }
-                    .forEach { seenIds.add(it) }
-                NotrusNotificationPrefs.saveSeenMessageIds(applicationContext, workingIdentity.id, seenIds)
-                NotrusNotificationPrefs.markIdentityNotificationPrimed(applicationContext, workingIdentity.id)
-            }
             val remoteUsers = sync.users.filter { it.id != workingIdentity.id }
             val currentDirectoryCode = sync.users.firstOrNull { it.id == workingIdentity.id }?.directoryCode ?: registered?.user?.directoryCode
             if (currentDirectoryCode != null && currentDirectoryCode != workingIdentity.directoryCode) {
@@ -1527,6 +2268,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             val storedRecord = currentStoredRecord(workingIdentity.id)
                 ?: error("The Android profile record is missing from the local vault.")
             val mergedUsers = mergeUsers(remoteUsers, storedRecord.savedContacts)
+            val contactTrustRecords = reconcileContactTrust(workingIdentity.id, mergedUsers)
             val transparency = TransparencyVerifier.verify(
                 relayOrigin = RelayClient.validateOrigin(state.relayOriginInput),
                 entryCount = transparencySnapshot.entryCount ?: transparencySnapshot.transparencyEntries.size,
@@ -1555,13 +2297,22 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 threadRecords = materialized.threadRecords,
             )
             persistStoredRecord(updatedRecord)
+            if (state.notificationsEnabled) {
+                val seenIds = NotrusNotificationPrefs.loadSeenMessageIds(applicationContext, workingIdentity.id)
+                sync.threads.asSequence()
+                    .flatMap { it.messages.asSequence() }
+                    .filter { it.senderId != workingIdentity.id }
+                    .mapNotNull { message -> message.id.trim().takeIf(String::isNotBlank) }
+                    .forEach { seenIds.add(it) }
+                NotrusNotificationPrefs.saveSeenMessageIds(applicationContext, workingIdentity.id, seenIds)
+                NotrusNotificationPrefs.markIdentityNotificationPrimed(applicationContext, workingIdentity.id)
+            }
             val profiles = vaultStore.loadCatalog().identities.map { it.identity }
             val selectedThreadId = pendingNotificationThreadId
                 ?.takeIf { pending -> materialized.threads.any { it.id == pending } }
                 ?: preferredThreadId
                 ?.takeIf { preferred -> materialized.threads.any { it.id == preferred } }
                 ?: state.selectedThreadId?.takeIf { current -> materialized.threads.any { it.id == current } }
-                ?: materialized.threads.firstOrNull()?.id
             pendingNotificationThreadId = null
 
             state = state.copy(
@@ -1570,11 +2321,13 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 currentDevice = currentDevice,
                 profiles = profiles,
                 contacts = mergedUsers,
+                contactTrustRecords = contactTrustRecords,
                 transparency = transparency,
                 transparencyResetAvailable = canResetTransparencyTrust(transparency),
                 linkedDeviceEvents = securitySnapshot.deviceEvents,
                 linkedDevices = securitySnapshot.devices,
                 threads = materialized.threads,
+                archivedThreads = materialized.archivedThreads,
                 relayHealth = relayHealth,
                 selectedThreadId = selectedThreadId,
                 pendingAttachments = if (selectedThreadId == state.selectedThreadId) state.pendingAttachments else emptyList(),
@@ -1591,9 +2344,11 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 },
                 errorMessage = null,
                 isBusy = if (interactiveSync) false else state.isBusy,
+                showSyncProgress = false,
             )
             refreshDeviceInventory(currentDevice = currentDevice)
             startLiveEventsIfPossible()
+            selectedThreadId?.let(::sendReadReceiptForThreadId)
             if (!appInForeground && state.notificationsEnabled) {
                 NotrusBackgroundSyncWorker.enqueueImmediate(applicationContext)
             }
@@ -1604,11 +2359,13 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     currentIdentity = latestKnownIdentity,
                     currentDirectoryCode = latestKnownIdentity.directoryCode,
                     errorMessage = error.message ?: "Relay sync failed.",
+                    showSyncProgress = false,
                 )
             } else {
                 state.copy(
                     currentIdentity = latestKnownIdentity,
                     currentDirectoryCode = latestKnownIdentity.directoryCode,
+                    showSyncProgress = false,
                 )
             }
             if (interactiveSync) {
@@ -1630,6 +2387,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             val participants = thread.participantIds.map { userId ->
                 usersById[userId] ?: placeholderUser(userId)
             }
+            val existingRecord = updatedRecords[thread.id]
 
             when {
                 thread.protocol == DIRECT_PROTOCOL && participants.size == 2 -> {
@@ -1637,7 +2395,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                         thread = thread,
                         participants = participants,
                         identity = updatedIdentity,
-                        existingRecord = updatedRecords[thread.id],
+                        existingRecord = existingRecord,
                     )
                     updatedIdentity = materialized.identity
                     updatedRecords[thread.id] = materialized.record
@@ -1649,7 +2407,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                         thread = thread,
                         participants = participants,
                         identity = updatedIdentity,
-                        existingRecord = updatedRecords[thread.id],
+                        existingRecord = existingRecord,
                     )
                     updatedIdentity = materialized.identity
                     updatedRecords[thread.id] = materialized.record
@@ -1660,19 +2418,51 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     materializeUnsupportedThread(
                         thread = thread,
                         participants = participants,
-                        existingRecord = updatedRecords[thread.id],
+                        existingRecord = existingRecord,
                         identityId = updatedIdentity.id,
                     )
                 }
             }
         }
-        val visibleConversations = conversations.filter { updatedRecords[it.id]?.hiddenAt == null }
+        val conversationsWithLocalState = conversations.map { conversation ->
+            val record = updatedRecords[conversation.id]
+            conversation.copy(
+                archived = record?.hiddenAt != null,
+                muted = record?.mutedAt != null,
+            )
+        }
+        val visibleConversations = conversationsWithLocalState.filter { !it.archived }
+        val archivedConversations = conversationsWithLocalState.filter { it.archived }
         return MaterializedSyncState(
             identity = updatedIdentity,
             threadRecords = updatedRecords,
             threads = visibleConversations,
+            archivedThreads = archivedConversations,
         )
     }
+
+    private fun hiddenMaterializedThread(
+        thread: RelayThread,
+        participants: List<RelayUser>,
+        identityId: String,
+        record: ConversationThreadRecord,
+    ): ConversationThread =
+        ConversationThread(
+            deliveryCapability = thread.deliveryCapability,
+            id = thread.id,
+            title = resolveThreadTitle(thread, participants, identityId, record.localTitle),
+            mailboxHandle = thread.mailboxHandle,
+            protocol = thread.protocol,
+            protocolLabel = ProtocolCatalog.label(thread.protocol),
+            participants = participants,
+            participantIds = thread.participantIds,
+            messages = emptyList(),
+            messageCount = thread.messages.size,
+            attachmentCount = thread.attachmentCount,
+            lastActivityAt = relayThreadLastActivity(thread),
+            supported = false,
+            warning = "This local conversation was deleted on this Android device.",
+        )
 
     private fun materializeDirectSignalThread(
         thread: RelayThread,
@@ -1704,7 +2494,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     participants = participants,
                     existingRecord = existingRecord,
                     identityId = identity.id,
-                    warning = "This Android profile is missing its local Signal state.",
+                    warning = "This Android profile is missing its local secure-message state.",
                 ),
             )
         var record = existingRecord ?: ConversationThreadRecord(
@@ -1714,6 +2504,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
 
         if (
             record.processedMessageCount > thread.messages.size ||
+            thread.messages.take(record.processedMessageCount).any { !MessageCachePolicy.canSkipLocalDecrypt(record.messageCache[it.id]) } ||
             (
                 record.processedMessageCount > 0 &&
                     thread.messages.getOrNull(record.processedMessageCount - 1)?.id != record.lastProcessedMessageId
@@ -1722,8 +2513,9 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             record = ConversationThreadRecord(
                 hiddenAt = record.hiddenAt,
                 localTitle = record.localTitle,
+                mutedAt = record.mutedAt,
                 purgedAt = record.purgedAt,
-                messageCache = emptyMap(),
+                messageCache = record.messageCache,
                 lastProcessedMessageId = null,
                 processedMessageCount = 0,
                 protocol = DIRECT_PROTOCOL,
@@ -1733,17 +2525,25 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
 
         for (message in thread.messages.drop(record.processedMessageCount)) {
             record = when {
+                MessageCachePolicy.canSkipLocalDecrypt(record.messageCache[message.id]) -> record.copy(
+                    messageCache = record.messageCache + (
+                        message.id to MessageCachePolicy.attachRelayEnvelope(
+                            requireNotNull(record.messageCache[message.id]),
+                            message,
+                        )
+                    ),
+                )
+
                 message.senderId == identity.id -> record.copy(
-                    messageCache = if (record.messageCache.containsKey(message.id)) {
-                        record.messageCache
-                    } else {
-                        record.messageCache + (
-                            message.id to CachedMessageState(
+                    messageCache = record.messageCache + (
+                        message.id to MessageCachePolicy.attachRelayEnvelope(
+                            CachedMessageState(
                                 body = normalizeLegacyDisplayBody("Sent from this Android device."),
                                 status = "missing-local-state",
-                            )
+                            ),
+                            message,
                         )
-                    },
+                    ),
                 )
 
                 message.messageKind != null && message.wireMessage != null -> {
@@ -1759,19 +2559,25 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                         signalState = opened.state
                         record.copy(
                             messageCache = record.messageCache + (
-                                message.id to CachedMessageState(
-                                    attachments = payload.attachments,
-                                    body = payload.text,
-                                    status = "ok",
+                                message.id to MessageCachePolicy.attachRelayEnvelope(
+                                    CachedMessageState(
+                                        attachments = payload.attachments,
+                                        body = payload.text,
+                                        status = "ok",
+                                    ),
+                                    message,
                                 )
                             ),
                         )
                     } catch (error: Exception) {
                         record.copy(
                             messageCache = record.messageCache + (
-                                message.id to CachedMessageState(
-                                    body = normalizeSignalDecryptionFailure(error),
-                                    status = "invalid",
+                                message.id to MessageCachePolicy.attachRelayEnvelope(
+                                    CachedMessageState(
+                                        body = normalizeSignalDecryptionFailure(error),
+                                        status = "invalid",
+                                    ),
+                                    message,
                                 )
                             ),
                         )
@@ -1780,9 +2586,12 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
 
                 else -> record.copy(
                     messageCache = record.messageCache + (
-                        message.id to CachedMessageState(
-                            body = normalizeLegacyDisplayBody("The Signal message was missing its authenticated wire payload."),
-                            status = "invalid",
+                        message.id to MessageCachePolicy.attachRelayEnvelope(
+                            CachedMessageState(
+                                body = normalizeLegacyDisplayBody("The Notrus message was missing its authenticated wire payload."),
+                                status = "invalid",
+                            ),
+                            message,
                         )
                     ),
                 )
@@ -1805,12 +2614,13 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             } else {
                 DecryptedMessage(
                     attachments = cached?.attachments ?: emptyList(),
-                    body = cached?.body ?: "Local plaintext is unavailable on this Android device for that Signal message.",
+                    body = cached?.body?.takeIf(String::isNotBlank) ?: "Local plaintext is unavailable on this Android device for that Notrus message.",
                     createdAt = message.createdAt,
                     id = message.id,
                     senderId = message.senderId,
                     senderName = participants.firstOrNull { it.id == message.senderId }?.displayName ?: "Unknown user",
                     status = cached?.status ?: "missing-local-state",
+                    readReceiptSummary = readReceiptSummaryFor(message, thread, participants, identity.id),
                 )
             }
         }
@@ -1853,13 +2663,14 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     participants = participants,
                     existingRecord = existingRecord,
                     identityId = identity.id,
-                    warning = "This Android profile is missing local Signal state required for MLS-compatible group fanout.",
+                    warning = "This Android profile is missing local secure-message state required for MLS-compatible group fanout.",
                 ),
             )
 
         var record = existingRecord ?: ConversationThreadRecord(protocol = GROUP_PROTOCOL)
         if (
             record.processedMessageCount > thread.messages.size ||
+            thread.messages.take(record.processedMessageCount).any { !MessageCachePolicy.canSkipLocalDecrypt(record.messageCache[it.id]) } ||
             (
                 record.processedMessageCount > 0 &&
                     thread.messages.getOrNull(record.processedMessageCount - 1)?.id != record.lastProcessedMessageId
@@ -1868,8 +2679,9 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             record = ConversationThreadRecord(
                 hiddenAt = record.hiddenAt,
                 localTitle = record.localTitle,
+                mutedAt = record.mutedAt,
                 purgedAt = record.purgedAt,
-                messageCache = emptyMap(),
+                messageCache = record.messageCache,
                 lastProcessedMessageId = null,
                 processedMessageCount = 0,
                 protocol = GROUP_PROTOCOL,
@@ -1880,18 +2692,26 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         var decodeFailures = 0
         for (message in thread.messages.drop(record.processedMessageCount)) {
             record = when {
+                MessageCachePolicy.canSkipLocalDecrypt(record.messageCache[message.id]) -> record.copy(
+                    messageCache = record.messageCache + (
+                        message.id to MessageCachePolicy.attachRelayEnvelope(
+                            requireNotNull(record.messageCache[message.id]),
+                            message,
+                        )
+                    ),
+                )
+
                 message.senderId == identity.id -> {
                     record.copy(
-                        messageCache = if (record.messageCache.containsKey(message.id)) {
-                            record.messageCache
-                        } else {
-                            record.messageCache + (
-                                message.id to CachedMessageState(
+                        messageCache = record.messageCache + (
+                            message.id to MessageCachePolicy.attachRelayEnvelope(
+                                CachedMessageState(
                                     body = normalizeLegacyDisplayBody("Sent from this Android device."),
                                     status = "missing-local-state",
-                                )
+                                ),
+                                message,
                             )
-                        },
+                        ),
                     )
                 }
 
@@ -1899,9 +2719,12 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     decodeFailures += 1
                     record.copy(
                         messageCache = record.messageCache + (
-                            message.id to CachedMessageState(
-                                body = normalizeLegacyDisplayBody("This group uses native MLS envelopes that are not linked into this Android build yet."),
-                                status = "unsupported",
+                            message.id to MessageCachePolicy.attachRelayEnvelope(
+                                CachedMessageState(
+                                    body = normalizeLegacyDisplayBody("This group uses native MLS envelopes that are not linked into this Android build yet."),
+                                    status = "unsupported",
+                                ),
+                                message,
                             )
                         ),
                     )
@@ -1913,9 +2736,12 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                         decodeFailures += 1
                         record.copy(
                             messageCache = record.messageCache + (
-                                message.id to CachedMessageState(
-                                    body = normalizeLegacyDisplayBody("The group envelope could not be parsed on Android."),
-                                    status = "invalid",
+                                message.id to MessageCachePolicy.attachRelayEnvelope(
+                                    CachedMessageState(
+                                        body = normalizeLegacyDisplayBody("The group envelope could not be parsed on Android."),
+                                        status = "invalid",
+                                    ),
+                                    message,
                                 )
                             ),
                         )
@@ -1925,9 +2751,12 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                             decodeFailures += 1
                             record.copy(
                                 messageCache = record.messageCache + (
-                                    message.id to CachedMessageState(
-                                        body = normalizeLegacyDisplayBody("This Android device did not receive a recipient envelope for that group message."),
-                                        status = "invalid",
+                                    message.id to MessageCachePolicy.attachRelayEnvelope(
+                                        CachedMessageState(
+                                            body = normalizeLegacyDisplayBody("This Android device did not receive a recipient envelope for that group message."),
+                                            status = "invalid",
+                                        ),
+                                        message,
                                     )
                                 ),
                             )
@@ -1944,10 +2773,13 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                                 signalState = opened.state
                                 record.copy(
                                     messageCache = record.messageCache + (
-                                        message.id to CachedMessageState(
-                                            attachments = payload.attachments,
-                                            body = payload.text,
-                                            status = "ok",
+                                        message.id to MessageCachePolicy.attachRelayEnvelope(
+                                            CachedMessageState(
+                                                attachments = payload.attachments,
+                                                body = payload.text,
+                                                status = "ok",
+                                            ),
+                                            message,
                                         )
                                     ),
                                 )
@@ -1955,9 +2787,12 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                                 decodeFailures += 1
                                 record.copy(
                                     messageCache = record.messageCache + (
-                                        message.id to CachedMessageState(
-                                            body = normalizeSignalDecryptionFailure(error),
-                                            status = "invalid",
+                                        message.id to MessageCachePolicy.attachRelayEnvelope(
+                                            CachedMessageState(
+                                                body = normalizeSignalDecryptionFailure(error),
+                                                status = "invalid",
+                                            ),
+                                            message,
                                         )
                                     ),
                                 )
@@ -1970,9 +2805,12 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     decodeFailures += 1
                     record.copy(
                         messageCache = record.messageCache + (
-                            message.id to CachedMessageState(
-                                body = normalizeLegacyDisplayBody("The group message was missing its authenticated envelope payload."),
-                                status = "invalid",
+                            message.id to MessageCachePolicy.attachRelayEnvelope(
+                                CachedMessageState(
+                                    body = normalizeLegacyDisplayBody("The group message was missing its authenticated envelope payload."),
+                                    status = "invalid",
+                                ),
+                                message,
                             )
                         ),
                     )
@@ -2000,12 +2838,13 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             } else {
                 DecryptedMessage(
                     attachments = cached?.attachments ?: emptyList(),
-                    body = cached?.body ?: "Local plaintext unavailable on this Android device for that group message.",
+                    body = cached?.body?.takeIf(String::isNotBlank) ?: "Local plaintext unavailable on this Android device for that group message.",
                     createdAt = message.createdAt,
                     id = message.id,
                     senderId = message.senderId,
                     senderName = participants.firstOrNull { it.id == message.senderId }?.displayName ?: "Unknown user",
                     status = cached?.status ?: "missing-local-state",
+                    readReceiptSummary = readReceiptSummaryFor(message, thread, participants, identity.id),
                 )
             }
         }
@@ -2070,7 +2909,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             }
             DecryptedMessage(
                 attachments = cached?.attachments ?: emptyList(),
-                body = normalizeLegacyDisplayBody(cached?.body ?: "This thread can be viewed on Android, but only standards direct chats are writable right now."),
+                body = normalizeLegacyDisplayBody(cached?.body?.takeIf(String::isNotBlank) ?: "This thread can be viewed on Android, but only standards direct chats are writable right now."),
                 createdAt = message.createdAt,
                 id = message.id,
                 senderId = message.senderId,
@@ -2136,32 +2975,49 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun persistStoredRecord(updatedRecord: StoredIdentityRecord, makeActive: Boolean = true) {
         val catalog = vaultStore.loadCatalog()
+        val durableRecord = mergeStoredRecordForPersistence(
+            existing = catalog.identities.firstOrNull { it.identity.id == updatedRecord.identity.id },
+            incoming = updatedRecord,
+        )
         var replaced = false
         val identities = catalog.identities.map { record ->
-            if (record.identity.id == updatedRecord.identity.id) {
+            if (record.identity.id == durableRecord.identity.id) {
                 replaced = true
-                updatedRecord
+                durableRecord
             } else {
                 record
             }
         }.let { records ->
-            if (replaced) records else records + updatedRecord
+            if (replaced) records else records + durableRecord
         }
-        vaultStore.saveCatalog(
-            catalog.copy(
-                version = maxOf(2, catalog.version),
-                activeIdentityId = if (makeActive) updatedRecord.identity.id else catalog.activeIdentityId,
-                identities = identities,
-            ),
+        val nextCatalog = catalog.copy(
+            version = maxOf(2, catalog.version),
+            activeIdentityId = if (makeActive) durableRecord.identity.id else catalog.activeIdentityId,
+            identities = identities,
         )
+        vaultStore.saveCatalog(nextCatalog)
         refreshDeviceInventory(
-            catalog = catalog.copy(
-                version = maxOf(2, catalog.version),
-                activeIdentityId = if (makeActive) updatedRecord.identity.id else catalog.activeIdentityId,
-                identities = identities,
-            ),
+            catalog = nextCatalog,
             currentDevice = state.currentDevice,
         )
+    }
+
+    private fun mergeStoredRecordForPersistence(
+        existing: StoredIdentityRecord?,
+        incoming: StoredIdentityRecord,
+    ): StoredIdentityRecord {
+        if (existing == null) {
+            return incoming
+        }
+        val mergedThreads = linkedMapOf<String, ConversationThreadRecord>()
+        existing.threadRecords.forEach { (threadId, record) -> mergedThreads[threadId] = record }
+        incoming.threadRecords.forEach { (threadId, record) ->
+            mergedThreads[threadId] = MessageCachePolicy.mergeThreadCaches(
+                existing = mergedThreads[threadId],
+                incoming = record,
+            )
+        }
+        return incoming.copy(threadRecords = mergedThreads)
     }
 
     private fun refreshDeviceInventory(
@@ -2259,23 +3115,20 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun restoreHiddenDirectThreadIfPresent(identityId: String, remoteUserId: String): String? {
-        val record = currentStoredRecord(identityId) ?: return null
-        val hiddenEntry = record.threadRecords.entries.firstOrNull { entry ->
-            entry.value.signalPeerUserId == remoteUserId && entry.value.hiddenAt != null
-        } ?: return null
-        val preserved = hiddenEntry.value
-        persistStoredRecord(
-            record.copy(
-                threadRecords = record.threadRecords + mapOf(
-                    hiddenEntry.key to preserved.copy(
-                        hiddenAt = null,
-                        messageCache = if (preserved.purgedAt != null) emptyMap() else preserved.messageCache,
-                    ),
-                ),
-            ),
+    private fun resetSignalPeerForFreshDirectChat(identity: LocalIdentity, remoteUserId: String): LocalIdentity {
+        val signalState = identity.standardsSignalState ?: return identity
+        val resetState = StandardsSignalClient.resetPeer(signalState, remoteUserId)
+        val refreshed = StandardsSignalClient.refreshBundle(resetState)
+        val updatedIdentity = identity.copy(
+            standardsSignalReady = true,
+            standardsSignalBundle = refreshed.bundle,
+            standardsSignalState = refreshed.state,
         )
-        return hiddenEntry.key
+        currentStoredRecord(identity.id)?.let { record ->
+            persistStoredRecord(record.copy(identity = updatedIdentity))
+        }
+        state = state.copy(currentIdentity = updatedIdentity)
+        return updatedIdentity
     }
 
     private fun resolveUser(userId: String): RelayUser? {
@@ -2286,6 +3139,148 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             ?: state.directoryResults.firstOrNull { it.id == userId }
             ?: state.contacts.firstOrNull { it.id == userId }
     }
+
+    private fun contactTrustRecord(userId: String): AndroidContactTrustRecord? =
+        state.contactTrustRecords.firstOrNull { it.userId == userId }
+
+    private fun observeContactTrust(identityId: String, user: RelayUser): List<AndroidContactTrustRecord> {
+        val records = loadContactTrustRecords(identityId).toMutableMap()
+        records[user.id] = mergedTrustRecord(records[user.id], user)
+        return saveContactTrustRecords(identityId, records)
+    }
+
+    private fun reconcileContactTrust(
+        identityId: String,
+        users: List<RelayUser>,
+    ): List<AndroidContactTrustRecord> {
+        val records = loadContactTrustRecords(identityId).toMutableMap()
+        users
+            .filter { it.id != identityId }
+            .distinctBy { it.id }
+            .forEach { user ->
+                records[user.id] = mergedTrustRecord(records[user.id], user)
+            }
+        return saveContactTrustRecords(identityId, records)
+    }
+
+    private fun upsertContactTrust(
+        identityId: String,
+        trustRecord: AndroidContactTrustRecord,
+    ): List<AndroidContactTrustRecord> {
+        val records = loadContactTrustRecords(identityId).toMutableMap()
+        records[trustRecord.userId] = trustRecord
+        return saveContactTrustRecords(identityId, records)
+    }
+
+    private fun mergedTrustRecord(
+        existing: AndroidContactTrustRecord?,
+        user: RelayUser,
+    ): AndroidContactTrustRecord {
+        val observedFingerprint = user.fingerprint.ifBlank { existing?.observedFingerprint ?: "unknown" }
+        val observedPrekeyFingerprint = user.prekeyFingerprint ?: existing?.observedPrekeyFingerprint
+        val fingerprintChanged = existing != null &&
+            existing.observedFingerprint.isNotBlank() &&
+            existing.observedFingerprint != "unknown" &&
+            observedFingerprint != existing.observedFingerprint
+        val trustedMismatch = existing?.trustedFingerprint != null && existing.trustedFingerprint != observedFingerprint
+        val trustedPrekeyMismatch = existing?.trustedPrekeyFingerprint != null &&
+            observedPrekeyFingerprint != null &&
+            existing.trustedPrekeyFingerprint != observedPrekeyFingerprint
+        val status = when {
+            fingerprintChanged || trustedMismatch || trustedPrekeyMismatch -> "changed"
+            existing?.trustedFingerprint == observedFingerprint && !existing.trustedFingerprint.isNullOrBlank() -> "verified"
+            else -> "unverified"
+        }
+        return AndroidContactTrustRecord(
+            blockedAt = existing?.blockedAt,
+            displayName = user.displayName.ifBlank { existing?.displayName ?: user.username },
+            lastReportedAt = existing?.lastReportedAt,
+            lastVerifiedAt = existing?.lastVerifiedAt.takeIf { status == "verified" },
+            observedFingerprint = observedFingerprint,
+            observedPrekeyFingerprint = observedPrekeyFingerprint,
+            status = status,
+            trustedFingerprint = existing?.trustedFingerprint,
+            trustedPrekeyFingerprint = existing?.trustedPrekeyFingerprint,
+            userId = user.id,
+            username = user.username.ifBlank { existing?.username ?: user.id.take(8) },
+        )
+    }
+
+    private fun loadContactTrustRecords(identityId: String): Map<String, AndroidContactTrustRecord> {
+        val raw = settings.getString(contactTrustStorageKey(identityId), null) ?: return emptyMap()
+        return runCatching {
+            val json = JSONObject(raw)
+            val records = linkedMapOf<String, AndroidContactTrustRecord>()
+            val array = json.optJSONArray("records") ?: JSONArray()
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val userId = item.optString("userId").trim()
+                if (userId.isBlank()) {
+                    continue
+                }
+                records[userId] = AndroidContactTrustRecord(
+                    blockedAt = nullableString(item, "blockedAt"),
+                    displayName = item.optString("displayName").ifBlank { item.optString("username").ifBlank { userId.take(8) } },
+                    lastReportedAt = nullableString(item, "lastReportedAt"),
+                    lastVerifiedAt = nullableString(item, "lastVerifiedAt"),
+                    observedFingerprint = item.optString("observedFingerprint").ifBlank { "unknown" },
+                    observedPrekeyFingerprint = nullableString(item, "observedPrekeyFingerprint"),
+                    status = item.optString("status").ifBlank { "unverified" },
+                    trustedFingerprint = nullableString(item, "trustedFingerprint"),
+                    trustedPrekeyFingerprint = nullableString(item, "trustedPrekeyFingerprint"),
+                    userId = userId,
+                    username = item.optString("username").ifBlank { userId.take(8) },
+                )
+            }
+            records
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun saveContactTrustRecords(
+        identityId: String,
+        records: Map<String, AndroidContactTrustRecord>,
+    ): List<AndroidContactTrustRecord> {
+        val sorted = records.values.sortedWith(
+            compareBy<AndroidContactTrustRecord> { it.status != "changed" }
+                .thenBy { it.blockedAt == null }
+                .thenBy { it.username.lowercase() },
+        )
+        val array = JSONArray()
+        sorted.forEach { record ->
+            array.put(
+                JSONObject()
+                    .put("blockedAt", record.blockedAt ?: JSONObject.NULL)
+                    .put("displayName", record.displayName)
+                    .put("lastReportedAt", record.lastReportedAt ?: JSONObject.NULL)
+                    .put("lastVerifiedAt", record.lastVerifiedAt ?: JSONObject.NULL)
+                    .put("observedFingerprint", record.observedFingerprint)
+                    .put("observedPrekeyFingerprint", record.observedPrekeyFingerprint ?: JSONObject.NULL)
+                    .put("status", record.status)
+                    .put("trustedFingerprint", record.trustedFingerprint ?: JSONObject.NULL)
+                    .put("trustedPrekeyFingerprint", record.trustedPrekeyFingerprint ?: JSONObject.NULL)
+                    .put("userId", record.userId)
+                    .put("username", record.username),
+            )
+        }
+        settings.edit()
+            .putString(contactTrustStorageKey(identityId), JSONObject().put("records", array).toString())
+            .apply()
+        return sorted
+    }
+
+    private fun contactTrustStorageKey(identityId: String): String =
+        "$KEY_CONTACT_TRUST_PREFIX$identityId"
+
+    private fun nullableString(json: JSONObject, key: String): String? =
+        if (!json.has(key) || json.isNull(key)) {
+            null
+        } else {
+            json.optString(key).trim().takeIf { value ->
+                value.isNotBlank() &&
+                    !value.equals("null", ignoreCase = true) &&
+                    !value.equals("nil", ignoreCase = true)
+            }
+        }
 
     private fun hasUsableContactHandle(user: RelayUser): Boolean {
         if (user.contactHandle.isNullOrBlank()) {
@@ -2300,9 +3295,11 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         val record = currentStoredRecord(identity.id) ?: return
         val updatedContacts = mergeUsers(record.savedContacts, listOf(user))
         persistStoredRecord(record.copy(savedContacts = updatedContacts))
+        val contactTrustRecords = observeContactTrust(identity.id, user)
         state = state.copy(
             contacts = updatedContacts,
             directoryResults = mergeUsers(state.directoryResults, listOf(user)),
+            contactTrustRecords = contactTrustRecords,
         )
     }
 
@@ -2353,9 +3350,18 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private suspend fun ensureRegisteredIdentity(identity: LocalIdentity): LocalIdentity {
-        val registered = relayClient().register(identity)
-        updateRelaySession(registered.session, identityId = identity.id)
-        val updated = mergeRegisteredIdentity(identity, registered.user)
+        var publishable = identity
+        identity.standardsSignalState?.let { signalState ->
+            val refreshed = StandardsSignalClient.refreshBundle(signalState)
+            publishable = identity.copy(
+                standardsSignalReady = true,
+                standardsSignalBundle = refreshed.bundle,
+                standardsSignalState = refreshed.state,
+            )
+        }
+        val registered = relayClient().register(publishable)
+        updateRelaySession(registered.session, identityId = publishable.id)
+        val updated = mergeRegisteredIdentity(publishable, registered.user)
         if (updated != identity) {
             currentStoredRecord(identity.id)?.let { persistStoredRecord(it.copy(identity = updated)) }
         }
@@ -2397,7 +3403,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun startLiveEventsIfPossible() {
-        val keepLive = appInForeground || state.notificationsEnabled
+        val keepLive = appInForeground
         if (!keepLive) {
             return
         }
@@ -2412,29 +3418,25 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         val identityId = identity.id
         liveEventsJob = viewModelScope.launch {
             var backoffMs = 1_200L
-            while (isActive && (appInForeground || state.notificationsEnabled) && state.currentIdentity?.id == identityId) {
+            while (isActive && appInForeground && state.currentIdentity?.id == identityId) {
                 val activeIdentity = state.currentIdentity ?: break
                 try {
                     relayClient().streamEvents { _, threadId ->
                         if (appInForeground) {
                             scheduleLiveSync(threadId)
-                        } else if (state.notificationsEnabled) {
-                            NotrusBackgroundSyncWorker.enqueueImmediate(applicationContext)
                         }
                     }
                     backoffMs = 1_200L
                 } catch (_: Exception) {
                     if (
                         !isActive ||
-                        (!(appInForeground || state.notificationsEnabled)) ||
+                        !appInForeground ||
                         state.currentIdentity?.id != activeIdentity.id
                     ) {
                         break
                     }
                     if (appInForeground) {
                         scheduleLiveSync(null)
-                    } else if (state.notificationsEnabled) {
-                        NotrusBackgroundSyncWorker.enqueueImmediate(applicationContext)
                     }
                     delay(backoffMs)
                     backoffMs = (backoffMs * 2).coerceAtMost(15_000L)
@@ -2455,11 +3457,11 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         liveSyncDebounceJob = viewModelScope.launch {
             delay(360L)
             val identity = state.currentIdentity ?: return@launch
-            registerAndSync(
-                identity = identity,
-                preferredThreadId = preferredThreadId ?: state.selectedThreadId,
-                presentation = SyncPresentation.Silent,
-            )
+                registerAndSync(
+                    identity = identity,
+                    preferredThreadId = state.selectedThreadId,
+                    presentation = SyncPresentation.Silent,
+                )
         }
     }
 
@@ -2751,6 +3753,25 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun normalizeSignalSendFailure(error: Throwable): String {
+        val message = error.message?.trim().orEmpty()
+        val normalized = message.lowercase()
+        return when {
+            normalized.contains("prekey") ->
+                "This contact needs to open Notrus once to refresh secure messaging keys, then sending can continue."
+
+            normalized.contains("no session") ||
+                normalized.contains("missing session") ->
+                "This secure session is out of sync. Use Reset secure session from the chat menu, then try again."
+
+            normalized.contains("untrusted identity") ->
+                "This contact's security number changed. Verify the contact in Security before sending again."
+
+            message.isNotBlank() -> normalizeLegacyDisplayBody(message)
+            else -> "Android could not send that secure message."
+        }
+    }
+
     private fun normalizeLegacyDisplayBody(raw: String): String {
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) {
@@ -2811,10 +3832,10 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             return false
         }
         val purgedAt = record?.purgedAt ?: return true
-        if (cached != null) {
-            return true
+        if (isoTimestampAtOrBefore(message.createdAt, purgedAt)) {
+            return false
         }
-        return !isoTimestampAtOrBefore(message.createdAt, purgedAt)
+        return true
     }
 
     private fun isoTimestampAtOrBefore(left: String, right: String): Boolean {
@@ -2956,6 +3977,8 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         private const val KEY_VISUAL_EFFECTS_ENABLED = "visual_effects_enabled"
         private const val KEY_COLOR_THEME_PRESET = "color_theme_preset"
         private const val KEY_THEME_MODE = "theme_mode"
+        private const val KEY_SEND_READ_RECEIPTS_TO_OTHERS = "send_read_receipts_to_others"
+        private const val KEY_CONTACT_TRUST_PREFIX = "contact_trust_"
         private const val KEY_RELAY_ORIGIN = "relay_origin"
         private const val KEY_TRANSPARENCY_PINS = "transparency_pins"
         private const val KEY_TRANSPARENCY_SIGNER_PINS = "transparency_signer_pins"

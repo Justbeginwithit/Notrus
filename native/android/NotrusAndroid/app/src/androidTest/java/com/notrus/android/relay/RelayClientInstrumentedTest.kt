@@ -350,7 +350,7 @@ private class TestRelay : AutoCloseable {
                 socket.use(::respond)
             }
         }
-        ready.await(5, TimeUnit.SECONDS)
+        check(ready.await(5, TimeUnit.SECONDS)) { "Timed out waiting for local test relay." }
     }
 
     fun enqueue(status: Int, body: String, contentType: String = "application/json") {

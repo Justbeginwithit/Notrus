@@ -49,7 +49,7 @@ final class NotrusMacCheckpointTests: XCTestCase {
         XCTAssertTrue(try NotrusCrypto.verifySignedPrekeyRecord(relayUser))
     }
 
-    func testRecoveryArchiveRoundTripsPortableAccountAndThreadState() throws {
+    func testChatBackupRoundTripsThreadStateSeparatelyFromRecovery() throws {
         let identity = try NotrusCrypto.createIdentity(displayName: "Backup", username: "backup")
         let threadState = ThreadStoreRecord(
             bootstrapState: nil,
@@ -72,17 +72,25 @@ final class NotrusMacCheckpointTests: XCTestCase {
             processedMessageCount: 1,
             protocolField: "group-tree-v3"
         )
-        let archive = PortableAccountArchive(
+        let archive = ChatBackupArchive(
             version: 1,
             exportedAt: NotrusCrypto.isoNow(),
-            identity: identity,
+            sourcePlatform: "macos",
+            backupKind: ChatBackupPortability.backupKind,
+            identity: ChatBackupIdentitySnapshot(identity: identity),
+            attachmentsIncluded: false,
             threadRecords: ["thread-1": threadState]
         )
 
-        let sealed = try NotrusCrypto.sealPortableArchive(archive, passphrase: "correct horse battery staple")
-        let opened = try NotrusCrypto.openPortableArchive(sealed, passphrase: "correct horse battery staple")
+        let sealed = try NotrusCrypto.sealArchivePayload(
+            try JSONEncoder().encode(archive),
+            exportedAt: archive.exportedAt,
+            secret: "correct horse battery staple"
+        )
+        let plaintext = try NotrusCrypto.openArchivePayload(sealed, secret: "correct horse battery staple")
+        let opened = try JSONDecoder().decode(ChatBackupArchive.self, from: plaintext)
 
-        XCTAssertEqual(opened.identity, identity)
+        XCTAssertEqual(opened.identity.id, identity.id)
         XCTAssertEqual(opened.threadRecords, archive.threadRecords)
     }
 
@@ -92,20 +100,131 @@ final class NotrusMacCheckpointTests: XCTestCase {
 
         try AccountPortability.exportArchive(
             identity: identity,
-            threadRecords: [:],
-            passphrase: "correct horse battery staple",
+            secret: "correct horse battery staple",
             to: destination
         )
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
         let reopened = try AccountPortability.importArchive(
             from: destination,
-            passphrase: "correct horse battery staple"
+            secret: "correct horse battery staple"
         )
-        guard case .portable(let archive) = reopened else {
-            return XCTFail("Expected the exported Mac archive to reopen as a portable archive.")
+        guard case .transfer(let archive) = reopened else {
+            return XCTFail("Expected the exported Mac archive to reopen as an account recovery transfer archive.")
         }
+        XCTAssertEqual(archive.sourcePlatform, "macos")
         XCTAssertEqual(archive.identity.id, identity.id)
+    }
+
+    func testChatBackupPortabilityExportRestoresThreadRecords() throws {
+        let identity = try NotrusCrypto.createIdentity(displayName: "History", username: "history").updatingStandards(
+            signalBundle: PublicSignalBundle(
+                deviceId: 7,
+                identityKey: "identity-key-history",
+                kyberPreKeyId: 8,
+                kyberPreKeyPublic: "kyber-public-history",
+                kyberPreKeySignature: "kyber-signature-history",
+                preKeyId: 9,
+                preKeyPublic: "prekey-public-history",
+                registrationId: 10,
+                signedPreKeyId: 11,
+                signedPreKeyPublic: "signed-prekey-public-history",
+                signedPreKeySignature: "signed-prekey-signature-history"
+            ),
+            signalState: "{\"deviceId\":7,\"sessions\":{\"peer\":\"session-state\"}}"
+        )
+        let threadState = ThreadStoreRecord(
+            lastProcessedMessageId: "message-1",
+            messageCache: ["message-1": CachedMessageState(body: "restored", hidden: false, status: "ok")],
+            processedMessageCount: 1,
+            protocolField: "signal-pqxdh-double-ratchet-v1",
+            standardsSignalPeerUserId: "peer"
+        )
+        let data = try ChatBackupPortability.exportBackupData(
+            identity: identity,
+            threadRecords: ["thread-1": threadState],
+            secret: "correct horse battery staple"
+        )
+        let destination = temporaryDirectory.appendingPathComponent("history-backup.json")
+        try data.write(to: destination)
+
+        let reopened = try ChatBackupPortability.importBackup(
+            from: destination,
+            secret: "correct horse battery staple"
+        )
+
+        XCTAssertEqual(reopened.backupKind, ChatBackupPortability.backupKind)
+        XCTAssertEqual(reopened.identity.id, identity.id)
+        XCTAssertEqual(reopened.identity.standardsSignalBundle, identity.standardsSignalBundle)
+        XCTAssertEqual(reopened.identity.standardsSignalState, identity.standardsSignalState)
+        XCTAssertEqual(reopened.threadRecords["thread-1"]?.messageCache["message-1"]?.body, "restored")
+    }
+
+    func testChatBackupDecodesAndroidObjectFormSignalState() throws {
+        let json = """
+        {
+          "id": "android-id",
+          "username": "android",
+          "displayName": "Android",
+          "createdAt": "2026-04-21T00:00:00Z",
+          "recoveryFingerprint": "recovery-fp",
+          "standardsSignalBundle": {
+            "deviceId": 7,
+            "identityKey": "identity-key-history",
+            "kyberPreKeyId": 8,
+            "kyberPreKeyPublic": "kyber-public-history",
+            "kyberPreKeySignature": "kyber-signature-history",
+            "preKeyId": 9,
+            "preKeyPublic": "prekey-public-history",
+            "registrationId": 10,
+            "signedPreKeyId": 11,
+            "signedPreKeyPublic": "signed-prekey-public-history",
+            "signedPreKeySignature": "signed-prekey-signature-history"
+          },
+          "standardsSignalState": {
+            "deviceId": 7,
+            "identityKeyPair": "identity-keypair-history",
+            "knownIdentities": { "peer": "peer-identity" },
+            "kyberPreKeyId": 8,
+            "kyberPreKeyRecord": "kyber-record-history",
+            "preKeyId": 9,
+            "preKeyRecord": "prekey-record-history",
+            "registrationId": 10,
+            "senderKeys": { "group": "sender-key" },
+            "sessions": { "peer": "session-state" },
+            "signedPreKeyId": 11,
+            "signedPreKeyRecord": "signed-prekey-record-history"
+          }
+        }
+        """
+        let snapshot = try JSONDecoder().decode(ChatBackupIdentitySnapshot.self, from: Data(json.utf8))
+        let stateData = try XCTUnwrap(snapshot.standardsSignalState?.data(using: .utf8))
+        let state = try XCTUnwrap(JSONSerialization.jsonObject(with: stateData) as? [String: Any])
+        let sessions = try XCTUnwrap(state["sessions"] as? [String: String])
+
+        XCTAssertEqual(snapshot.standardsSignalBundle?.identityKey, "identity-key-history")
+        XCTAssertEqual(state["identityKeyPair"] as? String, "identity-keypair-history")
+        XCTAssertEqual(sessions["peer"], "session-state")
+    }
+
+    func testAccountRecoveryRejectsChatBackupArchive() throws {
+        let identity = try NotrusCrypto.createIdentity(displayName: "Split", username: "split")
+        let data = try ChatBackupPortability.exportBackupData(
+            identity: identity,
+            threadRecords: [:],
+            secret: "correct horse battery staple"
+        )
+        let destination = temporaryDirectory.appendingPathComponent("split-chat-backup.json")
+        try data.write(to: destination)
+
+        XCTAssertThrowsError(
+            try AccountPortability.importArchive(
+                from: destination,
+                secret: "correct horse battery staple"
+            )
+        ) { error in
+            XCTAssertEqual(error as? AccountPortabilityError, .chatBackupUsedForRecovery)
+        }
     }
 
     func testAccountPortabilityImportsAndroidTransferArchive() throws {
@@ -120,14 +239,14 @@ final class NotrusMacCheckpointTests: XCTestCase {
         let sealed = try NotrusCrypto.sealArchivePayload(
             try JSONEncoder().encode(transfer),
             exportedAt: transfer.exportedAt,
-            passphrase: "correct horse battery staple"
+            secret: "correct horse battery staple"
         )
         let destination = temporaryDirectory.appendingPathComponent("android-transfer.json")
         try JSONEncoder().encode(sealed).write(to: destination)
 
         let reopened = try AccountPortability.importArchive(
             from: destination,
-            passphrase: "correct horse battery staple"
+            secret: "correct horse battery staple"
         )
 
         guard case .transfer(let archive) = reopened else {
@@ -921,7 +1040,8 @@ final class NotrusMacCheckpointTests: XCTestCase {
     }
 
     func testTransportPolicyRejectsRemoteHttp() throws {
-        XCTAssertThrowsError(try TransportSecurityPolicy.validatedRelayOrigin("http://192.168.1.20:3000"))
+        let privateNetworkHost = [192, 168, 1, 20].map(String.init).joined(separator: ".")
+        XCTAssertThrowsError(try TransportSecurityPolicy.validatedRelayOrigin("http://\(privateNetworkHost):3000"))
         XCTAssertNoThrow(try TransportSecurityPolicy.validatedRelayOrigin("http://127.0.0.1:3000"))
         XCTAssertNoThrow(try TransportSecurityPolicy.validatedRelayOrigin("https://relay.example.com"))
     }

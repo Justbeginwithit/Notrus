@@ -41,10 +41,10 @@ Disabled: >-
   release tag exists and F-Droid maintainers confirm the Android release
   signing path should be unsigned for fdroiddata.
 Builds:
-  - versionName: 0.3.3-beta4
-    versionCode: 6
+  - versionName: 0.3.4-beta5
+    versionCode: 7
     disable: Enable after tagging the release used for fdroiddata review.
-    commit: v0.3.3-beta4
+    commit: v0.3.4-beta5
     subdir: native/android/NotrusAndroid
     gradle:
       - yes
@@ -66,5 +66,5 @@ MaintainerNotes: |-
   fdroiddata build review.
 AutoUpdateMode: None
 UpdateCheckMode: None
-CurrentVersion: 0.3.3-beta4
-CurrentVersionCode: 6
+CurrentVersion: 0.3.4-beta5
+CurrentVersionCode: 7

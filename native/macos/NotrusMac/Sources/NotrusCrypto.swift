@@ -13,7 +13,7 @@ enum NotrusCryptoError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .archiveDecryptionFailed:
-            return "The recovery archive could not be opened. Check the passphrase and try again."
+            return "The recovery archive could not be opened. Check the archive secret and try again."
         case .invalidBase64:
             return "The encoded crypto payload was not valid base64."
         case .invalidJWK:
@@ -873,18 +873,18 @@ enum NotrusCrypto {
         return decoded
     }
 
-    static func deriveArchiveKey(passphrase: String, salt: Data, rounds: Int) -> SymmetricKey {
-        var state = Data(passphrase.precomposedStringWithCanonicalMapping.utf8) + salt
+    static func deriveArchiveKey(secret: String, salt: Data, rounds: Int) -> SymmetricKey {
+        var state = Data(secret.precomposedStringWithCanonicalMapping.utf8) + salt
         for round in 0..<max(1, rounds) {
             state = Data(SHA256.hash(data: state + salt + Data(String(round).utf8)))
         }
         return SymmetricKey(data: Data(SHA256.hash(data: state + salt)))
     }
 
-    static func sealArchivePayload(_ plaintext: Data, exportedAt: String, passphrase: String) throws -> EncryptedPortableAccountArchive {
+    static func sealArchivePayload(_ plaintext: Data, exportedAt: String, secret: String) throws -> EncryptedPortableAccountArchive {
         let salt = randomData(count: 16)
         let rounds = 120_000
-        let key = deriveArchiveKey(passphrase: passphrase, salt: salt, rounds: rounds)
+        let key = deriveArchiveKey(secret: secret, salt: salt, rounds: rounds)
         let sealed = try AES.GCM.seal(
             plaintext,
             using: key,
@@ -906,18 +906,18 @@ enum NotrusCrypto {
         )
     }
 
-    static func sealPortableArchive(_ archive: PortableAccountArchive, passphrase: String) throws -> EncryptedPortableAccountArchive {
+    static func sealPortableArchive(_ archive: PortableAccountArchive, secret: String) throws -> EncryptedPortableAccountArchive {
         try sealArchivePayload(
             try JSONEncoder().encode(archive),
             exportedAt: archive.exportedAt,
-            passphrase: passphrase
+            secret: secret
         )
     }
 
-    static func openArchivePayload(_ archive: EncryptedPortableAccountArchive, passphrase: String) throws -> Data {
+    static func openArchivePayload(_ archive: EncryptedPortableAccountArchive, secret: String) throws -> Data {
         let salt = try base64Data(archive.salt)
         let combined = try base64Data(archive.iv) + base64Data(archive.ciphertext)
-        let key = deriveArchiveKey(passphrase: passphrase, salt: salt, rounds: archive.rounds)
+        let key = deriveArchiveKey(secret: secret, salt: salt, rounds: archive.rounds)
         let sealedBox = try AES.GCM.SealedBox(combined: combined)
 
         do {
@@ -931,8 +931,8 @@ enum NotrusCrypto {
         }
     }
 
-    static func openPortableArchive(_ archive: EncryptedPortableAccountArchive, passphrase: String) throws -> PortableAccountArchive {
-        let plaintext = try openArchivePayload(archive, passphrase: passphrase)
+    static func openPortableArchive(_ archive: EncryptedPortableAccountArchive, secret: String) throws -> PortableAccountArchive {
+        let plaintext = try openArchivePayload(archive, secret: secret)
         return try JSONDecoder().decode(PortableAccountArchive.self, from: plaintext)
     }
 

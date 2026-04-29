@@ -10,6 +10,18 @@ function randomBase64(bytes = 32) {
   return randomBytes(bytes).toString("base64");
 }
 
+function randomIntInclusive(minimum, maximum) {
+  const range = maximum - minimum + 1;
+  const maxRandom = 2 ** 32;
+  const limit = maxRandom - (maxRandom % range);
+  while (true) {
+    const value = randomBytes(4).readUInt32BE(0);
+    if (value < limit) {
+      return minimum + (value % range);
+    }
+  }
+}
+
 function expectStatus(label, response, expected) {
   if (!expected.includes(response.statusCode)) {
     const details = typeof response.body === "string" ? response.body : JSON.stringify(response.body);
@@ -56,7 +68,7 @@ function fakeSignalBundle() {
     kyberPreKeySignature: randomBase64(),
     preKeyId: 1,
     preKeyPublic: randomBase64(),
-    registrationId: (randomBytes(2).readUInt16BE(0) % 32767) + 1,
+    registrationId: randomIntInclusive(1, 32767),
     signedPreKeyId: 1,
     signedPreKeyPublic: randomBase64(),
     signedPreKeySignature: randomBase64(),
@@ -390,14 +402,15 @@ async function run({ origin }) {
     body: replacementIdentity,
     method: "POST",
   });
-  expectStatus("register rebound username", reboundRegistration, [200]);
+  expectStatus("register rebound username", reboundRegistration, [409]);
   ensure(
-    reboundRegistration.body?.user?.id === replacementIdentity.userId,
-    "Username rebinding after account deletion did not issue the replacement user id."
+    typeof reboundRegistration.body?.error === "string" &&
+      reboundRegistration.body.error.includes("reserved by a deactivated relay account"),
+    "Deleted account username should remain reserved until an operator explicitly unblocks or deletes the relay record."
   );
 
   console.log(
-    "recovery-lifecycle: account-reset signatures were enforced, old sessions/devices were invalidated, sync continuity held, and username rebinding after delete succeeded"
+    "recovery-lifecycle: account-reset signatures were enforced, old sessions/devices were invalidated, sync continuity held, and deleted usernames stay reserved until operator cleanup"
   );
 }
 

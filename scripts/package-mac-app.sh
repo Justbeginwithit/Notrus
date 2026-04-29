@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PACKAGE_PATH="$ROOT_DIR/native/macos/NotrusMac"
 APP_PATH="$ROOT_DIR/dist/Notrus.app"
 ZIP_PATH="$ROOT_DIR/dist/Notrus.zip"
-APP_VERSION="${NOTRUS_MAC_VERSION:-0.3.3}"
-RELEASE_LABEL="${NOTRUS_RELEASE_LABEL:-beta4}"
+APP_VERSION="${NOTRUS_MAC_VERSION:-0.3.4}"
+RELEASE_LABEL="${NOTRUS_RELEASE_LABEL:-beta5}"
 VERSIONED_ZIP_PATH="$ROOT_DIR/dist/Notrus-$APP_VERSION-$RELEASE_LABEL.zip"
 CONFIGURATION="${NOTRUS_MAC_CONFIGURATION:-debug}"
 PROTOCOL_HELPER_PATH="$ROOT_DIR/native/protocol-core/target/release/notrus-protocol-core"
@@ -14,7 +14,21 @@ CODESIGN_IDENTITY="${NOTRUS_CODESIGN_IDENTITY:--}"
 ENTITLEMENTS_PATH="$ROOT_DIR/config/macos/NotrusMac.entitlements"
 NOTARY_PROFILE="${NOTRUS_NOTARY_PROFILE:-}"
 RELEASE_MODE="${NOTRUS_RELEASE_MODE:-local}"
-BUILD_NUMBER="${NOTRUS_BUILD_NUMBER:-$(date +%Y%m%d%H%M%S)}"
+BUILD_COUNTER_DIR="$ROOT_DIR/.build/build-counters"
+BUILD_COUNTER_FILE="$BUILD_COUNTER_DIR/macos-$APP_VERSION-$RELEASE_LABEL.counter"
+if [[ -n "${NOTRUS_BUILD_COUNTER:-}" ]]; then
+  BUILD_COUNTER="$NOTRUS_BUILD_COUNTER"
+else
+  mkdir -p "$BUILD_COUNTER_DIR"
+  PREVIOUS_BUILD_COUNTER="0"
+  if [[ -f "$BUILD_COUNTER_FILE" ]]; then
+    PREVIOUS_BUILD_COUNTER="$(cat "$BUILD_COUNTER_FILE")"
+  fi
+  BUILD_COUNTER="$((PREVIOUS_BUILD_COUNTER + 1))"
+  printf "%s" "$BUILD_COUNTER" > "$BUILD_COUNTER_FILE"
+fi
+BUILD_NUMBER="${NOTRUS_BUILD_NUMBER:-$BUILD_COUNTER}"
+BUILD_ID="${NOTRUS_BUILD_ID:-$APP_VERSION-$RELEASE_LABEL+mac.$BUILD_COUNTER.$(date -u +%Y%m%d%H%M%S)}"
 ICONSET_DIR=""
 LOCAL_VERIFICATION_PLIST_VALUE="<false/>"
 FALLBACK_REPO_ICON_PATH="$ROOT_DIR/config/macos/AppIcon.icns"
@@ -109,6 +123,10 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
   <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
   <string>$BUILD_NUMBER</string>
+  <key>NotrusBuildCounter</key>
+  <string>$BUILD_COUNTER</string>
+  <key>NotrusBuildID</key>
+  <string>$BUILD_ID</string>
   <key>NotrusLocalVerificationBuild</key>
   $LOCAL_VERIFICATION_PLIST_VALUE
   <key>LSMinimumSystemVersion</key>

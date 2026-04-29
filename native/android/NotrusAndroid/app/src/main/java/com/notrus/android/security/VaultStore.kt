@@ -41,7 +41,9 @@ class VaultStore(context: Context) {
 
     fun saveCatalog(catalog: IdentityCatalog) {
         val serialized = catalogToJson(catalog).toString()
-        preferences.edit().putString(KEY_CATALOG, encrypt(serialized)).apply()
+        if (!preferences.edit().putString(KEY_CATALOG, encrypt(serialized)).commit()) {
+            error("The encrypted Android vault could not be written durably.")
+        }
     }
 
     fun inventorySnapshot(): VaultInventorySnapshot =
@@ -224,6 +226,7 @@ class VaultStore(context: Context) {
         JSONObject()
             .put("hiddenAt", record.hiddenAt)
             .put("localTitle", record.localTitle)
+            .put("mutedAt", record.mutedAt)
             .put("purgedAt", record.purgedAt)
             .put("lastProcessedMessageId", record.lastProcessedMessageId)
             .put("processedMessageCount", record.processedMessageCount)
@@ -246,6 +249,7 @@ class VaultStore(context: Context) {
         return ConversationThreadRecord(
             hiddenAt = json.optString("hiddenAt").ifBlank { null },
             localTitle = json.optString("localTitle").ifBlank { null },
+            mutedAt = json.optString("mutedAt").ifBlank { null },
             purgedAt = json.optString("purgedAt").ifBlank { null },
             lastProcessedMessageId = json.optString("lastProcessedMessageId").ifBlank { null },
             messageCache = messageCache,
@@ -260,6 +264,14 @@ class VaultStore(context: Context) {
             .put("body", message.body)
             .put("hidden", message.hidden)
             .put("status", message.status)
+            .put("relayCounter", message.relayCounter)
+            .put("relayCreatedAt", message.relayCreatedAt)
+            .put("relayEpoch", message.relayEpoch)
+            .put("relayMessageKind", message.relayMessageKind)
+            .put("relayProtocol", message.relayProtocol)
+            .put("relaySenderId", message.relaySenderId)
+            .put("relayThreadId", message.relayThreadId)
+            .put("relayWireMessage", message.relayWireMessage)
             .put("attachments", JSONArray().apply {
                 message.attachments.forEach { put(attachmentReferenceToJson(it)) }
             })
@@ -274,6 +286,14 @@ class VaultStore(context: Context) {
             attachments = attachments,
             body = json.optString("body"),
             hidden = json.optBoolean("hidden", false),
+            relayCounter = json.takeIf { it.has("relayCounter") && !it.isNull("relayCounter") }?.optInt("relayCounter"),
+            relayCreatedAt = json.optString("relayCreatedAt").ifBlank { null },
+            relayEpoch = json.takeIf { it.has("relayEpoch") && !it.isNull("relayEpoch") }?.optInt("relayEpoch"),
+            relayMessageKind = json.optString("relayMessageKind").ifBlank { null },
+            relayProtocol = json.optString("relayProtocol").ifBlank { null },
+            relaySenderId = json.optString("relaySenderId").ifBlank { null },
+            relayThreadId = json.optString("relayThreadId").ifBlank { null },
+            relayWireMessage = json.optString("relayWireMessage").ifBlank { null },
             status = json.optString("status", "ok"),
         )
     }

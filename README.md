@@ -38,6 +38,7 @@ Read before use:
 - [ROADMAP.md](ROADMAP.md)
 - [ATTESTATION_SETUP.md](ATTESTATION_SETUP.md)
 - [ADMIN_GUI.md](ADMIN_GUI.md)
+- [docs/fdroid/README.md](docs/fdroid/README.md)
 - [LICENSE](LICENSE)
 
 ## What Notrus Uses
@@ -126,11 +127,11 @@ Artifacts:
 
 - `dist/Notrus.app`
 - `dist/Notrus.zip`
-- `dist/Notrus-0.3.3-beta4.zip`
+- `dist/Notrus-0.3.4-beta5.zip`
 - `dist/android/Notrus-debug.apk`
 - `dist/android/Notrus-release.apk`
-- `dist/android/Notrus-0.3.3-beta4-debug.apk`
-- `dist/android/Notrus-0.3.3-beta4-release.apk`
+- `dist/android/Notrus-0.3.4-beta5-debug.apk`
+- `dist/android/Notrus-0.3.4-beta5-release.apk`
 
 ## Current Product Boundary
 
@@ -164,30 +165,48 @@ Attestation posture:
 - default startup does not enforce vendor attestation checks
 - see [ATTESTATION_SETUP.md](ATTESTATION_SETUP.md) for current state, env flags, and strict-mode setup
 
+Android distribution posture:
+
+- the Android Gradle configuration does not include Firebase, Google Play Services, ads, closed-source analytics SDKs, or crash-reporting SDKs
+- draft F-Droid metadata is prepared but disabled until a matching public release tag exists and the fdroiddata signing/build recipe is finalized
+- F-Droid preparation notes live in [docs/fdroid/README.md](docs/fdroid/README.md)
+
 Current native-client boundary:
 
 - direct chats work across macOS and Android
 - encrypted mailbox attachments on the standards direct path work on both native clients
 - standards-group messaging works across macOS and Android through native MLS or compatible fanout transport, depending on client state
 - both clients can read and send compatible standards-group traffic on the current relay policy path
+- Android background notifications use local sync/decrypt before rendering previews. Hidden content remains the default, and the optional reliable background delivery mode keeps an authenticated foreground service listener active instead of putting plaintext in any relay wake-up payload.
 
-## Recovery And Device Movement
+## Recovery And Chat Backup
 
-The supported account-move path is native recovery export/import.
+Notrus separates account recovery from chat-history transfer.
+
+Account recovery restores the person:
 
 1. Export a recovery archive from a trusted device.
 2. Move it through a trusted channel.
 3. Import it on the replacement device.
 4. Revoke the old device or perform a recovery-authorized reset if needed.
 
-Current beta limitation:
+Encrypted chat backup restores the past:
 
-- recovery import/export restores account identity material, but does not yet provide full historical plaintext chat restoration across devices. Older chats may appear as unavailable/invalid local plaintext on the destination device.
+1. Export an encrypted chat backup from the active profile.
+2. Use a separate strong backup passphrase.
+3. Restore it only after the matching account exists locally.
+4. Treat it as more sensitive than account recovery because it contains local message history, session/group state, cached decrypted messages, and attachment references.
+
+Boundary:
+
+- account recovery archives restore account identity material and future messaging continuity, not full readable history
+- chat backups are the explicit path for old local message history and do not include the account recovery secret
+- attachment blobs are not silently bundled into recovery archives
 
 ## Known Beta Limitations
 
-- Android notifications are implemented in code and UI but still require reliability polish on some devices/OS scheduling conditions.
-- Recovery import/export is currently identity-first and not a full conversation-history migration path.
+- Android notifications now have notification channels, WorkManager fallback sync, boot/package rescheduling, tap-to-thread routing, dedupe by message id, and an optional reliable foreground background listener. Real devices can still delay or stop delivery under OEM battery policy, denied notification permission, data saver, or force-stop conditions, so this area still needs broader device burn-in before stable.
+- Account recovery and chat backup are now separate features. Full cross-platform restored-history behavior should still be tested carefully before relying on it for irreplaceable archives.
 
 ## Verification Commands
 

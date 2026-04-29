@@ -250,6 +250,117 @@ struct RecoveryTransferArchive: Codable, Equatable {
     let identity: PortableArchiveIdentitySnapshot
 }
 
+private enum FlexibleJSONValue: Codable, Equatable {
+    case array([FlexibleJSONValue])
+    case bool(Bool)
+    case null
+    case number(Double)
+    case object([String: FlexibleJSONValue])
+    case string(String)
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode([FlexibleJSONValue].self) {
+            self = .array(value)
+        } else {
+            self = .object(try container.decode([String: FlexibleJSONValue].self))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .array(let value): try container.encode(value)
+        case .bool(let value): try container.encode(value)
+        case .null: try container.encodeNil()
+        case .number(let value): try container.encode(value)
+        case .object(let value): try container.encode(value)
+        case .string(let value): try container.encode(value)
+        }
+    }
+}
+
+struct ChatBackupIdentitySnapshot: Codable, Equatable {
+    let id: String
+    let username: String
+    let displayName: String
+    let createdAt: String
+    let recoveryFingerprint: String
+    let standardsMlsKeyPackage: PublicMlsKeyPackage?
+    let standardsMlsState: String?
+    let standardsSignalBundle: PublicSignalBundle?
+    let standardsSignalState: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case username
+        case displayName
+        case createdAt
+        case recoveryFingerprint
+        case standardsMlsKeyPackage
+        case standardsMlsState
+        case standardsSignalBundle
+        case standardsSignalState
+    }
+
+    init(identity: LocalIdentity) {
+        self.id = identity.id
+        self.username = identity.username
+        self.displayName = identity.displayName
+        self.createdAt = identity.createdAt
+        self.recoveryFingerprint = identity.recoveryFingerprint
+        self.standardsMlsKeyPackage = identity.standardsMlsKeyPackage
+        self.standardsMlsState = identity.standardsMlsState
+        self.standardsSignalBundle = identity.standardsSignalBundle
+        self.standardsSignalState = identity.standardsSignalState
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        username = try container.decode(String.self, forKey: .username)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        createdAt = try container.decode(String.self, forKey: .createdAt)
+        recoveryFingerprint = try container.decode(String.self, forKey: .recoveryFingerprint)
+        standardsMlsKeyPackage = try container.decodeIfPresent(PublicMlsKeyPackage.self, forKey: .standardsMlsKeyPackage)
+        standardsMlsState = try Self.decodeFlexibleStateString(container, key: .standardsMlsState)
+        standardsSignalBundle = try container.decodeIfPresent(PublicSignalBundle.self, forKey: .standardsSignalBundle)
+        standardsSignalState = try Self.decodeFlexibleStateString(container, key: .standardsSignalState)
+    }
+
+    private static func decodeFlexibleStateString(
+        _ container: KeyedDecodingContainer<CodingKeys>,
+        key: CodingKeys
+    ) throws -> String? {
+        if let string = try? container.decodeIfPresent(String.self, forKey: key) {
+            return string
+        }
+        guard let value = try? container.decodeIfPresent(FlexibleJSONValue.self, forKey: key) else {
+            return nil
+        }
+        let data = try JSONEncoder().encode(value)
+        return String(data: data, encoding: .utf8)
+    }
+}
+
+struct ChatBackupArchive: Codable, Equatable {
+    let version: Int
+    let exportedAt: String
+    let sourcePlatform: String
+    let backupKind: String
+    let identity: ChatBackupIdentitySnapshot
+    let attachmentsIncluded: Bool
+    let threadRecords: [String: ThreadStoreRecord]
+}
+
 enum ImportedRecoveryArchivePayload: Equatable {
     case portable(PortableAccountArchive)
     case transfer(RecoveryTransferArchive)
@@ -457,6 +568,13 @@ struct RelayMessage: Codable, Identifiable, Hashable {
     }
 }
 
+struct RelayReadReceipt: Codable, Hashable {
+    let userId: String
+    let threadId: String
+    let lastReadMessageId: String
+    let readAt: String
+}
+
 struct RelayThread: Codable, Identifiable, Hashable {
     let deliveryCapability: String?
     let deliveryCapabilityExpiresAt: String?
@@ -472,6 +590,7 @@ struct RelayThread: Codable, Identifiable, Hashable {
     let createdBy: String
     let participantIds: [String]
     let envelopes: [RelayEnvelope]
+    let readReceipts: [RelayReadReceipt]?
     let messages: [RelayMessage]
 
     enum CodingKeys: String, CodingKey {
@@ -489,6 +608,7 @@ struct RelayThread: Codable, Identifiable, Hashable {
         case createdBy
         case participantIds
         case envelopes
+        case readReceipts
         case messages
     }
 }
@@ -865,6 +985,15 @@ struct MessagePayload: Codable, Hashable {
     }
 }
 
+struct ReadReceiptRequest: Codable, Hashable {
+    let lastReadMessageId: String
+    let readAt: String
+}
+
+struct ReadReceiptResponse: Codable, Hashable {
+    let ok: Bool
+}
+
 struct AbuseReportRequest: Codable, Hashable {
     let createdAt: String
     let messageIds: [String]
@@ -1071,6 +1200,7 @@ struct ThreadStoreRecord: Codable, Hashable {
     var currentState: PairwiseThreadState?
     var groupTreeState: GroupTreeThreadState?
     var hiddenAt: String?
+    var mutedAt: String?
     var purgedAt: String?
     var lastProcessedMessageId: String?
     var localTitle: String?
@@ -1086,6 +1216,7 @@ struct ThreadStoreRecord: Codable, Hashable {
         case currentState
         case groupTreeState = "state"
         case hiddenAt
+        case mutedAt
         case purgedAt
         case lastProcessedMessageId
         case localTitle
@@ -1106,6 +1237,7 @@ struct ThreadStoreRecord: Codable, Hashable {
         currentState: PairwiseThreadState? = nil,
         groupTreeState: GroupTreeThreadState? = nil,
         hiddenAt: String? = nil,
+        mutedAt: String? = nil,
         purgedAt: String? = nil,
         lastProcessedMessageId: String? = nil,
         localTitle: String? = nil,
@@ -1120,6 +1252,7 @@ struct ThreadStoreRecord: Codable, Hashable {
         self.currentState = currentState
         self.groupTreeState = groupTreeState
         self.hiddenAt = hiddenAt
+        self.mutedAt = mutedAt
         self.purgedAt = purgedAt
         self.lastProcessedMessageId = lastProcessedMessageId
         self.localTitle = localTitle
@@ -1149,6 +1282,7 @@ struct ThreadStoreRecord: Codable, Hashable {
             currentState: currentState,
             groupTreeState: groupTreeState,
             hiddenAt: try container.decodeIfPresent(String.self, forKey: .hiddenAt),
+            mutedAt: try container.decodeIfPresent(String.self, forKey: .mutedAt),
             purgedAt: try container.decodeIfPresent(String.self, forKey: .purgedAt),
             lastProcessedMessageId: try container.decodeIfPresent(String.self, forKey: .lastProcessedMessageId),
             localTitle: try container.decodeIfPresent(String.self, forKey: .localTitle),

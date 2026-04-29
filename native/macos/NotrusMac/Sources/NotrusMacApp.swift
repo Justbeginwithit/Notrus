@@ -666,6 +666,25 @@ struct WorkspaceView: View {
         }
     }
 
+    private var filteredArchivedThreads: [ConversationThread] {
+        let query = threadSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            return model.archivedThreads
+        }
+        let normalized = query.lowercased()
+        return model.archivedThreads.filter { thread in
+            if thread.title.lowercased().contains(normalized) {
+                return true
+            }
+            if thread.participants.contains(where: {
+                $0.displayName.lowercased().contains(normalized) || $0.username.lowercased().contains(normalized)
+            }) {
+                return true
+            }
+            return false
+        }
+    }
+
     private var sidebar: some View {
         List {
             if let identity = model.currentIdentity {
@@ -688,6 +707,10 @@ struct WorkspaceView: View {
                         Label("\(model.visibleContactRecords.count)", systemImage: "person.2")
                         Spacer()
                         Label("\(model.threads.count)", systemImage: "message")
+                        if !model.archivedThreads.isEmpty {
+                            Spacer()
+                            Label("\(model.archivedThreads.count)", systemImage: "archivebox")
+                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -752,23 +775,61 @@ struct WorkspaceView: View {
 
     private var threadList: some View {
         Group {
-            if model.threads.isEmpty {
+            if model.threads.isEmpty && model.archivedThreads.isEmpty {
                 ThreadEmptyState()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(20)
             } else {
                 List(selection: $model.selectedThreadID) {
-                    ForEach(filteredThreads) { thread in
-                        ThreadRow(thread: thread)
-                            .tag(thread.id)
-                            .contextMenu {
-                                Button("Open") {
-                                    model.selectedThreadID = thread.id
+                    Section("Chats") {
+                        ForEach(filteredThreads) { thread in
+                            ThreadRow(thread: thread)
+                                .tag(thread.id)
+                                .contextMenu {
+                                    Button("Open") {
+                                        model.selectedThreadID = thread.id
+                                    }
+                                    Button("Archive Conversation") {
+                                        Task {
+                                            await model.archiveConversation(thread.id)
+                                        }
+                                    }
+                                    Button(model.isThreadMuted(thread.id) ? "Unmute Notifications" : "Mute Notifications") {
+                                        model.toggleConversationMuted(thread.id)
+                                    }
+                                    Button("Delete Local History", role: .destructive) {
+                                        Task {
+                                            await model.deleteConversationLocally(thread.id)
+                                        }
+                                    }
                                 }
-                                Button("Delete Local Conversation", role: .destructive) {
-                                    model.deleteConversationLocally(thread.id)
-                                }
+                        }
+                    }
+                    if !filteredArchivedThreads.isEmpty {
+                        Section("Archived") {
+                            ForEach(filteredArchivedThreads) { thread in
+                                ThreadRow(thread: thread)
+                                    .tag(thread.id)
+                                    .contextMenu {
+                                        Button("Open") {
+                                            model.selectedThreadID = thread.id
+                                        }
+                                        Button("Restore Conversation") {
+                                            Task {
+                                                await model.restoreConversation(thread.id)
+                                            }
+                                        }
+                                        Button(model.isThreadMuted(thread.id) ? "Unmute Notifications" : "Mute Notifications") {
+                                            model.toggleConversationMuted(thread.id)
+                                        }
+                                        Button("Delete Local History", role: .destructive) {
+                                            Task {
+                                                await model.deleteConversationLocally(thread.id)
+                                            }
+                                        }
+                                    }
                             }
+                        }
                     }
                 }
                 .listStyle(.inset)
@@ -1258,10 +1319,14 @@ struct ConversationView: View {
                         MessageBubble(
                             message: message,
                             isCurrentUser: message.senderId == model.currentIdentity?.id,
+                            readReceiptSummary: model.readReceiptSummary(for: message, in: thread),
                             saveAttachment: { reference in
                                 Task {
                                     await model.saveAttachment(reference, in: thread)
                                 }
+                            },
+                            deleteMessage: {
+                                model.deleteMessageLocally(threadId: thread.id, messageId: message.id)
                             }
                         )
                     }
@@ -1279,9 +1344,6 @@ struct ConversationView: View {
                     Task {
                         await model.chooseAttachments()
                     }
-                },
-                importDroppedProviders: { providers in
-                    model.importDroppedAttachments(from: providers)
                 },
                 removeAttachment: { attachmentId in
                     model.removePendingAttachment(attachmentId)
@@ -1307,7 +1369,44 @@ struct ConversationHeader: View {
                 Spacer(minLength: 8)
                 ProtocolBadge(label: thread.protocolLabel, supported: thread.supported)
                 Button {
-                    model.deleteConversationLocally(thread.id)
+                    Task {
+                        if model.isThreadArchived(thread.id) {
+                            await model.restoreConversation(thread.id)
+                        } else {
+                            await model.archiveConversation(thread.id)
+                        }
+                    }
+                } label: {
+                    Image(systemName: model.isThreadArchived(thread.id) ? "tray.and.arrow.up" : "archivebox")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(model.isThreadArchived(thread.id) ? "Restore conversation" : "Archive conversation")
+                .disabled(model.isBusy)
+                Button {
+                    model.toggleConversationMuted(thread.id)
+                } label: {
+                    Image(systemName: model.isThreadMuted(thread.id) ? "bell.slash.fill" : "bell")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(model.isThreadMuted(thread.id) ? "Unmute notifications" : "Mute notifications")
+                .disabled(model.isBusy)
+                Button {
+                    Task {
+                        await model.resetConversationSession(thread.id)
+                    }
+                } label: {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Reset secure session and publish fresh pre-key bundle")
+                .disabled(model.isBusy)
+                Button {
+                    Task {
+                        await model.deleteConversationLocally(thread.id)
+                    }
                 } label: {
                     Image(systemName: "trash")
                         .foregroundStyle(.secondary)
@@ -1367,7 +1466,9 @@ struct MetadataChip: View {
 struct MessageBubble: View {
     let message: DecryptedMessage
     let isCurrentUser: Bool
+    let readReceiptSummary: String?
     let saveAttachment: (SecureAttachmentReference) -> Void
+    let deleteMessage: () -> Void
 
     var body: some View {
         HStack {
@@ -1424,6 +1525,12 @@ struct MessageBubble: View {
                     }
                     .padding(.top, 2)
                 }
+
+                if let readReceiptSummary {
+                    Text(readReceiptSummary)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
             }
             .foregroundStyle(bubbleForeground)
             .padding(13)
@@ -1434,9 +1541,8 @@ struct MessageBubble: View {
             )
             .frame(maxWidth: 680, alignment: .leading)
             .contextMenu {
-                Button("Copy Message") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(message.body, forType: .string)
+                Button("Delete Locally", role: .destructive) {
+                    deleteMessage()
                 }
             }
 
@@ -1465,10 +1571,8 @@ struct ComposerBar: View {
     let canSend: Bool
     let supported: Bool
     let chooseAttachments: () -> Void
-    let importDroppedProviders: ([NSItemProvider]) -> Void
     let removeAttachment: (String) -> Void
     let send: () -> Void
-    @State private var isDropTargeted = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1545,12 +1649,8 @@ struct ComposerBar: View {
         .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(isDropTargeted ? NotrusPalette.accent : .clear, lineWidth: 1.5)
+                .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
         )
-        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted) { providers in
-            importDroppedProviders(providers)
-            return true
-        }
     }
 }
 
@@ -1950,6 +2050,7 @@ struct AccountCenterSheet: View {
         case privacy
         case recovery
         case advanced
+        case about
 
         var id: String { rawValue }
 
@@ -1962,19 +2063,29 @@ struct AccountCenterSheet: View {
             case .privacy: return "Privacy"
             case .recovery: return "Recovery"
             case .advanced: return "Advanced"
+            case .about: return "About"
             }
         }
+    }
+
+    private enum RecoveryImportMode {
+        case accountRecovery
+        case chatBackup
     }
 
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @AppStorage("NotrusMac.appearanceMode") private var appearanceModeRaw = AppAppearanceMode.system.rawValue
     @AppStorage("NotrusMac.lockOnBackground") private var lockOnBackground = true
-    @State private var exportPassphrase = ""
-    @State private var importPassphrase = ""
+    @State private var exportArchiveSecret = ""
+    @State private var importArchiveSecret = ""
+    @State private var chatBackupSecret = ""
+    @State private var chatBackupImportSecret = ""
     @State private var preparedExport: PreparedRecoveryArchiveExport?
+    @State private var preparedChatBackupExport: PreparedChatBackupExport?
     @State private var exportPickerPresented = false
     @State private var importPickerPresented = false
+    @State private var recoveryImportMode: RecoveryImportMode = .accountRecovery
     @State private var selectedSection: AccountCenterSection = .general
 
     var body: some View {
@@ -2046,6 +2157,24 @@ struct AccountCenterSheet: View {
                                         .font(.system(size: 14, weight: .semibold, design: .rounded))
                                         .foregroundStyle(NotrusPalette.ink)
                                     Text(model.privacyModeEnabled ? "Adds a small randomized delay to routine network actions, usually about 0.1 to 0.9 seconds depending on the action." : "Uses the fastest routine relay behavior.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .toggleStyle(.switch)
+
+                            Toggle(isOn: Binding(
+                                get: { model.sendReadReceiptsToOthers },
+                                set: { enabled in
+                                    model.sendReadReceiptsToOthers = enabled
+                                    model.persistReadReceiptsPreference()
+                                }
+                            )) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Send read confirmations")
+                                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(NotrusPalette.ink)
+                                    Text("When enabled, contacts can see when this Mac has opened their latest message in a conversation.")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -2178,6 +2307,28 @@ struct AccountCenterSheet: View {
                         }
                         }
 
+                        if selectedSection == .about {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Text("About Notrus")
+                                .font(.title3.weight(.semibold))
+                            Text("Notrus is an independent, self-hostable encrypted messenger project. It is not affiliated with Apple, Android, Signal, MLS, ngrok, or any third-party protocol or platform provider.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 8) {
+                                aboutRow(label: "Version", value: NotrusBuildInfo.version)
+                                aboutRow(label: "Build", value: NotrusBuildInfo.buildNumber)
+                                aboutRow(label: "Build counter", value: NotrusBuildInfo.buildCounter)
+                                aboutRow(label: "Build ID", value: NotrusBuildInfo.buildID)
+                            }
+                            Link(destination: NotrusBuildInfo.githubURL) {
+                                Label("Open GitHub repository", systemImage: "arrow.up.right.square")
+                            }
+                            .buttonStyle(SecondaryActionButtonStyle())
+                        }
+                        .padding(18)
+                        .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        }
+
                         if selectedSection == .security {
                         VStack(alignment: .leading, spacing: 14) {
                             Text("Device Integrity")
@@ -2215,7 +2366,7 @@ struct AccountCenterSheet: View {
                         .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                         }
 
-                        if selectedSection == .devices || selectedSection == .relay {
+                        if selectedSection == .devices {
                         VStack(alignment: .leading, spacing: 14) {
                             Text("Linked Devices")
                                 .font(.title3.weight(.semibold))
@@ -2283,6 +2434,57 @@ struct AccountCenterSheet: View {
                                     }
                                 }
                             }
+                        }
+                        .padding(18)
+                        .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        }
+
+                        if selectedSection == .relay {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Text("Relay")
+                                .font(.title3.weight(.semibold))
+
+                            Text("Connection, discovery, transparency, and routing status for the relay this Mac is using.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+
+                            AdaptiveFieldRow {
+                                LabeledField(label: "Relay URL") {
+                                    TextField("https://relay.example.com", text: $model.relayOrigin)
+                                        .textFieldStyle(.roundedBorder)
+                                        .onChange(of: model.relayOrigin) { _ in
+                                            model.persistRelayOrigin()
+                                        }
+                                }
+                            } trailing: {
+                                LabeledField(label: "Witness origins") {
+                                    TextField("Comma-separated witness origins", text: $model.witnessOriginsText, axis: .vertical)
+                                        .lineLimit(1...2)
+                                        .textFieldStyle(.roundedBorder)
+                                        .onChange(of: model.witnessOriginsText) { _ in
+                                            model.persistWitnessOrigins()
+                                        }
+                                }
+                            }
+
+                            HStack(spacing: 10) {
+                                MetadataChip(label: TransportSecurityPolicy.isLocalDevelopmentOrigin(model.relayOrigin) ? "Local dev HTTP" : "HTTPS required")
+                                if model.privacyModeEnabled {
+                                    MetadataChip(label: "Privacy mode")
+                                }
+                                MetadataChip(label: model.protocolProgramSummary.label)
+                            }
+
+                            inventoryRow(label: "Relay origin", value: model.relayOrigin, trailing: nil)
+                            inventoryRow(label: "Discovery", value: model.relayHealthStatus?.directoryDiscoveryMode?.replacingOccurrences(of: "-", with: " ") ?? "Pending sync", trailing: nil)
+                            inventoryRow(label: "Protocol policy", value: model.relayHealthStatus?.protocolPolicy?.note ?? model.protocolProgramSummary.note, trailing: model.protocolProgramSummary.mode.rawValue)
+                            inventoryRow(label: "Transparency entries", value: "\(model.relayHealthStatus?.transparency?.entryCount ?? model.transparency.entries.count)", trailing: model.relayHealthStatus?.transparency?.signer?.keyId)
+                            inventoryRow(label: "Relay totals", value: "\(model.relayHealthStatus?.users ?? model.users.count) users · \(model.relayHealthStatus?.threads ?? model.threads.count) threads", trailing: nil)
+                            inventoryRow(label: "Abuse controls", value: model.relayHealthStatus?.abuseControls?.powRequiredForRemoteUntrustedClients == true ? "Proof-of-work for remote untrusted clients" : "Standard rate limits", trailing: model.relayHealthStatus?.abuseControls?.powDifficultyBits.map { "\($0) bits" })
+
+                            Text("Routine traffic uses session tokens plus mailbox handles/capabilities where supported. The relay tab is separate from linked-device management so relay health and device trust do not get mixed together.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         .padding(18)
                         .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -2388,24 +2590,25 @@ struct AccountCenterSheet: View {
 
                         if selectedSection == .recovery {
                         VStack(alignment: .leading, spacing: 14) {
-                            Text("Recovery Archive")
+                            Text("Account Recovery")
                                 .font(.title3.weight(.semibold))
 
-                            Text("Device-vault profiles can be exported as encrypted recovery archives and imported on another Mac later. Legacy hardware-pinned profiles stay local-only.")
+                            Text("Recover account restores the account identity and future messaging continuity. It does not restore readable old chat history; use chat backup for that.")
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
 
-                            LabeledField(label: "Export passphrase") {
-                                SecureField("At least 8 characters", text: $exportPassphrase)
+                            LabeledField(label: "Export secret") {
+                                SecureField("At least 8 characters", text: $exportArchiveSecret)
                                     .textFieldStyle(.roundedBorder)
                             }
 
                             Button("Export Active Profile") {
                                 Task {
-                                    guard let prepared = await model.prepareCurrentAccountExport(passphrase: exportPassphrase) else {
+                                    guard let prepared = await model.prepareCurrentAccountExport(secret: exportArchiveSecret) else {
                                         return
                                     }
                                     preparedExport = prepared
+                                    preparedChatBackupExport = nil
                                     exportPickerPresented = true
                                 }
                             }
@@ -2414,16 +2617,81 @@ struct AccountCenterSheet: View {
 
                             Divider()
 
-                            LabeledField(label: "Import passphrase") {
-                                SecureField("Passphrase used when the archive was created", text: $importPassphrase)
+                            LabeledField(label: "Import secret") {
+                                SecureField("Secret used when the archive was created", text: $importArchiveSecret)
                                     .textFieldStyle(.roundedBorder)
                             }
 
                             Button("Import Recovery Archive") {
+                                guard importArchiveSecret.trimmingCharacters(in: .whitespacesAndNewlines).count >= 8 else {
+                                    model.errorMessage = "Use the recovery archive secret before choosing a file."
+                                    return
+                                }
+                                recoveryImportMode = .accountRecovery
                                 importPickerPresented = true
                             }
                             .buttonStyle(SecondaryActionButtonStyle())
                             .disabled(model.isBusy)
+
+                            Text("Recovery archives contain account identity/recovery material only. Treat them as sensitive, but do not expect past messages to reappear from this import alone.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(18)
+                        .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: 14) {
+                            Text("Encrypted Chat Backup")
+                                .font(.title3.weight(.semibold))
+
+                            Text("Restore chat backup brings back local message history, cached decrypted messages, group/session state, and attachment references for the active account.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+
+                            StatusStrip(
+                                text: "Chat backups contain message history. Use a separate strong secret and store the file more carefully than an account recovery archive.",
+                                tone: .warning
+                            )
+
+                            LabeledField(label: "Backup secret") {
+                                SecureField("Separate backup secret", text: $chatBackupSecret)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+
+                            Button("Export Chat Backup") {
+                                Task {
+                                    guard let prepared = await model.prepareCurrentChatBackupExport(secret: chatBackupSecret) else {
+                                        return
+                                    }
+                                    preparedChatBackupExport = prepared
+                                    preparedExport = nil
+                                    exportPickerPresented = true
+                                }
+                            }
+                            .buttonStyle(PrimaryActionButtonStyle())
+                            .disabled(model.currentIdentity == nil || model.isBusy)
+
+                            Divider()
+
+                            LabeledField(label: "Restore secret") {
+                                SecureField("Secret used for the chat backup", text: $chatBackupImportSecret)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+
+                            Button("Restore Chat Backup") {
+                                guard chatBackupImportSecret.trimmingCharacters(in: .whitespacesAndNewlines).count >= 8 else {
+                                    model.errorMessage = "Use the chat-backup secret before choosing a file."
+                                    return
+                                }
+                                recoveryImportMode = .chatBackup
+                                importPickerPresented = true
+                            }
+                            .buttonStyle(SecondaryActionButtonStyle())
+                            .disabled(model.currentIdentity == nil || model.isBusy)
+
+                            Text("Restore requires the matching account to already exist locally. It will not replace identity/device trust.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         .padding(18)
                         .background(NotrusPalette.panelStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -2436,21 +2704,27 @@ struct AccountCenterSheet: View {
         }
         .fileExporter(
             isPresented: $exportPickerPresented,
-            document: preparedExport?.document,
+            document: preparedExport?.document ?? preparedChatBackupExport?.document,
             contentType: .json,
-            defaultFilename: preparedExport?.defaultFileName
+            defaultFilename: preparedExport?.defaultFileName ?? preparedChatBackupExport?.defaultFileName
         ) { result in
             if let preparedExport {
                 model.completePreparedExport(preparedExport, result: result)
-            }
-            if case .success = result {
-                exportPassphrase = ""
+                if case .success = result {
+                    exportArchiveSecret = ""
+                }
+            } else if let preparedChatBackupExport {
+                model.completePreparedChatBackupExport(preparedChatBackupExport, result: result)
+                if case .success = result {
+                    chatBackupSecret = ""
+                }
             }
             preparedExport = nil
+            preparedChatBackupExport = nil
         }
         .fileImporter(
             isPresented: $importPickerPresented,
-            allowedContentTypes: [.json],
+            allowedContentTypes: [.json, .data, .text, .item],
             allowsMultipleSelection: false
         ) { result in
             switch result {
@@ -2458,10 +2732,19 @@ struct AccountCenterSheet: View {
                 guard let url = urls.first else {
                     return
                 }
-                let passphrase = importPassphrase
-                importPassphrase = ""
-                Task {
-                    await model.importAccount(from: url, passphrase: passphrase)
+                switch recoveryImportMode {
+                case .accountRecovery:
+                    let archiveSecret = importArchiveSecret
+                    importArchiveSecret = ""
+                    Task {
+                        await model.importAccount(from: url, secret: archiveSecret)
+                    }
+                case .chatBackup:
+                    let archiveSecret = chatBackupImportSecret
+                    chatBackupImportSecret = ""
+                    Task {
+                        await model.importChatBackup(from: url, secret: archiveSecret)
+                    }
                 }
             case .failure(let error):
                 let nsError = error as NSError
@@ -2487,6 +2770,18 @@ struct AccountCenterSheet: View {
     }
 
     @ViewBuilder
+    private func aboutRow(label: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            Text(value)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .textSelection(.enabled)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+
     private func inventoryRow(label: String, value: String, trailing: String?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)

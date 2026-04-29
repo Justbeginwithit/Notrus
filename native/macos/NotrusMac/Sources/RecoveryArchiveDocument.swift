@@ -25,3 +25,9 @@ struct PreparedRecoveryArchiveExport {
     let displayName: String
     let document: RecoveryArchiveDocument
 }
+
+struct PreparedChatBackupExport {
+    let defaultFileName: String
+    let displayName: String
+    let document: RecoveryArchiveDocument
+}

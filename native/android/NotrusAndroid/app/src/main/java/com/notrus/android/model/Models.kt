@@ -195,6 +195,14 @@ data class RelayThread(
     val participantIds: List<String>,
     val attachmentCount: Int,
     val messages: List<RelayMessage>,
+    val readReceipts: List<RelayReadReceipt> = emptyList(),
+)
+
+data class RelayReadReceipt(
+    val userId: String,
+    val threadId: String,
+    val lastReadMessageId: String,
+    val readAt: String,
 )
 
 data class RelayAbuseControls(
@@ -339,12 +347,21 @@ data class CachedMessageState(
     val attachments: List<SecureAttachmentReference> = emptyList(),
     val body: String,
     val hidden: Boolean = false,
+    val relayCounter: Int? = null,
+    val relayCreatedAt: String? = null,
+    val relayEpoch: Int? = null,
+    val relayMessageKind: String? = null,
+    val relayProtocol: String? = null,
+    val relaySenderId: String? = null,
+    val relayThreadId: String? = null,
+    val relayWireMessage: String? = null,
     val status: String = "ok",
 )
 
 data class ConversationThreadRecord(
     val hiddenAt: String? = null,
     val localTitle: String? = null,
+    val mutedAt: String? = null,
     val purgedAt: String? = null,
     val messageCache: Map<String, CachedMessageState> = emptyMap(),
     val lastProcessedMessageId: String? = null,
@@ -447,6 +464,21 @@ data class DecryptedMessage(
     val senderId: String,
     val senderName: String,
     val status: String,
+    val readReceiptSummary: String? = null,
+)
+
+data class AndroidContactTrustRecord(
+    val blockedAt: String? = null,
+    val displayName: String,
+    val lastReportedAt: String? = null,
+    val lastVerifiedAt: String? = null,
+    val observedFingerprint: String,
+    val observedPrekeyFingerprint: String? = null,
+    val status: String = "unverified",
+    val trustedFingerprint: String? = null,
+    val trustedPrekeyFingerprint: String? = null,
+    val userId: String,
+    val username: String,
 )
 
 data class ConversationThread(
@@ -464,6 +496,8 @@ data class ConversationThread(
     val lastActivityAt: String,
     val supported: Boolean,
     val warning: String? = null,
+    val archived: Boolean = false,
+    val muted: Boolean = false,
 )
 
 enum class NotificationContentVisibility(
@@ -498,6 +532,7 @@ data class AppUiState(
     val relayOriginInput: String = "",
     val privacyModeEnabled: Boolean = false,
     val notificationsEnabled: Boolean = true,
+    val notificationRealtimeEnabled: Boolean = true,
     val notificationContentVisibility: String = "hidden",
     val notificationLockscreenVisibility: String = "private",
     val notificationGroupPreviewEnabled: Boolean = false,
@@ -507,6 +542,7 @@ data class AppUiState(
     val visualEffectsEnabled: Boolean = true,
     val colorThemePreset: String = "ocean",
     val themeMode: String = "system",
+    val sendReadReceiptsToOthers: Boolean = true,
     val deviceInventory: LocalDeviceInventory = LocalDeviceInventory.empty,
     val currentDevice: DeviceDescriptor? = null,
     val currentIdentity: LocalIdentity? = null,
@@ -519,23 +555,28 @@ data class AppUiState(
     val integrityReport: ClientIntegrityReport? = null,
     val transparency: TransparencyVerificationResult = TransparencyVerificationResult.empty,
     val threads: List<ConversationThread> = emptyList(),
+    val archivedThreads: List<ConversationThread> = emptyList(),
     val selectedThreadId: String? = null,
     val relayHealth: RelayHealth? = null,
     val vaultLocked: Boolean = false,
     val isBusy: Boolean = false,
+    val showSyncProgress: Boolean = false,
     val statusMessage: String = "Android native client ready.",
     val errorMessage: String? = null,
     val onboardingDisplayName: String = "",
     val onboardingUsername: String = "",
     val exportPassphrase: String = "",
     val importPassphrase: String = "",
+    val chatBackupPassphrase: String = "",
+    val chatBackupImportPassphrase: String = "",
     val directoryQuery: String = "",
     val draftText: String = "",
     val pendingAttachments: List<LocalAttachmentDraft> = emptyList(),
     val witnessOriginsInput: String = "",
     val protocolEngineMessage: String = "Signal direct messaging and MLS-compatible group transport are linked into this Android build.",
     val transparencyResetAvailable: Boolean = false,
+    val contactTrustRecords: List<AndroidContactTrustRecord> = emptyList(),
 )
 
 val AppUiState.selectedThread: ConversationThread?
-    get() = threads.firstOrNull { it.id == selectedThreadId }
+    get() = (threads + archivedThreads).firstOrNull { it.id == selectedThreadId }
