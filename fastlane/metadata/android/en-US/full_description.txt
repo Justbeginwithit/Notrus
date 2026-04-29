@@ -1,0 +1,21 @@
+Notrus is a self-hostable encrypted messenger client for Android.
+
+It is designed to talk to a Notrus relay that stores ciphertext, attachment
+blobs, transparency data, device records, and abuse-control state.
+
+The relay is not trusted with message plaintext, attachment plaintext, private
+identity keys, local ratchet state, or recovery secrets. The relay still sees
+account identifiers, public keys, linked-device metadata, opaque routing
+handles, delivery capabilities, timestamps, traffic patterns, and conversation
+membership needed for routing.
+
+Direct chats use a standards Signal path. Group chats use MLS-compatible group
+delivery where supported by the current client state. Android local secrets use
+Android Keystore or StrongBox-aware storage where available.
+
+Notrus is beta software. It has not received an external security audit, does
+not provide anonymity, and should not be described as proven secure. Read the
+threat model, security documentation, and beta limitations before relying on it.
+
+The current Android build configuration does not include Firebase, Google Play
+Services, ads, closed-source analytics SDKs, or crash-reporting SDKs.
