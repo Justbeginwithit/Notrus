@@ -72,12 +72,24 @@ struct RelayClient {
         return try decodeResponse(data: data, response: response, as: type)
     }
 
-    private func perform(_ request: URLRequest, retriedForPow: Bool = false) async throws -> (Data, URLResponse) {
+    private func perform(
+        _ request: URLRequest,
+        retriedForPow: Bool = false,
+        retriedForTransport: Bool = false
+    ) async throws -> (Data, URLResponse) {
         let data: Data
         let response: URLResponse
         do {
             (data, response) = try await TransportSecurityPolicy.session().data(for: request)
         } catch let error as URLError {
+            if !retriedForTransport, isTransientTransportError(error) {
+                try? await Task.sleep(nanoseconds: 350_000_000)
+                return try await perform(
+                    request,
+                    retriedForPow: retriedForPow,
+                    retriedForTransport: true
+                )
+            }
             throw RelayClientError.requestFailed(describeTransportError(error))
         } catch {
             throw RelayClientError.requestFailed("Could not connect to the relay at \(origin). \(error.localizedDescription)")
@@ -95,10 +107,23 @@ struct RelayClient {
             let nonce = try solve(challenge: challenge)
             retried.setValue(challenge.token, forHTTPHeaderField: challenge.tokenField ?? "X-Notrus-Pow-Token")
             retried.setValue(nonce, forHTTPHeaderField: challenge.nonceField ?? "X-Notrus-Pow-Nonce")
-            return try await perform(retried, retriedForPow: true)
+            return try await perform(
+                retried,
+                retriedForPow: true,
+                retriedForTransport: retriedForTransport
+            )
         }
 
         return (data, response)
+    }
+
+    private func isTransientTransportError(_ error: URLError) -> Bool {
+        switch error.code {
+        case .secureConnectionFailed, .networkConnectionLost, .timedOut, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
     }
 
     private func describeTransportError(_ error: URLError) -> String {
@@ -107,6 +132,8 @@ struct RelayClient {
             return "Could not connect to the relay at \(origin). Check that the relay URL is correct and that the tunnel is online."
         case .appTransportSecurityRequiresSecureConnection:
             return "macOS rejected the relay connection because it is not using HTTPS."
+        case .secureConnectionFailed:
+            return "Could not connect to the relay at \(origin). The TLS handshake failed after retrying; verify the HTTPS tunnel is the current ngrok endpoint and try again."
         default:
             return "Could not connect to the relay at \(origin). \(error.localizedDescription)"
         }
@@ -318,6 +345,20 @@ struct RelayClient {
             body: message,
             authorizationToken: deliveryCapability,
             decode: MessagePostResponse.self
+        )
+    }
+
+    func postReadReceipt(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        receipt: ReadReceiptRequest
+    ) async throws -> ReadReceiptResponse {
+        try await send(
+            "/api/mailboxes/\(mailboxHandle)/read-receipts",
+            method: "POST",
+            body: receipt,
+            authorizationToken: deliveryCapability,
+            decode: ReadReceiptResponse.self
         )
     }
 

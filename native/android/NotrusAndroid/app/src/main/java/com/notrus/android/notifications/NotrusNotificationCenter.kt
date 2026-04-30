@@ -1,6 +1,7 @@
 package com.notrus.android.notifications
 
 import android.Manifest
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -21,33 +22,46 @@ data class ThreadNotificationPayload(
     val senderName: String?,
     val messagePreview: String?,
     val messageCount: Int,
+    val messageIds: List<String>,
     val isGroup: Boolean,
 )
 
 object NotrusNotificationCenter {
     const val CHANNEL_MESSAGES = "notrus_messages_v1"
+    const val CHANNEL_BACKGROUND_SERVICE = "notrus_background_service_v1"
     const val EXTRA_THREAD_ID = "notrus_notification_thread_id"
     const val EXTRA_IDENTITY_ID = "notrus_notification_identity_id"
+    const val SERVICE_NOTIFICATION_ID = 18_412
 
     fun ensureChannels(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return
         }
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        val existing = manager.getNotificationChannel(CHANNEL_MESSAGES)
-        if (existing != null) {
-            return
+        if (manager.getNotificationChannel(CHANNEL_MESSAGES) == null) {
+            val channel = NotificationChannel(
+                CHANNEL_MESSAGES,
+                "Notrus messages",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "Background secure-message notifications."
+                enableVibration(true)
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
+            }
+            manager.createNotificationChannel(channel)
         }
-        val channel = NotificationChannel(
-            CHANNEL_MESSAGES,
-            "Notrus messages",
-            NotificationManager.IMPORTANCE_DEFAULT,
-        ).apply {
-            description = "Background secure-message notifications."
-            enableVibration(true)
-            lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
+        if (manager.getNotificationChannel(CHANNEL_BACKGROUND_SERVICE) == null) {
+            val serviceChannel = NotificationChannel(
+                CHANNEL_BACKGROUND_SERVICE,
+                "Notrus background delivery",
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply {
+                description = "Keeps secure-message wake-up delivery active in the background."
+                setShowBadge(false)
+                lockscreenVisibility = android.app.Notification.VISIBILITY_SECRET
+            }
+            manager.createNotificationChannel(serviceChannel)
         }
-        manager.createNotificationChannel(channel)
     }
 
     fun postThreadNotification(
@@ -55,18 +69,18 @@ object NotrusNotificationCenter {
         settings: NotrusNotificationPreferences,
         privacyModeEnabled: Boolean,
         payload: ThreadNotificationPayload,
-    ) {
+    ): Boolean {
         if (!settings.enabled) {
-            return
+            return false
         }
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) {
-            return
+            return false
         }
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            return
+            return false
         }
         ensureChannels(context)
         val contentVisibility = NotificationContentVisibility.fromKey(settings.contentVisibility)
@@ -126,6 +140,32 @@ object NotrusNotificationCenter {
         }
 
         NotificationManagerCompat.from(context).notify(notificationId(payload), builder.build())
+        return true
+    }
+
+    fun buildServiceNotification(context: Context): Notification {
+        ensureChannels(context)
+        val launchIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            SERVICE_NOTIFICATION_ID,
+            launchIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return NotificationCompat.Builder(context, CHANNEL_BACKGROUND_SERVICE)
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle("Notrus background delivery")
+            .setContentText("Listening for secure-message wake-ups.")
+            .setContentIntent(pendingIntent)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .build()
     }
 
     private fun notificationId(payload: ThreadNotificationPayload): Int =

@@ -12,6 +12,9 @@ val releaseKeystorePassword = System.getenv("NOTRUS_ANDROID_KEYSTORE_PASSWORD")
 val releaseKeyAlias = System.getenv("NOTRUS_ANDROID_KEY_ALIAS")
 val releaseKeyPassword = System.getenv("NOTRUS_ANDROID_KEY_PASSWORD")
 val releaseMode = (System.getenv("NOTRUS_RELEASE_MODE") ?: "local").lowercase()
+val notrusVersionName = System.getenv("NOTRUS_ANDROID_VERSION") ?: "0.3.4-beta5"
+val notrusBuildCounter = System.getenv("NOTRUS_ANDROID_BUILD_COUNTER") ?: "dev"
+val notrusBuildId = System.getenv("NOTRUS_ANDROID_BUILD_ID") ?: "${notrusVersionName}+android.dev"
 val enforceProductionSigning = releaseMode == "production"
 val playIntegrityCloudProjectNumber =
     (System.getenv("NOTRUS_PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER") ?: "0").toLongOrNull() ?: 0L
@@ -29,9 +32,11 @@ android {
         applicationId = "com.notrus.android"
         minSdk = 31
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.3.3-beta4"
+        versionCode = 7
+        versionName = notrusVersionName
         buildConfigField("String", "DEFAULT_RELAY_ORIGIN", "\"$defaultRelayOrigin\"")
+        buildConfigField("String", "NOTRUS_BUILD_COUNTER", "\"$notrusBuildCounter\"")
+        buildConfigField("String", "NOTRUS_BUILD_ID", "\"$notrusBuildId\"")
         buildConfigField("long", "PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER", "${playIntegrityCloudProjectNumber}L")
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -60,7 +65,7 @@ android {
             versionNameSuffix = "-debug"
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

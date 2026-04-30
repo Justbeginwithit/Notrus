@@ -613,7 +613,7 @@ function requireSessionCapability(request, response) {
     return null;
   }
 
-  const user = store.users[session.userId];
+  const user = getStoredUser(session.userId);
   if (!user || user.deactivatedAt) {
     SESSION_CAPABILITIES.delete(token);
     sendError(request, response, 401, "The current relay account is no longer active.");
@@ -642,7 +642,7 @@ function requireSessionDeviceRecord(session, request, response) {
     sendError(request, response, 403, "This relay operation requires a device-bound session.");
     return null;
   }
-  const user = store.users[session.userId];
+  const user = getStoredUser(session.userId);
   const device = findUserDevice(user, session.deviceId);
   if (!device) {
     sendError(request, response, 403, "That device is not linked to this account.");
@@ -803,10 +803,12 @@ function requireMailboxCapability(request, response, mailboxHandle) {
 
 function isTrustedLocalAddress(ipAddress) {
   const value = String(ipAddress ?? "").trim().toLowerCase();
+  const ipv4Loopback = [127, 0, 0, 1].join(".");
+  const ipv6MappedLoopback = ["::ffff", ipv4Loopback].join(":");
   return (
-    value === "127.0.0.1" ||
+    value === ipv4Loopback ||
     value === "::1" ||
-    value === "::ffff:127.0.0.1" ||
+    value === ipv6MappedLoopback ||
     value.startsWith("10.") ||
     value.startsWith("192.168.") ||
     value.startsWith("fd") ||
@@ -816,11 +818,14 @@ function isTrustedLocalAddress(ipAddress) {
 }
 
 function base64urlEncode(value) {
-  return Buffer.from(value)
+  let encoded = Buffer.from(value)
     .toString("base64")
     .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
+    .replace(/\//g, "_");
+  while (encoded.endsWith("=")) {
+    encoded = encoded.slice(0, -1);
+  }
+  return encoded;
 }
 
 function base64urlDecode(value) {
@@ -1065,6 +1070,28 @@ async function sendStaticAsset(request, response, pathname) {
 
 function isNonEmptyString(value, maxLength = 500) {
   return typeof value === "string" && value.trim().length > 0 && value.trim().length <= maxLength;
+}
+
+function isSafeObjectKey(value, maxLength = 500) {
+  if (!isNonEmptyString(value, maxLength)) {
+    return false;
+  }
+  const key = value.trim();
+  return key !== "__proto__" && key !== "constructor" && key !== "prototype";
+}
+
+function getStoredUser(userId) {
+  if (!isSafeObjectKey(userId, 120) || !Object.hasOwn(store.users, userId)) {
+    return null;
+  }
+  return store.users[userId];
+}
+
+function getStoredThread(threadId) {
+  if (!isSafeObjectKey(threadId, 160) || !Object.hasOwn(store.threads, threadId)) {
+    return null;
+  }
+  return store.threads[threadId];
 }
 
 function normalizeUsername(value) {
@@ -1914,8 +1941,8 @@ function haveSameMembers(left, right) {
     return false;
   }
 
-  const sortedLeft = [...left].sort();
-  const sortedRight = [...right].sort();
+  const sortedLeft = [...left].sort((a, b) => String(a).localeCompare(String(b)));
+  const sortedRight = [...right].sort((a, b) => String(a).localeCompare(String(b)));
   return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
@@ -2413,6 +2440,9 @@ function sanitizeThreadForUser(thread, userId) {
     createdBy: thread.createdBy,
     participantIds: [...thread.participantIds],
     envelopes: thread.envelopes.filter((envelope) => envelope.toUserId === userId).sort(sortByDateAscending),
+    readReceipts: Object.values(thread.readReceipts ?? {})
+      .filter((receipt) => thread.participantIds.includes(receipt.userId))
+      .sort((left, right) => left.userId.localeCompare(right.userId)),
     messages: [...thread.messages]
       .map((message) => ({
         ...message,
@@ -2625,7 +2655,7 @@ function adminUserRecord(user, { threadCountByUser = new Map() } = {}) {
 }
 
 function purgeUserFromRelay(userId) {
-  const user = store.users[userId];
+  const user = getStoredUser(userId);
   if (!user) {
     return null;
   }
@@ -2692,7 +2722,7 @@ function userBucketKey(userId, suffix = "user") {
 
 function scopedUsersFor(userId) {
   return relatedUserIdsFor(userId)
-    .map((relatedUserId) => store.users[relatedUserId])
+    .map((relatedUserId) => getStoredUser(relatedUserId))
     .filter(Boolean)
     .sort((left, right) => left.username.localeCompare(right.username))
     .map((user) => publicUserRecord(user, { viewerUserId: userId }));
@@ -2710,7 +2740,7 @@ function scopedThreadsFor(userId) {
 }
 
 function publicDeviceSnapshot(userId, currentDeviceId = null) {
-  const user = store.users[userId];
+  const user = getStoredUser(userId);
   if (!user) {
     return {
       deviceEvents: [],
@@ -2731,14 +2761,14 @@ function sendSseEvent(response, eventName, payload) {
 
 function sseListenerStillAuthorized(userId, listener) {
   if (!listener?.sessionToken) {
-    return true;
+    return false;
   }
   const session = SESSION_CAPABILITIES.get(listener.sessionToken);
   if (!session || session.kind !== "session" || Date.now() >= session.expiresAtMs || session.userId !== userId) {
     SESSION_CAPABILITIES.delete(listener.sessionToken);
     return false;
   }
-  const user = store.users[userId];
+  const user = getStoredUser(userId);
   if (!user || user.deactivatedAt) {
     return false;
   }
@@ -2781,28 +2811,18 @@ function broadcastSync(userIds, reason, threadId = null) {
   }
 }
 
-function handleSse(request, response, url, { allowLegacyQuery = false } = {}) {
+function handleSse(request, response) {
   const ip = privacyPreservingRateLimitKey(getRequestIp(request));
   const sessionToken = readAuthorizationToken(request);
-  let session = null;
-  let userId = null;
-  if (sessionToken) {
-    session = requireSessionCapability(request, response);
-    if (!session) {
-      return;
-    }
-    userId = session.userId;
-  } else if (allowLegacyQuery && ENABLE_LEGACY_API_ROUTES) {
-    const legacyUserId = url.searchParams.get("userId");
-    if (!isNonEmptyString(legacyUserId, 120) || !store.users[legacyUserId]) {
-      sendError(request, response, 400, "A known userId is required to open the event stream.");
-      return;
-    }
-    userId = legacyUserId;
-  } else {
+  if (!sessionToken) {
     sendError(request, response, 401, "A current Notrus session token is required.");
     return;
   }
+  const session = requireSessionCapability(request, response);
+  if (!session) {
+    return;
+  }
+  const userId = session.userId;
 
   if (
     !enforceRateLimits(
@@ -2838,7 +2858,7 @@ function handleSse(request, response, url, { allowLegacyQuery = false } = {}) {
   };
   listeners.add(listener);
   sendSseEvent(response, "hello", {
-    mode: sessionToken ? "session-v2" : "legacy-query",
+    mode: "session-v2",
     timestamp: new Date().toISOString(),
   });
 
@@ -2866,7 +2886,7 @@ async function handleRegister(request, response) {
   const body = await readJsonBody(request);
   const username = isNonEmptyString(body.username, 30) ? normalizeUsername(body.username) : "";
   const displayName = isNonEmptyString(body.displayName, 60) ? body.displayName.trim() : "";
-  const requestedUserId = isNonEmptyString(body.userId, 120) ? body.userId.trim() : null;
+  const requestedUserId = isSafeObjectKey(body.userId, 120) ? body.userId.trim() : null;
   const fingerprint = isNonEmptyString(body.fingerprint, 120) ? body.fingerprint.trim() : "";
   const prekeyCreatedAt = isNonEmptyString(body.prekeyCreatedAt, 60) ? body.prekeyCreatedAt.trim() : null;
   const prekeyFingerprint = isNonEmptyString(body.prekeyFingerprint, 120) ? body.prekeyFingerprint.trim() : null;
@@ -2901,7 +2921,7 @@ async function handleRegister(request, response) {
   }
 
   const existingByUsername = Object.values(store.users).find((user) => user.username === username);
-  const existingById = requestedUserId ? store.users[requestedUserId] : null;
+  const existingById = requestedUserId ? getStoredUser(requestedUserId) : null;
   const existingByIdentityMaterial = Object.values(store.users).find((user) =>
     storedIdentityMaterialMatchesRegistration(user, body, { fingerprint, recoveryFingerprint })
   );
@@ -3206,6 +3226,10 @@ async function handleRegister(request, response) {
     userRecord = existingByIdentityMaterial;
   } else {
     const userId = requestedUserId ?? randomUUID();
+    if (!isSafeObjectKey(userId, 120)) {
+      sendError(request, response, 400, "User id contains unsupported characters.");
+      return;
+    }
     userRecord = {
       id: userId,
       username,
@@ -3280,18 +3304,19 @@ async function handleSync(request, response, url, options = {}) {
 
   pruneExpiredArtifacts();
 
-  if (options.forcedUserId && isNonEmptyString(requestedUserId, 120) && requestedUserId !== options.forcedUserId) {
+  if (options.forcedUserId && isSafeObjectKey(requestedUserId, 120) && requestedUserId !== options.forcedUserId) {
     sendError(request, response, 403, "The requested sync account does not match the authenticated session.");
     return;
   }
 
-  if (!isNonEmptyString(userId, 120) || !store.users[userId]) {
+  const syncUser = getStoredUser(userId);
+  if (!syncUser) {
     sendError(request, response, 404, "Unknown user.");
     return;
   }
 
   if (requestDeviceId) {
-    const device = findUserDevice(store.users[userId], requestDeviceId);
+    const device = findUserDevice(syncUser, requestDeviceId);
     if (!device) {
       sendError(request, response, 403, "That device is not linked to this account.");
       return;
@@ -3318,8 +3343,8 @@ async function handleSync(request, response, url, options = {}) {
   }
 
   if (integrityObservation) {
-    store.users[userId].integrityObservation = integrityObservation;
-    store.users[userId].updatedAt = new Date().toISOString();
+    syncUser.integrityObservation = integrityObservation;
+    syncUser.updatedAt = new Date().toISOString();
     await queuePersist();
   }
 
@@ -3333,7 +3358,7 @@ async function handleSync(request, response, url, options = {}) {
     .map((thread) => sanitizeThreadForUser(thread, userId));
 
   const users = relatedUserIdsFor(userId)
-    .map((relatedUserId) => store.users[relatedUserId])
+    .map((relatedUserId) => getStoredUser(relatedUserId))
     .filter(Boolean)
     .sort((left, right) => left.username.localeCompare(right.username))
     .map((user) => publicUserRecord(user, { viewerUserId: userId }));
@@ -3352,7 +3377,7 @@ async function handleDirectorySearch(request, response, url) {
   const instanceKey = getRequestInstanceKey(request);
   const integrityObservation = sanitizeIntegrityObservation(parseIntegrityReportHeader(request));
 
-  if (!isNonEmptyString(userId, 120) || !store.users[userId]) {
+  if (!getStoredUser(userId)) {
     sendError(request, response, 404, "Unknown user.");
     return;
   }
@@ -3406,8 +3431,8 @@ async function handleReportAbuse(request, response) {
   }
 
   const body = await readJsonBody(request);
-  const reporterId = isNonEmptyString(body.reporterId, 120) ? body.reporterId.trim() : session.userId;
-  const targetUserId = isNonEmptyString(body.targetUserId, 120) ? body.targetUserId.trim() : "";
+  const reporterId = isSafeObjectKey(body.reporterId, 120) ? body.reporterId.trim() : session.userId;
+  const targetUserId = isSafeObjectKey(body.targetUserId, 120) ? body.targetUserId.trim() : "";
   const createdAt = isNonEmptyString(body.createdAt, 60) ? body.createdAt.trim() : "";
   const reason = isNonEmptyString(body.reason, 80) ? body.reason.trim() : "";
   const threadId = isNonEmptyString(body.threadId, 160) ? body.threadId.trim() : null;
@@ -3418,12 +3443,12 @@ async function handleReportAbuse(request, response) {
     return;
   }
 
-  if (!store.users[reporterId]) {
+  if (!getStoredUser(reporterId)) {
     sendError(request, response, 404, "The reporting user is unknown.");
     return;
   }
 
-  if (!targetUserId || !store.users[targetUserId]) {
+  if (!targetUserId || !getStoredUser(targetUserId)) {
     sendError(request, response, 404, "The reported user is unknown.");
     return;
   }
@@ -3434,7 +3459,7 @@ async function handleReportAbuse(request, response) {
   }
 
   if (threadId) {
-    const thread = store.threads[threadId];
+    const thread = getStoredThread(threadId);
     if (!thread) {
       sendError(request, response, 404, "The reported thread is unknown.");
       return;
@@ -3494,12 +3519,12 @@ async function handleRevokeDevice(request, response) {
   }
 
   const body = await readJsonBody(request);
-  const userId = isNonEmptyString(body.userId, 120) ? body.userId.trim() : "";
+  const userId = isSafeObjectKey(body.userId, 120) ? body.userId.trim() : "";
   const signerDeviceId = isNonEmptyString(body.signerDeviceId, 120) ? body.signerDeviceId.trim() : "";
   const targetDeviceId = isNonEmptyString(body.targetDeviceId, 120) ? body.targetDeviceId.trim() : "";
   const createdAt = isNonEmptyString(body.createdAt, 60) ? body.createdAt.trim() : "";
   const signature = isNonEmptyString(body.signature, 20_000) ? body.signature.trim() : "";
-  const user = store.users[userId];
+  const user = getStoredUser(userId);
 
   if (!user) {
     sendError(request, response, 404, "Unknown user.");
@@ -3583,7 +3608,7 @@ async function handleDeleteAccount(request, response) {
     return;
   }
 
-  const user = store.users[session.userId];
+  const user = getStoredUser(session.userId);
   if (!user) {
     sendError(request, response, 404, "The current relay account is unknown.");
     return;
@@ -3626,7 +3651,7 @@ async function handleAccountReset(request, response) {
   }
 
   const body = await readJsonBody(request);
-  const userId = isNonEmptyString(body.userId, 120) ? body.userId.trim() : "";
+  const userId = isSafeObjectKey(body.userId, 120) ? body.userId.trim() : "";
   const username = isNonEmptyString(body.username, 30) ? normalizeUsername(body.username) : "";
   const displayName = isNonEmptyString(body.displayName, 60) ? body.displayName.trim() : "";
   const fingerprint = isNonEmptyString(body.fingerprint, 120) ? body.fingerprint.trim() : "";
@@ -3637,7 +3662,7 @@ async function handleAccountReset(request, response) {
   const recoveryFingerprint = isNonEmptyString(body.recoveryFingerprint, 120) ? body.recoveryFingerprint.trim() : "";
   const recoverySignature = isNonEmptyString(body.recoverySignature, 20_000) ? body.recoverySignature.trim() : "";
   const deviceEnrollment = body.device ? sanitizeDeviceEnrollment(body.device) : null;
-  const existing = store.users[userId];
+  const existing = getStoredUser(userId);
 
   if (!existing || existing.username !== username) {
     sendError(request, response, 404, "The requested account reset target is unknown.");
@@ -3780,7 +3805,7 @@ async function handleCreateThread(request, response, options = {}) {
   }
 
   const body = options.body ?? await readJsonBody(request);
-  const threadId = isNonEmptyString(body.id, 120) ? body.id.trim() : "";
+  const threadId = isSafeObjectKey(body.id, 120) ? body.id.trim() : "";
   const createdAt = isNonEmptyString(body.createdAt, 60) ? body.createdAt.trim() : "";
   const title = isNonEmptyString(body.title, 90) ? body.title.trim() : "";
   const createdBy = options.actorUserId ?? (isNonEmptyString(body.createdBy, 120) ? body.createdBy.trim() : "");
@@ -3792,7 +3817,7 @@ async function handleCreateThread(request, response, options = {}) {
   const envelopes = Array.isArray(body.envelopes) ? body.envelopes : [];
   const protocolSpec = getProtocolSpec(protocol);
 
-  if (!threadId || store.threads[threadId]) {
+  if (!threadId || getStoredThread(threadId)) {
     sendError(request, response, 409, "Thread id is missing or already exists.");
     return;
   }
@@ -3802,7 +3827,7 @@ async function handleCreateThread(request, response, options = {}) {
     return;
   }
 
-  if (!store.users[createdBy]) {
+  if (!getStoredUser(createdBy)) {
     sendError(request, response, 404, "Thread creator is unknown.");
     return;
   }
@@ -3852,7 +3877,7 @@ async function handleCreateThread(request, response, options = {}) {
     return;
   }
 
-  if (!dedupedParticipants.every((userId) => store.users[userId])) {
+  if (!dedupedParticipants.every((userId) => getStoredUser(userId))) {
     sendError(request, response, 404, "One or more participants do not exist.");
     return;
   }
@@ -3967,6 +3992,7 @@ async function handleCreateThread(request, response, options = {}) {
     envelopes: sanitizedEnvelopes.sort(sortByDateAscending),
     attachments: [],
     messages: [],
+    readReceipts: {},
   };
 
   await queuePersist();
@@ -3982,7 +4008,7 @@ async function handlePostMessage(request, response, threadId, options = {}) {
     return;
   }
 
-  const thread = store.threads[threadId];
+  const thread = getStoredThread(threadId);
   if (!thread) {
     sendError(request, response, 404, "Thread not found.");
     return;
@@ -4114,7 +4140,7 @@ async function handlePostMessage(request, response, threadId, options = {}) {
 
   if (
     sanitizedGroupCommit &&
-    !sanitizedGroupCommit.participantIds.every((participantId) => store.users[participantId])
+    !sanitizedGroupCommit.participantIds.every((participantId) => getStoredUser(participantId))
   ) {
     sendError(request, response, 404, "One or more members in the committed group state do not exist.");
     return;
@@ -4168,7 +4194,7 @@ async function handleUploadAttachment(request, response, threadId, options = {})
     return;
   }
 
-  const thread = store.threads[threadId];
+  const thread = getStoredThread(threadId);
   if (!thread) {
     sendError(request, response, 404, "Thread not found.");
     return;
@@ -4215,7 +4241,7 @@ async function handleUploadAttachment(request, response, threadId, options = {})
 }
 
 async function handleFetchAttachment(request, response, threadId, attachmentId, url, options = {}) {
-  const thread = store.threads[threadId];
+  const thread = getStoredThread(threadId);
   if (!thread) {
     sendError(request, response, 404, "Thread not found.");
     return;
@@ -4485,12 +4511,12 @@ async function handleAdminBlockUser(request, response, userId) {
     return;
   }
 
-  if (!isNonEmptyString(userId, 120) || !store.users[userId]) {
+  if (!getStoredUser(userId)) {
     sendError(request, response, 404, "That relay user is unknown.");
     return;
   }
 
-  const user = store.users[userId];
+  const user = getStoredUser(userId);
   if (user.deactivatedAt) {
     sendJson(request, response, 200, {
       alreadyDeactivated: true,
@@ -4529,7 +4555,7 @@ async function handleAdminDeleteUser(request, response, userId) {
     return;
   }
 
-  if (!isNonEmptyString(userId, 120) || !store.users[userId]) {
+  if (!getStoredUser(userId)) {
     sendError(request, response, 404, "That relay user is unknown.");
     return;
   }
@@ -4568,12 +4594,12 @@ async function handleAdminUnblockUser(request, response, userId) {
     return;
   }
 
-  if (!isNonEmptyString(userId, 120) || !store.users[userId]) {
+  if (!getStoredUser(userId)) {
     sendError(request, response, 404, "That relay user is unknown.");
     return;
   }
 
-  const user = store.users[userId];
+  const user = getStoredUser(userId);
   if (!user.deactivatedAt) {
     sendJson(request, response, 200, {
       alreadyActive: true,
@@ -4773,6 +4799,44 @@ async function handlePostMailboxMessage(request, response, mailboxHandle) {
   });
 }
 
+async function handlePostMailboxReadReceipt(request, response, mailboxHandle) {
+  const capability = requireMailboxCapability(request, response, mailboxHandle);
+  if (!capability) {
+    return;
+  }
+
+  const thread = getStoredThread(capability.threadId);
+  if (!thread || !thread.participantIds.includes(capability.userId)) {
+    sendError(request, response, 404, "Thread not found.");
+    return;
+  }
+
+  const body = await readJsonBody(request);
+  const lastReadMessageId = isNonEmptyString(body.lastReadMessageId, 120) ? body.lastReadMessageId.trim() : "";
+  const readAt = isNonEmptyString(body.readAt, 60) ? body.readAt.trim() : new Date().toISOString();
+
+  if (!lastReadMessageId || !thread.messages.some((message) => message.id === lastReadMessageId)) {
+    sendError(request, response, 400, "Read receipts must reference an existing message in this thread.");
+    return;
+  }
+
+  if (Number.isNaN(new Date(readAt).getTime())) {
+    sendError(request, response, 400, "A valid readAt timestamp is required.");
+    return;
+  }
+
+  thread.readReceipts = thread.readReceipts ?? {};
+  thread.readReceipts[capability.userId] = {
+    userId: capability.userId,
+    threadId: thread.id,
+    lastReadMessageId,
+    readAt,
+  };
+  await queuePersist();
+  broadcastSync(thread.participantIds.filter((userId) => userId !== capability.userId), "thread-read", thread.id);
+  sendJson(request, response, 200, { ok: true });
+}
+
 async function handleUploadMailboxAttachment(request, response, mailboxHandle) {
   const capability = requireMailboxCapability(request, response, mailboxHandle);
   if (!capability) {
@@ -4911,7 +4975,7 @@ async function requestListener(request, response) {
     }
 
     if (request.method === "GET" && pathname === "/api/events") {
-      handleSse(request, response, url, { allowLegacyQuery: false });
+      handleSse(request, response);
       return;
     }
 
@@ -4960,7 +5024,7 @@ async function requestListener(request, response) {
     }
 
     if (request.method === "GET" && pathname === "/events") {
-      handleSse(request, response, url, { allowLegacyQuery: true });
+      handleSse(request, response);
       return;
     }
 
@@ -5010,6 +5074,12 @@ async function requestListener(request, response) {
 
     if (request.method === "POST" && pathname === "/api/routing/threads") {
       await handleCreateThreadV2(request, response);
+      return;
+    }
+
+    const mailboxReadReceiptMatch = pathname.match(/^\/api\/mailboxes\/([^/]+)\/read-receipts$/);
+    if (request.method === "POST" && mailboxReadReceiptMatch) {
+      await handlePostMailboxReadReceipt(request, response, decodeURIComponent(mailboxReadReceiptMatch[1]));
       return;
     }
 

@@ -200,7 +200,7 @@ async function main() {
       "separate-device-transparency-endpoints",
     ],
     relayOrigin,
-    threadId: threadCreated.threadId,
+    threadCreated: Boolean(threadCreated.threadId),
   }, null, 2));
 }
 

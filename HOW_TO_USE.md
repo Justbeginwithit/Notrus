@@ -93,7 +93,7 @@ macOS:
 Android:
 
 - package with `npm run package:android-app`
-- install `dist/android/Notrus-0.3.3-beta4-release.apk`
+- install `dist/android/Notrus-0.3.4-beta5-release.apk`
   (or unversioned `dist/android/Notrus-release.apk`)
 
 ## 5. Create or import a profile
@@ -118,8 +118,31 @@ Optional:
 
 - enable privacy mode for randomized routine network delays
 - keep privacy mode off for lowest latency during debugging
+- on Android, keep Reliable background delivery enabled if you want near-realtime background wake-ups; Android will show a persistent low-priority Notrus background delivery notification while the listener is active
 
-## 7. Find contacts
+## 7. Android background notifications
+
+1. Open Settings > Notifications.
+2. Turn Notifications on.
+3. Grant Android notification permission when prompted.
+4. Keep Notification content on Hidden unless you explicitly want sender or preview text.
+5. Keep Reliable background delivery on for the best background behavior.
+
+How it works:
+
+- the foreground app uses authenticated relay events and silent sync
+- the background app uses WorkManager plus an optional foreground service listener
+- notification wake-ups never carry message plaintext
+- the app syncs the relay and decrypts locally before it can show sender or preview text
+- notification taps open the matching local conversation when the thread is still present
+
+Limits:
+
+- if Reliable background delivery is off, Android may delay polling
+- if the app is force-stopped, Android will not deliver normal background work until the user opens it again
+- OEM battery restrictions, denied notification permission, and data-saver policy can still delay notifications
+
+## 8. Find contacts
 
 Notrus discovery supports:
 
@@ -132,40 +155,71 @@ If search does not return a remote account:
 2. run sync on both clients
 3. retry search by username or invite code
 
-## 8. Start a direct chat
+## 9. Start a direct chat
 
 1. Search contact
 2. Select result
 3. Create thread
 4. Send message
 
-## 9. Group chats
+## 10. Group chats
 
 Standards-group messaging is available with native MLS plus compatibility fanout support.
 
 If a participant has no active MLS key package, clients can use standards-thread compatible fanout transport on the same thread protocol.
 
-## 10. Recovery export and import
+## 11. Account recovery and chat backup
 
-Export from a trusted device:
+Recover account:
 
 1. Open Account Center
-2. Export recovery archive
+2. Export account recovery archive
 3. Choose destination file
 4. Protect file and passphrase
 
 Import on replacement device:
 
-1. Choose import
+1. Choose Recover account
 2. Select archive
 3. Enter archive passphrase
 4. Complete local device setup
 
-Current limitation:
+Restore chat history:
 
-- import/export currently restores account identity state, not full historical plaintext transcript portability. Some old messages may remain unavailable on the destination device.
+1. First recover or create the matching account locally
+2. Choose Export chat backup on the old device
+3. Use a separate strong backup passphrase
+4. Choose Restore chat backup on the destination device
+5. Enter the backup passphrase
 
-## 11. Common recovery actions
+Important:
+
+- account recovery restores identity and future messaging continuity
+- chat backup restores old local message history and cached decrypted messages
+- chat backup does not include the account recovery secret
+- chat backups are more sensitive than recovery archives because they contain message history
+- attachment blobs are not silently bundled into account recovery
+
+Recommended full migration flow:
+
+1. On the old device, export account recovery.
+2. On the old device, export encrypted chat backup with a separate backup passphrase.
+3. On the new or reset device, import account recovery first.
+4. Sync once and confirm the same username/account is active.
+5. Restore encrypted chat backup second.
+6. Sync both devices before sending new messages.
+
+If a contact imported or reset their account:
+
+1. Open Security.
+2. Review the security-number change.
+3. Verify the contact only after comparing the safety number out of band.
+4. Sync once on both clients.
+5. If sending still fails, use Reset secure session in that chat on the sender device, then sync both clients.
+
+Do not repeatedly delete and recreate the conversation for identity-change recovery. Deleting local history is only for removing local messages from the device; it should not be used as the normal recovery path.
+
+## 12. Common recovery actions
 
 If transparency reports trust issues:
 
@@ -177,12 +231,29 @@ If local vault breaks on a device:
 - reset local vault
 - import recovery archive
 
+If messages become unreadable after an app update or account import:
+
+- first sync both devices
+- verify any pending security-number warning
+- use Reset secure session from the affected direct chat
+- sync both clients again
+- only restore chat backup if local history itself is missing
+
+If a chat was archived:
+
+- open Archived
+- choose Restore
+- sync once
+- the chat should stay in the normal Chats list after future syncs
+
+If a restored chat jumps back into Archived after sync, update to a build newer than the archive-state persistence fix in the unreleased notes.
+
 If device is lost:
 
 - revoke linked device
 - rotate or reset account state as needed
 
-## 12. Current beta boundaries
+## 13. Current beta boundaries
 
 Beta-ready:
 
@@ -193,10 +264,12 @@ Beta-ready:
 - direct messaging between macOS and Android
 - standards-group messaging with compatibility transport
 - admin relay GUI for operator account cleanup and reactivation
+- separate account recovery and encrypted chat backup flows
+- Android background notification plumbing with hidden-default previews, WorkManager fallback, and optional reliable foreground delivery
 
 Still required before stable:
 
 - sustained multi-operator real-world burn-in
 - external confidence boosters (independent review/audit, reproducibility maturity)
-- Android notification delivery reliability polish across broader device conditions
-- stronger cross-device conversation-history portability after import/export
+- Android notification delivery burn-in across broader OEM/device scheduling conditions
+- broader burn-in for cross-device restored chat backups, especially mixed macOS/Android histories

@@ -1,0 +1,6 @@
+Beta 0.3.3-beta4
+
+- Adds Android and macOS reliability fixes for account recovery, chat backup, archived conversations, and secure-session reset flows.
+- Keeps Android notification content hidden by default, with local sync/decrypt before optional previews.
+- Documents remaining beta limitations, including unaudited security status and operator-configured attestation enforcement.
+- Prepares draft F-Droid metadata and store descriptions without claiming the app is audited or proven secure.

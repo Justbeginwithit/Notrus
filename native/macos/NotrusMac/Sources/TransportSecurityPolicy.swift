@@ -16,8 +16,8 @@ enum TransportSecurityError: LocalizedError {
 
 enum TransportSecurityPolicy {
     private static let localDevelopmentHosts = Set(["127.0.0.1", "localhost", "::1"])
-    static let requestTimeout: TimeInterval = 12
-    static let resourceTimeout: TimeInterval = 20
+    static let requestTimeout: TimeInterval = 18
+    static let resourceTimeout: TimeInterval = 35
     static let witnessTimeout: TimeInterval = 5
 
     static func validatedRelayOrigin(_ origin: String) throws -> URL {
@@ -52,7 +52,7 @@ enum TransportSecurityPolicy {
 
     static func session() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.waitsForConnectivity = false
+        configuration.waitsForConnectivity = true
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         configuration.timeoutIntervalForRequest = requestTimeout

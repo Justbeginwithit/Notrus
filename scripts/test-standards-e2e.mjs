@@ -11,6 +11,7 @@ const ROOT_DIR = path.resolve(__dirname, "..");
 const HELPER_PATH = path.join(ROOT_DIR, "native", "protocol-core", "target", "release", "notrus-protocol-core");
 const RELAY_ORIGIN = process.env.NOTRUS_E2E_RELAY_ORIGIN ?? "http://127.0.0.1:3302";
 const RELAY_PORT = Number(new URL(RELAY_ORIGIN).port || 80);
+const SAFE_CHILD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 function assert(condition, message) {
   if (!condition) {
@@ -19,8 +20,8 @@ function assert(condition, message) {
 }
 
 function assertResponseKeys(payload, expectedKeys, message) {
-  const actual = Object.keys(payload).sort();
-  const expected = [...expectedKeys].sort();
+  const actual = Object.keys(payload).sort((a, b) => a.localeCompare(b));
+  const expected = [...expectedKeys].sort((a, b) => a.localeCompare(b));
   assert(JSON.stringify(actual) === JSON.stringify(expected), `${message} Expected ${expected.join(", ")}, got ${actual.join(", ")}.`);
 }
 
@@ -242,10 +243,11 @@ async function main() {
 
   const relayChild = useExistingRelay
     ? null
-    : spawn("node", ["server.js"], {
+    : spawn(process.execPath, ["server.js"], {
         cwd: tempRoot,
         env: {
           ...process.env,
+          PATH: SAFE_CHILD_PATH,
           NODE_ENV: "production",
           NOTRUS_ENABLE_DEVELOPMENT_COMPAT_ROUTES: "false",
           NOTRUS_ENABLE_LEGACY_API: "false",

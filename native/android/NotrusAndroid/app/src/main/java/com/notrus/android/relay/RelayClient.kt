@@ -21,6 +21,7 @@ import com.notrus.android.model.RelayHealth
 import com.notrus.android.model.RelayLinkedDevice
 import com.notrus.android.model.RelayMessage
 import com.notrus.android.model.RelayAttachment
+import com.notrus.android.model.RelayReadReceipt
 import com.notrus.android.model.RelaySecurityDevicesResponse
 import com.notrus.android.model.RelaySession
 import com.notrus.android.model.RelaySyncPayload
@@ -233,6 +234,46 @@ class RelayClient(
                 .put("wireMessage", wireMessage)
         )
         response.optString("messageId", messageId)
+    }
+
+    suspend fun postReadReceipt(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        lastReadMessageId: String,
+        readAt: String,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val response = request(
+            "/api/mailboxes/$mailboxHandle/read-receipts",
+            method = "POST",
+            authorizationToken = deliveryCapability,
+            body = JSONObject()
+                .put("lastReadMessageId", lastReadMessageId)
+                .put("readAt", readAt),
+        )
+        response.optBoolean("ok", false)
+    }
+
+    suspend fun reportAbuse(
+        reporterId: String,
+        targetUserId: String,
+        threadId: String?,
+        messageIds: List<String>,
+        reason: String,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("createdAt", Instant.now().toString())
+            .put("messageIds", JSONArray().apply { messageIds.forEach { put(it) } })
+            .put("reason", reason)
+            .put("reporterId", reporterId)
+            .put("targetUserId", targetUserId)
+        threadId?.takeIf { it.isNotBlank() }?.let { body.put("threadId", it) }
+        val response = request(
+            "/api/reports",
+            method = "POST",
+            authorizationToken = requireSessionToken(),
+            body = body,
+        )
+        response.optBoolean("ok", false)
     }
 
     suspend fun uploadAttachment(
@@ -474,6 +515,18 @@ class RelayClient(
                     )
                 }
             }
+            val readReceipts = mutableListOf<RelayReadReceipt>()
+            val receiptArray = json.optJSONArray("readReceipts") ?: JSONArray()
+            for (receiptIndex in 0 until receiptArray.length()) {
+                receiptArray.optJSONObject(receiptIndex)?.let { receiptJson ->
+                    readReceipts += RelayReadReceipt(
+                        userId = receiptJson.optString("userId"),
+                        threadId = receiptJson.optString("threadId"),
+                        lastReadMessageId = receiptJson.optString("lastReadMessageId"),
+                        readAt = receiptJson.optString("readAt"),
+                    )
+                }
+            }
 
             val lastActivity = buildList {
                 add(json.optString("createdAt"))
@@ -494,6 +547,7 @@ class RelayClient(
                 participantIds = participants,
                 attachmentCount = (json.optJSONArray("attachments") ?: JSONArray()).length(),
                 messages = messages.sortedBy { it.createdAt },
+                readReceipts = readReceipts,
             )
         }
         return threads.sortedByDescending { thread ->
@@ -920,6 +974,9 @@ class RelayClient(
     }
 
     companion object {
+        private val localIpv4LoopbackHost = listOf(127, 0, 0, 1).joinToString(".")
+        private val androidEmulatorHost = listOf(10, 0, 2, 2).joinToString(".")
+
         internal fun decodePayload(payload: String): JSONObject {
             val trimmed = payload.trim()
             val parsed = trimmed.takeIf { it.isNotBlank() }?.let { raw ->
@@ -945,8 +1002,8 @@ class RelayClient(
             val host = uri.host?.lowercase() ?: throw IllegalArgumentException("Relay URL is missing a host.")
             val isLocal =
                 host == "localhost" ||
-                host == "10.0.2.2" ||
-                host == "127.0.0.1"
+                host == androidEmulatorHost ||
+                host == localIpv4LoopbackHost
 
             if (scheme != "https" && !(scheme == "http" && isLocal)) {
                 throw IllegalArgumentException("Android only allows HTTPS relay origins, except local emulator/localhost HTTP during development.")

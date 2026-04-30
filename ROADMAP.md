@@ -1,6 +1,6 @@
 # Notrus Roadmap
 
-This roadmap tracks next work after the `v0.3.3-beta4` security release.
+This roadmap tracks next work after the `v0.3.4-beta5` security/reliability beta release.
 
 ## Current state (Beta 4 security update)
 
@@ -12,8 +12,8 @@ This roadmap tracks next work after the `v0.3.3-beta4` security release.
   - Compatibility path: standards-thread fanout transport when native MLS state is unavailable
 - Opaque routine routing active: session token + mailbox handle + delivery capability
 - Release labels aligned for current artifacts:
-  - macOS: `Notrus-0.3.3-beta4.zip`
-  - Android: `Notrus-0.3.3-beta4-release.apk`
+  - macOS: `Notrus-0.3.4-beta5.zip`
+  - Android: `Notrus-0.3.4-beta5-release.apk`
 
 ## Near-term release-candidate track
 
@@ -26,8 +26,8 @@ This roadmap tracks next work after the `v0.3.3-beta4` security release.
   - Android trust/device screen polish after beta-device feedback
 - Reliability:
   - continue burn-in across profile import/export, linked-device, and relay session-expiry edges
-  - improve Android background notification reliability consistency across OEM/device scheduling behavior
-  - improve import/export follow-up behavior for conversation-history portability expectations
+  - burn in Android background notifications across OEM/device scheduling behavior now that channels, WorkManager fallback, boot/package rescheduling, dedupe, and optional reliable foreground delivery are implemented
+  - continue burn-in for the separate encrypted chat-backup restore path across same-platform and mixed-platform moves
 
 ## Stable track
 

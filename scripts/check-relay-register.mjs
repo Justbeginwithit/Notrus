@@ -59,7 +59,8 @@ const text = await response.text();
 console.log(JSON.stringify({
   ok: response.ok,
   status: response.status,
-  body: text,
+  bodyLength: text.length,
+  bodyPreview: text.slice(0, 160),
   testedUserId: user.id,
   testedUsername: user.username,
 }, null, 2));

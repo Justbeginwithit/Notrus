@@ -9,6 +9,7 @@ import java.util.UUID
 
 data class NotrusNotificationPreferences(
     val enabled: Boolean,
+    val realtimeEnabled: Boolean,
     val contentVisibility: String,
     val lockscreenVisibility: String,
     val groupPreviewEnabled: Boolean,
@@ -26,6 +27,7 @@ object NotrusNotificationPrefs {
     const val KEY_RELAY_ORIGIN = "relay_origin"
 
     const val KEY_NOTIFICATIONS_ENABLED = "notifications_enabled"
+    const val KEY_NOTIFICATION_REALTIME_ENABLED = "notification_realtime_enabled"
     const val KEY_NOTIFICATION_CONTENT_VISIBILITY = "notification_content_visibility"
     const val KEY_NOTIFICATION_LOCKSCREEN_VISIBILITY = "notification_lockscreen_visibility"
     const val KEY_NOTIFICATION_GROUP_PREVIEW_ENABLED = "notification_group_preview_enabled"
@@ -43,6 +45,7 @@ object NotrusNotificationPrefs {
         val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
         return NotrusNotificationPreferences(
             enabled = preferences.getBoolean(KEY_NOTIFICATIONS_ENABLED, true),
+            realtimeEnabled = preferences.getBoolean(KEY_NOTIFICATION_REALTIME_ENABLED, true),
             contentVisibility = preferences.getString(KEY_NOTIFICATION_CONTENT_VISIBILITY, "hidden") ?: "hidden",
             lockscreenVisibility = preferences.getString(KEY_NOTIFICATION_LOCKSCREEN_VISIBILITY, "private") ?: "private",
             groupPreviewEnabled = preferences.getBoolean(KEY_NOTIFICATION_GROUP_PREVIEW_ENABLED, false),

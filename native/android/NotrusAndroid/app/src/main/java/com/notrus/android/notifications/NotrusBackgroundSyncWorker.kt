@@ -14,10 +14,14 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.notrus.android.BuildConfig
+import com.notrus.android.model.ConversationThreadRecord
 import com.notrus.android.model.LocalIdentity
+import com.notrus.android.model.MessageCachePolicy
+import com.notrus.android.model.NotificationContentVisibility
 import com.notrus.android.model.RelayMessage
 import com.notrus.android.model.RelayThread
 import com.notrus.android.model.RelayUser
+import com.notrus.android.model.StoredIdentityRecord
 import com.notrus.android.protocol.StandardsSignalClient
 import com.notrus.android.relay.RelayClient
 import com.notrus.android.security.DeviceIdentityProvider
@@ -81,8 +85,9 @@ class NotrusBackgroundSyncWorker(
             )
 
             val threadNotifications = mutableListOf<ThreadNotificationPayload>()
-            val updatedIdentityById = mutableMapOf<String, LocalIdentity>()
+            val updatedRecordById = mutableMapOf<String, StoredIdentityRecord>()
             var failedIdentities = 0
+            val shouldNotifyNow = shouldPostNotifications()
 
             catalog.identities.forEach { record ->
                 runCatching {
@@ -122,6 +127,10 @@ class NotrusBackgroundSyncWorker(
                     }
 
                     val usersById = sync.users.associateBy { it.id }
+                    val updatedRecord = mergeRelayEnvelopesForRecord(
+                        record = record.copy(identity = mergedIdentity),
+                        relayThreads = sync.threads,
+                    )
                     val seenIds = NotrusNotificationPrefs.loadSeenMessageIds(appContext, mergedIdentity.id)
                     val primed = NotrusNotificationPrefs.isIdentityNotificationPrimed(appContext, mergedIdentity.id)
                     if (!primed) {
@@ -132,14 +141,17 @@ class NotrusBackgroundSyncWorker(
                             .forEach { seenIds.add(it) }
                         NotrusNotificationPrefs.saveSeenMessageIds(appContext, mergedIdentity.id, seenIds)
                         NotrusNotificationPrefs.markIdentityNotificationPrimed(appContext, mergedIdentity.id)
-                        updatedIdentityById[mergedIdentity.id] = mergedIdentity
+                        updatedRecordById[mergedIdentity.id] = updatedRecord
                         return@runCatching
                     }
 
-                    val previousSignalState = mergedIdentity.standardsSignalState
-                    var signalState = previousSignalState
+                    var previewSignalState = mergedIdentity.standardsSignalState
 
                     sync.threads.forEach { thread ->
+                        val localThreadRecord = updatedRecord.threadRecords[thread.id]
+                        if (localThreadRecord?.mutedAt != null) {
+                            return@forEach
+                        }
                         val incoming = thread.messages
                             .filter { it.senderId != mergedIdentity.id }
                             .filter { it.id.isNotBlank() }
@@ -153,16 +165,16 @@ class NotrusBackgroundSyncWorker(
                         val senderName = usersById[newestIncoming.senderId]?.displayName?.ifBlank { null }
                             ?: usersById[newestIncoming.senderId]?.username?.ifBlank { null }
                         var newestPreview: String? = null
-                        if (signalState != null) {
+                        if (shouldAttemptNotificationPreview(notificationPrefs, privacyModeEnabled, shouldNotifyNow, thread) && previewSignalState != null) {
                             orderedIncoming.forEach { incomingMessage ->
                                 val previewResult = decryptPreview(
                                     identityId = mergedIdentity.id,
                                     message = incomingMessage,
-                                    signalState = signalState!!,
+                                    signalState = previewSignalState!!,
                                     thread = thread,
                                 )
                                 if (previewResult != null) {
-                                    signalState = previewResult.updatedSignalState
+                                    previewSignalState = previewResult.updatedSignalState
                                     if (incomingMessage.id == newestIncoming.id) {
                                         newestPreview = previewResult.previewText
                                     }
@@ -176,39 +188,39 @@ class NotrusBackgroundSyncWorker(
                             senderName = senderName,
                             messagePreview = newestPreview,
                             messageCount = incoming.size,
+                            messageIds = incoming.map { it.id },
                             isGroup = thread.participantIds.size > 2,
                         )
-                        incoming.forEach { seenIds.add(it.id) }
+                        if (!shouldNotifyNow) {
+                            incoming.forEach { seenIds.add(it.id) }
+                        }
                     }
 
                     NotrusNotificationPrefs.saveSeenMessageIds(appContext, mergedIdentity.id, seenIds)
-                    val updatedIdentity = if (signalState != null && signalState != previousSignalState) {
-                        mergedIdentity.copy(
-                            standardsSignalReady = true,
-                            standardsSignalState = signalState,
-                        )
-                    } else {
-                        mergedIdentity
-                    }
-                    updatedIdentityById[updatedIdentity.id] = updatedIdentity
+                    updatedRecordById[mergedIdentity.id] = updatedRecord.copy(identity = mergedIdentity)
                 }.onFailure {
                     failedIdentities += 1
                 }
             }
 
-            persistUpdatedIdentities(
+            persistUpdatedRecords(
                 catalog = catalog,
-                updatedIdentities = updatedIdentityById,
+                updatedRecords = updatedRecordById,
             )
 
-            if (shouldPostNotifications()) {
+            if (shouldNotifyNow) {
                 threadNotifications.forEach { payload ->
-                    NotrusNotificationCenter.postThreadNotification(
+                    val posted = NotrusNotificationCenter.postThreadNotification(
                         context = appContext,
                         settings = notificationPrefs,
                         privacyModeEnabled = privacyModeEnabled,
                         payload = payload,
                     )
+                    if (posted) {
+                        val seenIds = NotrusNotificationPrefs.loadSeenMessageIds(appContext, payload.identityId)
+                        payload.messageIds.forEach { seenIds.add(it) }
+                        NotrusNotificationPrefs.saveSeenMessageIds(appContext, payload.identityId, seenIds)
+                    }
                 }
             }
 
@@ -236,6 +248,26 @@ class NotrusBackgroundSyncWorker(
             process.importance != ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
     }
 
+    private fun shouldAttemptNotificationPreview(
+        settings: NotrusNotificationPreferences,
+        privacyModeEnabled: Boolean,
+        shouldNotifyNow: Boolean,
+        thread: RelayThread,
+    ): Boolean {
+        if (!shouldNotifyNow) {
+            return false
+        }
+        val effectiveVisibility = if (privacyModeEnabled && !settings.privacyModeOverride) {
+            NotificationContentVisibility.Hidden
+        } else {
+            NotificationContentVisibility.fromKey(settings.contentVisibility)
+        }
+        if (effectiveVisibility != NotificationContentVisibility.FullPreview) {
+            return false
+        }
+        return thread.participantIds.size <= 2 || settings.groupPreviewEnabled
+    }
+
     private fun readRelayOrigin(): String {
         val settings = appContext.getSharedPreferences("notrus_settings", Context.MODE_PRIVATE)
         val configured = settings.getString(NotrusNotificationPrefs.KEY_RELAY_ORIGIN, null)?.trim().orEmpty()
@@ -260,19 +292,64 @@ class NotrusBackgroundSyncWorker(
             username = user.username.ifBlank { identity.username },
         )
 
-    private fun persistUpdatedIdentities(
+    private fun mergeRelayEnvelopesForRecord(
+        record: StoredIdentityRecord,
+        relayThreads: List<RelayThread>,
+    ): StoredIdentityRecord {
+        var changed = false
+        val updatedThreadRecords = record.threadRecords.toMutableMap()
+        relayThreads.forEach { thread ->
+            if (thread.messages.isEmpty()) {
+                return@forEach
+            }
+            val existing = updatedThreadRecords[thread.id]
+            var nextRecord = existing ?: ConversationThreadRecord(
+                protocol = thread.protocol,
+                signalPeerUserId = if (thread.protocol == DIRECT_PROTOCOL) {
+                    thread.participantIds.firstOrNull { it != record.identity.id }
+                } else {
+                    null
+                },
+            )
+            var nextCache = nextRecord.messageCache
+            thread.messages.forEach { message ->
+                val merged = MessageCachePolicy.mergeRelayEnvelope(nextCache[message.id], message)
+                if (merged != nextCache[message.id]) {
+                    nextCache = nextCache + (message.id to merged)
+                    changed = true
+                }
+            }
+            nextRecord = nextRecord.copy(
+                messageCache = nextCache,
+                protocol = thread.protocol,
+                signalPeerUserId = if (thread.protocol == DIRECT_PROTOCOL) {
+                    nextRecord.signalPeerUserId ?: thread.participantIds.firstOrNull { it != record.identity.id }
+                } else {
+                    nextRecord.signalPeerUserId
+                },
+            )
+            updatedThreadRecords[thread.id] = nextRecord
+        }
+        return if (changed) {
+            record.copy(threadRecords = updatedThreadRecords)
+        } else {
+            record
+        }
+    }
+
+    private fun persistUpdatedRecords(
         catalog: com.notrus.android.model.IdentityCatalog,
-        updatedIdentities: Map<String, LocalIdentity>,
+        updatedRecords: Map<String, StoredIdentityRecord>,
     ) {
-        if (updatedIdentities.isEmpty()) {
+        if (updatedRecords.isEmpty()) {
             return
         }
         var changed = false
-        val updatedRecords = catalog.identities.map { record ->
-            val updatedIdentity = updatedIdentities[record.identity.id]
-            if (updatedIdentity != null && updatedIdentity != record.identity) {
+        val nextRecords = catalog.identities.map { record ->
+            val updatedRecord = updatedRecords[record.identity.id]
+            if (updatedRecord != null && updatedRecord != record) {
                 changed = true
-                record.copy(identity = updatedIdentity)
+                updatedRecord
             } else {
                 record
             }
@@ -282,8 +359,8 @@ class NotrusBackgroundSyncWorker(
         }
         vaultStore.saveCatalog(
             catalog.copy(
-                identities = updatedRecords,
-                activeIdentityId = catalog.activeIdentityId ?: updatedRecords.firstOrNull()?.identity?.id,
+                identities = nextRecords,
+                activeIdentityId = catalog.activeIdentityId ?: nextRecords.firstOrNull()?.identity?.id,
             ),
         )
     }

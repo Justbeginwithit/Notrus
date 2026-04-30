@@ -34,13 +34,21 @@ function log(line) {
 }
 
 function normalizeOrigin(value) {
-  const fallback = window.location.origin;
+  const fallback = globalThis.location.origin;
   const trimmed = (value || "").trim();
   if (!trimmed) {
     return fallback;
   }
   try {
     const parsed = new URL(trimmed);
+    if (!["https:", "http:"].includes(parsed.protocol)) {
+      return fallback;
+    }
+    parsed.username = "";
+    parsed.password = "";
+    parsed.pathname = "";
+    parsed.search = "";
+    parsed.hash = "";
     return `${parsed.protocol}//${parsed.host}`;
   } catch {
     return fallback;
@@ -67,15 +75,28 @@ function saveConfig() {
 }
 
 function hydrateConfig() {
-  const fallbackOrigin = window.location.origin;
+  const fallbackOrigin = globalThis.location.origin;
   els.originInput.value = localStorage.getItem(storage.origin) || fallbackOrigin;
   els.tokenInput.value = localStorage.getItem(storage.token) || "";
   els.limitInput.value = localStorage.getItem(storage.limit) || "200";
   els.includeDeactivatedInput.checked = localStorage.getItem(storage.includeDeactivated) === "true";
 }
 
+function adminApiUrl(origin, path) {
+  const normalizedOrigin = normalizeOrigin(origin);
+  const url = new URL(path, normalizedOrigin);
+  if (!["https:", "http:"].includes(url.protocol)) {
+    throw new Error("Admin API URL must use HTTP or HTTPS.");
+  }
+  if (!url.pathname.startsWith("/api/")) {
+    throw new Error("Admin API requests must target relay API routes.");
+  }
+  return url;
+}
+
 async function requestJson(url, options = {}) {
-  const response = await fetch(url, options);
+  const safeUrl = adminApiUrl(url.origin, `${url.pathname}${url.search}`);
+  const response = await fetch(safeUrl, options);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const message = data.error || `HTTP ${response.status}`;
@@ -87,7 +108,7 @@ async function requestJson(url, options = {}) {
 async function loadHealth() {
   const { origin } = getConfig();
   try {
-    const health = await requestJson(`${origin}/api/health`);
+    const health = await requestJson(adminApiUrl(origin, "/api/health"));
     const ok = health.ok === true;
     const adminEnabled = Boolean(health.adminApi && health.adminApi.enabled);
     els.healthBadge.textContent = `Health: ${ok ? "ok" : "not ok"}`;
@@ -197,7 +218,7 @@ async function loadUsers({ all = false } = {}) {
     throw new Error("Admin token is required.");
   }
 
-  const data = await requestJson(`${cfg.origin}/api/admin/users?${params.toString()}`, {
+  const data = await requestJson(adminApiUrl(cfg.origin, `/api/admin/users?${params.toString()}`), {
     headers: {
       "X-Notrus-Admin-Token": cfg.token,
     },
@@ -216,7 +237,7 @@ async function blockUser(userId, username) {
   if (!confirm(`Block user @${username} (${userId})? This deactivates and tombstones the account.`)) {
     return;
   }
-  await requestJson(`${cfg.origin}/api/admin/users/${encodeURIComponent(userId)}/block`, {
+  await requestJson(adminApiUrl(cfg.origin, `/api/admin/users/${encodeURIComponent(userId)}/block`), {
     method: "POST",
     headers: {
       "X-Notrus-Admin-Token": cfg.token,
@@ -231,7 +252,7 @@ async function deleteUser(userId, username) {
   if (!confirm(`Delete user @${username} (${userId}) permanently?\nThis removes relay account and related threads.`)) {
     return;
   }
-  await requestJson(`${cfg.origin}/api/admin/users/${encodeURIComponent(userId)}/delete`, {
+  await requestJson(adminApiUrl(cfg.origin, `/api/admin/users/${encodeURIComponent(userId)}/delete`), {
     method: "POST",
     headers: {
       "X-Notrus-Admin-Token": cfg.token,
@@ -251,7 +272,7 @@ async function unblockUser(user) {
   if (!restoredUsername) {
     return;
   }
-  await requestJson(`${cfg.origin}/api/admin/users/${encodeURIComponent(user.id)}/unblock`, {
+  await requestJson(adminApiUrl(cfg.origin, `/api/admin/users/${encodeURIComponent(user.id)}/unblock`), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

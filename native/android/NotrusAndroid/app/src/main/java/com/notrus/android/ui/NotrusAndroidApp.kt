@@ -17,7 +17,6 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -56,9 +55,11 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -69,9 +70,10 @@ import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -102,13 +104,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
+import com.notrus.android.BuildConfig
+import com.notrus.android.model.AndroidContactTrustRecord
 import com.notrus.android.model.AppUiState
 import com.notrus.android.model.ConversationThread
 import com.notrus.android.model.DecryptedMessage
@@ -140,6 +144,7 @@ private enum class WorkspaceDestination(
     val icon: ImageVector,
 ) {
     Chats("Chats", Icons.AutoMirrored.Rounded.Chat),
+    Archived("Archived", Icons.Rounded.Lock),
     Contacts("Contacts", Icons.Rounded.Search),
     Security("Security", Icons.Rounded.Security),
     Settings("Settings", Icons.Rounded.Settings),
@@ -163,6 +168,7 @@ fun NotrusAndroidApp(
     activity: FragmentActivity,
 ) {
     var pendingAttachmentSave by remember { mutableStateOf<PendingAttachmentSaveRequest?>(null) }
+    val focusManager = LocalFocusManager.current
 
     val importArchiveLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
@@ -172,7 +178,17 @@ fun NotrusAndroidApp(
     val exportArchiveLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json"),
     ) { uri ->
-        uri?.let { viewModel.exportCurrentProfile(activity, it) }
+        viewModel.completePreparedProfileExport(uri)
+    }
+    val importChatBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        uri?.let { viewModel.importChatBackup(activity, it) }
+    }
+    val exportChatBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        viewModel.completePreparedChatBackupExport(uri)
     }
     val addAttachmentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
@@ -227,7 +243,9 @@ fun NotrusAndroidApp(
                 state = state,
                 viewModel = viewModel,
                 onImportArchive = {
-                    importArchiveLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
+                    if (viewModel.canChooseRecoveryImportFile()) {
+                        importArchiveLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
+                    }
                 },
             )
             else -> WorkspaceScaffold(
@@ -241,13 +259,31 @@ fun NotrusAndroidApp(
                 chatQuery = chatQuery,
                 onChatQueryChange = { chatQuery = it },
                 onExportArchive = {
-                    val username = state.currentIdentity?.username ?: "android"
-                    exportArchiveLauncher.launch("notrus-$username-recovery.json")
+                    focusManager.clearFocus(force = true)
+                    viewModel.prepareCurrentProfileExport(activity) { suggestedFileName ->
+                        exportArchiveLauncher.launch(suggestedFileName)
+                    }
                 },
                 onImportArchive = {
-                    importArchiveLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
+                    focusManager.clearFocus(force = true)
+                    if (viewModel.canChooseRecoveryImportFile()) {
+                        importArchiveLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
+                    }
+                },
+                onExportChatBackup = {
+                    focusManager.clearFocus(force = true)
+                    viewModel.prepareCurrentChatBackupExport(activity) { suggestedFileName ->
+                        exportChatBackupLauncher.launch(suggestedFileName)
+                    }
+                },
+                onImportChatBackup = {
+                    focusManager.clearFocus(force = true)
+                    if (viewModel.canChooseChatBackupImportFile()) {
+                        importChatBackupLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
+                    }
                 },
                 onAttachFiles = {
+                    focusManager.clearFocus(force = true)
                     addAttachmentLauncher.launch(arrayOf("*/*"))
                 },
                 onSaveAttachment = { threadId, reference ->
@@ -329,6 +365,7 @@ private fun OnboardingView(
     onImportArchive: () -> Unit,
 ) {
     val scrollState = rememberScrollState()
+    val focusManager = LocalFocusManager.current
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
@@ -346,7 +383,7 @@ private fun OnboardingView(
                 color = MaterialTheme.colorScheme.onBackground,
             )
             Text(
-                text = "Create a device-protected profile or import a recovery archive. Direct chats are the stable cross-platform path in the current beta.",
+                text = "Create a device-protected profile or recover an existing account. Chat history restore is a separate encrypted backup action after the account exists locally.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -392,7 +429,10 @@ private fun OnboardingView(
                     label = { Text("Username") },
                 )
                 Button(
-                    onClick = viewModel::createProfile,
+                    onClick = {
+                        focusManager.clearFocus(force = true)
+                        viewModel.createProfile()
+                    },
                     enabled = !state.isBusy,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(18.dp),
@@ -406,8 +446,8 @@ private fun OnboardingView(
             }
 
             SectionCard(
-                title = "Import recovery archive",
-                subtitle = "Same-platform recovery import is the supported path. Android to macOS recovery import still has known issues and is not the stable migration path yet.",
+                title = "Recover account",
+                subtitle = "Restores account identity and future messaging. It does not restore old readable chat history by itself.",
             ) {
                 OutlinedTextField(
                     value = state.importPassphrase,
@@ -417,7 +457,10 @@ private fun OnboardingView(
                     label = { Text("Import passphrase") },
                 )
                 FilledTonalButton(
-                    onClick = onImportArchive,
+                    onClick = {
+                        focusManager.clearFocus(force = true)
+                        onImportArchive()
+                    },
                     enabled = !state.isBusy,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(18.dp),
@@ -445,6 +488,8 @@ private fun WorkspaceScaffold(
     onChatQueryChange: (String) -> Unit,
     onExportArchive: () -> Unit,
     onImportArchive: () -> Unit,
+    onExportChatBackup: () -> Unit,
+    onImportChatBackup: () -> Unit,
     onAttachFiles: () -> Unit,
     onSaveAttachment: (String, SecureAttachmentReference) -> Unit,
 ) {
@@ -461,6 +506,10 @@ private fun WorkspaceScaffold(
                 selectedThread = selectedThread,
                 onBack = viewModel::clearSelectedThread,
                 onRefresh = viewModel::refresh,
+                onHideConversation = viewModel::hideConversation,
+                onDeleteConversationHistory = viewModel::deleteConversationHistory,
+                onResetConversationSession = viewModel::resetConversationSession,
+                onToggleConversationMuted = viewModel::toggleConversationMuted,
                 enhancedVisuals = enhancedVisuals,
             )
         },
@@ -507,7 +556,7 @@ private fun WorkspaceScaffold(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(screenBackgroundBrush(enhancedVisuals))
+                .background(screenBackgroundBrush())
                 .padding(padding),
         ) {
             Row(modifier = Modifier.fillMaxSize()) {
@@ -540,7 +589,7 @@ private fun WorkspaceScaffold(
                         .weight(1f)
                         .fillMaxSize(),
                 ) {
-                    if (state.isBusy) {
+                    if (state.showSyncProgress) {
                         AppLoadingIndicator(
                             enhanced = enhancedVisuals,
                             modifier = Modifier.fillMaxWidth(),
@@ -592,6 +641,12 @@ private fun WorkspaceScaffold(
                                 },
                             )
 
+                            WorkspaceDestination.Archived -> ArchivedChatsScreen(
+                                state = state,
+                                viewModel = viewModel,
+                                enhancedVisuals = enhancedVisuals,
+                            )
+
                             WorkspaceDestination.Security -> SecurityScreen(
                                 state = state,
                                 viewModel = viewModel,
@@ -606,6 +661,8 @@ private fun WorkspaceScaffold(
                                 enhancedVisuals = enhancedVisuals,
                                 onExportArchive = onExportArchive,
                                 onImportArchive = onImportArchive,
+                                onExportChatBackup = onExportChatBackup,
+                                onImportChatBackup = onImportChatBackup,
                                 onOpenSecurity = { onDestinationChange(WorkspaceDestination.Security) },
                             )
                         }
@@ -624,6 +681,10 @@ private fun WorkspaceTopBar(
     selectedThread: ConversationThread?,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
+    onHideConversation: (String) -> Unit,
+    onDeleteConversationHistory: (String) -> Unit,
+    onResetConversationSession: (String) -> Unit,
+    onToggleConversationMuted: (String) -> Unit,
     enhancedVisuals: Boolean,
 ) {
     val title = if (showConversationDetail && selectedThread != null) {
@@ -685,6 +746,53 @@ private fun WorkspaceTopBar(
             )
         }
         if (state.currentIdentity != null) {
+            if (showConversationDetail && selectedThread != null) {
+                var actionsExpanded by remember { mutableStateOf(false) }
+                Box {
+                    IconButton(onClick = { actionsExpanded = true }) {
+                        Icon(
+                            Icons.Rounded.MoreVert,
+                            contentDescription = "Conversation actions",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = actionsExpanded,
+                        onDismissRequest = { actionsExpanded = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Archive chat") },
+                            onClick = {
+                                actionsExpanded = false
+                                onHideConversation(selectedThread.id)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (selectedThread.muted) "Unmute notifications" else "Mute notifications") },
+                            onClick = {
+                                actionsExpanded = false
+                                onToggleConversationMuted(selectedThread.id)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete local history") },
+                            leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
+                            onClick = {
+                                actionsExpanded = false
+                                onDeleteConversationHistory(selectedThread.id)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Reset secure session") },
+                            leadingIcon = { Icon(Icons.Rounded.Security, contentDescription = null) },
+                            onClick = {
+                                actionsExpanded = false
+                                onResetConversationSession(selectedThread.id)
+                            },
+                        )
+                    }
+                }
+            }
             IconButton(onClick = onRefresh) {
                 Icon(
                     Icons.Rounded.Refresh,
@@ -914,6 +1022,15 @@ private fun ChatListPane(
             )
         }
 
+        if (state.archivedThreads.isNotEmpty()) {
+            item {
+                StatusBanner(
+                    message = "${state.archivedThreads.size} archived chat${if (state.archivedThreads.size == 1) "" else "s"} available in the Archived tab.",
+                    tone = BannerTone.Info,
+                )
+            }
+        }
+
         if (threads.isEmpty()) {
             item {
                 EmptyStateCard(
@@ -942,6 +1059,73 @@ private fun ChatListPane(
 }
 
 @Composable
+private fun ArchivedChatsScreen(
+    state: AppUiState,
+    viewModel: NotrusViewModel,
+    enhancedVisuals: Boolean,
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item {
+            SectionHeader(
+                title = "Archived chats",
+                subtitle = "Archived conversations stay out of Chats. Restore them before sending again.",
+            )
+        }
+
+        if (state.archivedThreads.isEmpty()) {
+            item {
+                EmptyStateCard(
+                    title = "No archived chats",
+                    body = "Use Hide chat or Delete local history to move a conversation here without breaking future messaging.",
+                )
+            }
+        } else {
+            items(state.archivedThreads, key = { it.id }) { thread ->
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RowShape,
+                    color = if (enhancedVisuals) {
+                        MaterialTheme.colorScheme.surface.copy(alpha = 0.74f)
+                    } else {
+                        MaterialTheme.colorScheme.surface
+                    },
+                    tonalElevation = 0.dp,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.18f)),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        ThreadListRow(
+                            thread = thread,
+                            enhancedVisuals = enhancedVisuals,
+                            selected = false,
+                            currentUserId = state.currentIdentity?.id,
+                            onClick = { viewModel.restoreConversation(thread.id) },
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            FilledTonalButton(onClick = { viewModel.restoreConversation(thread.id) }) {
+                                Text("Restore")
+                            }
+                            TextButton(onClick = { viewModel.toggleConversationMuted(thread.id) }) {
+                                Text(if (thread.muted) "Unmute" else "Mute")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ConversationPane(
     state: AppUiState,
     thread: ConversationThread,
@@ -954,33 +1138,10 @@ private fun ConversationPane(
 ) {
     val messageListState = rememberLazyListState()
     val canSend = thread.supported && (state.draftText.isNotBlank() || state.pendingAttachments.isNotEmpty()) && !state.isBusy
-    val sendScale by animateFloatAsState(
-        targetValue = if (canSend) 1f else 0.94f,
-        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-        label = "send-scale",
-    )
-    val sendContainerColor by animateColorAsState(
-        targetValue = if (canSend) {
-            MaterialTheme.colorScheme.primary
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant
-        },
-        animationSpec = tween(durationMillis = 180),
-        label = "send-container",
-    )
-    val sendContentColor by animateColorAsState(
-        targetValue = if (canSend) {
-            MaterialTheme.colorScheme.onPrimary
-        } else {
-            MaterialTheme.colorScheme.onSurfaceVariant
-        },
-        animationSpec = tween(durationMillis = 180),
-        label = "send-content",
-    )
 
     LaunchedEffect(thread.id, thread.messages.size) {
         if (thread.messages.isNotEmpty()) {
-            messageListState.animateScrollToItem(thread.messages.lastIndex)
+            messageListState.scrollToItem(thread.messages.lastIndex)
         }
     }
 
@@ -990,7 +1151,14 @@ private fun ConversationPane(
             .background(MaterialTheme.colorScheme.background),
     ) {
         if (wideLayout) {
-            ConversationHeader(thread = thread, currentUserId = state.currentIdentity?.id)
+            ConversationHeader(
+                thread = thread,
+                currentUserId = state.currentIdentity?.id,
+                onHideConversation = { viewModel.hideConversation(thread.id) },
+                onDeleteConversationHistory = { viewModel.deleteConversationHistory(thread.id) },
+                onResetConversationSession = { viewModel.resetConversationSession(thread.id) },
+                onToggleConversationMuted = { viewModel.toggleConversationMuted(thread.id) },
+            )
         }
 
         AnimatedVisibility(
@@ -1029,6 +1197,9 @@ private fun ConversationPane(
                         onSaveAttachment = { reference ->
                             onSaveAttachment(thread.id, reference)
                         },
+                        onDeleteMessage = {
+                            viewModel.deleteMessageLocally(thread.id, message.id)
+                        },
                     )
                 }
             }
@@ -1061,7 +1232,6 @@ private fun ConversationPane(
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
@@ -1077,14 +1247,11 @@ private fun ConversationPane(
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    TextButton(onClick = { viewModel.deleteConversation(thread.id) }) {
-                        Text("Delete local")
-                    }
                 }
                 AnimatedVisibility(
                     visible = state.pendingAttachments.isNotEmpty(),
-                    enter = fadeIn(tween(180)) + expandVertically(tween(220, easing = FastOutSlowInEasing)),
-                    exit = fadeOut(tween(140)) + shrinkVertically(tween(180)),
+                    enter = fadeIn(tween(160)) + expandVertically(tween(180, easing = FastOutSlowInEasing)),
+                    exit = fadeOut(tween(120)) + shrinkVertically(tween(180, easing = FastOutSlowInEasing)),
                 ) {
                     if (state.pendingAttachments.isNotEmpty()) {
                         Column(
@@ -1147,14 +1314,6 @@ private fun ConversationPane(
                     FilledIconButton(
                         onClick = { viewModel.sendSelectedMessage(activity) },
                         enabled = canSend,
-                        modifier = Modifier.graphicsLayer {
-                            scaleX = sendScale
-                            scaleY = sendScale
-                        },
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = sendContainerColor,
-                            contentColor = sendContentColor,
-                        ),
                     ) {
                         Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "Send")
                     }
@@ -1168,6 +1327,10 @@ private fun ConversationPane(
 private fun ConversationHeader(
     thread: ConversationThread,
     currentUserId: String?,
+    onHideConversation: () -> Unit,
+    onDeleteConversationHistory: () -> Unit,
+    onResetConversationSession: () -> Unit,
+    onToggleConversationMuted: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -1187,7 +1350,12 @@ private fun ConversationHeader(
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             InlineStatusBadge(
                 label = thread.protocolLabel,
                 tone = MaterialTheme.colorScheme.primary,
@@ -1196,6 +1364,48 @@ private fun ConversationHeader(
                 label = if (thread.supported) "Ready to send" else "Read only",
                 tone = if (thread.supported) successTone() else MaterialTheme.colorScheme.tertiary,
             )
+            }
+            var actionsExpanded by remember { mutableStateOf(false) }
+            Box {
+                IconButton(onClick = { actionsExpanded = true }) {
+                    Icon(Icons.Rounded.MoreVert, contentDescription = "Conversation actions")
+                }
+                    DropdownMenu(
+                        expanded = actionsExpanded,
+                        onDismissRequest = { actionsExpanded = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Archive chat") },
+                            onClick = {
+                                actionsExpanded = false
+                                onHideConversation()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (thread.muted) "Unmute notifications" else "Mute notifications") },
+                            onClick = {
+                                actionsExpanded = false
+                                onToggleConversationMuted()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete local history") },
+                            leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
+                            onClick = {
+                                actionsExpanded = false
+                                onDeleteConversationHistory()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Reset secure session") },
+                            leadingIcon = { Icon(Icons.Rounded.Security, contentDescription = null) },
+                            onClick = {
+                                actionsExpanded = false
+                                onResetConversationSession()
+                            },
+                        )
+                    }
+            }
         }
     }
 }
@@ -1385,8 +1595,8 @@ private fun SecurityScreen(
                 )
                 AnimatedVisibility(
                     visible = transparencyDetailsExpanded,
-                    enter = fadeIn(tween(180)) + expandVertically(tween(220, easing = FastOutSlowInEasing)),
-                    exit = fadeOut(tween(140)) + shrinkVertically(tween(180)),
+                    enter = fadeIn(tween(160)) + expandVertically(tween(180, easing = FastOutSlowInEasing)),
+                    exit = fadeOut(tween(120)) + shrinkVertically(tween(180, easing = FastOutSlowInEasing)),
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         state.transparency.head?.let { head ->
@@ -1484,6 +1694,42 @@ private fun SecurityScreen(
         }
 
         item {
+            SectionHeader(
+                title = "Contact verification",
+                subtitle = if (state.contactTrustRecords.isEmpty()) {
+                    "Save or message contacts to track their Android security numbers here."
+                } else {
+                    "Verify changed security numbers, report abuse, or block contacts locally."
+                },
+            )
+        }
+
+        if (state.contactTrustRecords.isEmpty()) {
+            item {
+                EmptyStateCard(
+                    title = "No contact trust records",
+                    body = "Contacts appear here after they are saved, searched, or synced through a conversation.",
+                )
+            }
+        } else {
+            items(state.contactTrustRecords, key = { it.userId }) { record ->
+                ContactTrustRow(
+                    record = record,
+                    enhancedVisuals = enhancedVisuals,
+                    onVerify = { viewModel.verifyContact(record.userId) },
+                    onReport = { viewModel.reportContact(record.userId) },
+                    onBlockToggle = {
+                        if (record.blockedAt == null) {
+                            viewModel.blockContact(record.userId)
+                        } else {
+                            viewModel.unblockContact(record.userId)
+                        }
+                    },
+                )
+            }
+        }
+
+        item {
             SectionCard(
                 title = "Protocol core",
                 subtitle = state.protocolEngineMessage,
@@ -1508,9 +1754,12 @@ private fun SettingsScreen(
     enhancedVisuals: Boolean,
     onExportArchive: () -> Unit,
     onImportArchive: () -> Unit,
+    onExportChatBackup: () -> Unit,
+    onImportChatBackup: () -> Unit,
     onOpenSecurity: () -> Unit,
 ) {
     val scrollState = rememberScrollState()
+    val focusManager = LocalFocusManager.current
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1567,7 +1816,10 @@ private fun SettingsScreen(
                 label = { Text("Username") },
             )
             Button(
-                onClick = viewModel::createProfile,
+                onClick = {
+                    focusManager.clearFocus(force = true)
+                    viewModel.createProfile()
+                },
                 enabled = !state.isBusy,
                 shape = RoundedCornerShape(16.dp),
             ) {
@@ -1658,6 +1910,34 @@ private fun SettingsScreen(
                     onCheckedChange = viewModel::updatePrivacyMode,
                 )
             }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = "Send read confirmations",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "When enabled, contacts can see when this Android device has opened their latest message.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = state.sendReadReceiptsToOthers,
+                    onCheckedChange = viewModel::updateSendReadReceiptsToOthers,
+                )
+            }
         }
 
         SectionCard(
@@ -1693,6 +1973,39 @@ private fun SettingsScreen(
                 Switch(
                     checked = state.notificationsEnabled,
                     onCheckedChange = viewModel::updateNotificationsEnabled,
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = "Reliable background delivery",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = if (state.notificationRealtimeEnabled) {
+                            "On. Notrus keeps a lightweight background listener and Android shows a persistent service notification."
+                        } else {
+                            "Off. Notrus falls back to periodic Android background sync, which can be delayed."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = state.notificationRealtimeEnabled,
+                    enabled = state.notificationsEnabled,
+                    onCheckedChange = viewModel::updateNotificationRealtimeEnabled,
                 )
             }
 
@@ -1964,8 +2277,8 @@ private fun SettingsScreen(
         }
 
         SectionCard(
-            title = "Recovery",
-            subtitle = "Export and import encrypted recovery archives. Cross-platform recovery is not fully stable yet.",
+            title = "Account recovery",
+            subtitle = "Recover account restores identity and future messaging continuity. It does not restore old readable chats.",
             enhanced = enhancedVisuals,
             accent = MaterialTheme.colorScheme.tertiary,
         ) {
@@ -1977,13 +2290,16 @@ private fun SettingsScreen(
                 label = { Text("Export passphrase") },
             )
             FilledTonalButton(
-                onClick = onExportArchive,
+                onClick = {
+                    focusManager.clearFocus(force = true)
+                    onExportArchive()
+                },
                 enabled = !state.isBusy && state.currentIdentity != null,
                 shape = RoundedCornerShape(16.dp),
             ) {
                 Icon(Icons.Rounded.Download, contentDescription = null)
                 Spacer(modifier = Modifier.width(10.dp))
-                Text("Export current profile")
+                Text("Export account recovery")
             }
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
@@ -1996,17 +2312,77 @@ private fun SettingsScreen(
                 label = { Text("Import passphrase") },
             )
             FilledTonalButton(
-                onClick = onImportArchive,
+                onClick = {
+                    focusManager.clearFocus(force = true)
+                    onImportArchive()
+                },
                 enabled = !state.isBusy,
                 shape = RoundedCornerShape(16.dp),
             ) {
                 Icon(Icons.Rounded.Upload, contentDescription = null)
                 Spacer(modifier = Modifier.width(10.dp))
-                Text("Import recovery archive")
+                Text("Recover account")
             }
             StatusBanner(
-                message = "Known issue: Android to macOS recovery import is still not reliable enough to treat as a stable migration path.",
+                message = "Account recovery files contain account identity/recovery material only. Use Restore chat backup if you want old messages back.",
+                tone = BannerTone.Info,
+            )
+        }
+
+        SectionCard(
+            title = "Encrypted chat backup",
+            subtitle = "Export or restore local message history, group/session state, message cache, and attachment references for the active account.",
+            enhanced = enhancedVisuals,
+            accent = MaterialTheme.colorScheme.tertiary,
+        ) {
+            StatusBanner(
+                message = "Chat backups contain message history. Use a separate strong passphrase and store them more carefully than account recovery files.",
                 tone = BannerTone.Warning,
+            )
+            OutlinedTextField(
+                value = state.chatBackupPassphrase,
+                onValueChange = viewModel::updateChatBackupPassphrase,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Backup passphrase") },
+            )
+            FilledTonalButton(
+                onClick = {
+                    focusManager.clearFocus(force = true)
+                    onExportChatBackup()
+                },
+                enabled = !state.isBusy && state.currentIdentity != null,
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Icon(Icons.Rounded.Download, contentDescription = null)
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Export chat backup")
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+
+            OutlinedTextField(
+                value = state.chatBackupImportPassphrase,
+                onValueChange = viewModel::updateChatBackupImportPassphrase,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Restore passphrase") },
+            )
+            FilledTonalButton(
+                onClick = {
+                    focusManager.clearFocus(force = true)
+                    onImportChatBackup()
+                },
+                enabled = !state.isBusy && state.currentIdentity != null,
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Icon(Icons.Rounded.Upload, contentDescription = null)
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Restore chat backup")
+            }
+            StatusBanner(
+                message = "Restore requires the matching account to already exist locally. It does not replace identity or device trust.",
+                tone = BannerTone.Info,
             )
         }
 
@@ -2067,6 +2443,23 @@ private fun SettingsScreen(
                     }
                 }
             }
+        }
+
+        SectionCard(
+            title = "About",
+            subtitle = "Project and build information for this installed Notrus client.",
+            enhanced = enhancedVisuals,
+            accent = MaterialTheme.colorScheme.tertiary,
+        ) {
+            Text(
+                text = "Notrus is an independent, self-hostable encrypted messenger project. It is not affiliated with Android, Google, Signal, MLS, ngrok, or any third-party protocol or platform provider.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            DetailLine(label = "Version", value = BuildConfig.VERSION_NAME)
+            DetailLine(label = "Build counter", value = BuildConfig.NOTRUS_BUILD_COUNTER)
+            DetailLine(label = "Build ID", value = BuildConfig.NOTRUS_BUILD_ID)
+            DetailLine(label = "GitHub", value = "https://github.com/Justbeginwithit/Notrus")
         }
     }
 }
@@ -2157,9 +2550,6 @@ private fun SectionCard(
             .fillMaxWidth()
             .clip(PanelShape)
             .background(containerColor)
-            .animateContentSize(
-                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-            )
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
         content = {
@@ -2553,6 +2943,113 @@ private fun LinkedDeviceRow(
     }
 }
 
+@Composable
+private fun ContactTrustRow(
+    record: AndroidContactTrustRecord,
+    enhancedVisuals: Boolean,
+    onVerify: () -> Unit,
+    onReport: () -> Unit,
+    onBlockToggle: () -> Unit,
+) {
+    val rowColor by animateColorAsState(
+        targetValue = when {
+            record.status == "changed" -> MaterialTheme.colorScheme.errorContainer.copy(alpha = if (enhancedVisuals) 0.82f else 1f)
+            enhancedVisuals -> lerp(MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.tertiary, 0.02f).copy(alpha = 0.9f)
+            else -> MaterialTheme.colorScheme.surface
+        },
+        animationSpec = tween(durationMillis = 180),
+        label = "contact-trust-row-color",
+    )
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RowShape)
+            .background(rowColor)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top,
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = record.displayName,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = "@${record.username}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            InlineStatusBadge(
+                label = when (record.status) {
+                    "changed" -> "Changed"
+                    "verified" -> "Verified"
+                    else -> "Unverified"
+                },
+                tone = when (record.status) {
+                    "changed" -> MaterialTheme.colorScheme.error
+                    "verified" -> successTone()
+                    else -> MaterialTheme.colorScheme.tertiary
+                },
+            )
+        }
+
+        Text(
+            text = "Security number ${record.observedFingerprint}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        record.observedPrekeyFingerprint?.let { prekey ->
+            Text(
+                text = "Prekey $prekey",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (record.blockedAt != null) {
+                InlineStatusBadge(label = "Blocked", tone = MaterialTheme.colorScheme.error)
+            }
+            record.lastReportedAt?.let {
+                InlineStatusBadge(label = "Reported", tone = MaterialTheme.colorScheme.tertiary)
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FilledTonalButton(onClick = onVerify, shape = RoundedCornerShape(14.dp)) {
+                Icon(Icons.Rounded.CheckCircle, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Verify")
+            }
+            TextButton(onClick = onReport) {
+                Icon(Icons.Rounded.WarningAmber, contentDescription = null)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Report")
+            }
+            TextButton(onClick = onBlockToggle) {
+                Text(if (record.blockedAt == null) "Block" else "Unblock")
+            }
+        }
+    }
+}
+
 private fun sanitizeDisplayValue(value: String?): String? {
     val trimmed = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
     return when (trimmed.lowercase()) {
@@ -2713,6 +3210,7 @@ private fun MessageBubble(
     enhancedVisuals: Boolean,
     isLocal: Boolean,
     onSaveAttachment: (SecureAttachmentReference) -> Unit,
+    onDeleteMessage: () -> Unit,
 ) {
     val bubbleColor by animateColorAsState(
         targetValue = when {
@@ -2817,6 +3315,33 @@ private fun MessageBubble(
                         label = status,
                         tone = MaterialTheme.colorScheme.tertiary,
                     )
+                }
+                message.readReceiptSummary?.let { summary ->
+                    Text(
+                        text = summary,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.align(Alignment.End),
+                    )
+                }
+                var actionsExpanded by remember { mutableStateOf(false) }
+                Box(modifier = Modifier.align(if (isLocal) Alignment.End else Alignment.Start)) {
+                    IconButton(onClick = { actionsExpanded = true }) {
+                        Icon(Icons.Rounded.MoreVert, contentDescription = "Message actions")
+                    }
+                    DropdownMenu(
+                        expanded = actionsExpanded,
+                        onDismissRequest = { actionsExpanded = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Delete locally") },
+                            leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
+                            onClick = {
+                                actionsExpanded = false
+                                onDeleteMessage()
+                            },
+                        )
+                    }
                 }
         }
     }
@@ -2987,23 +3512,10 @@ private fun formatConversationTimestamp(raw: String): String {
 }
 
 @Composable
-private fun screenBackgroundBrush(enhanced: Boolean): Brush =
-    if (enhanced) {
-        Brush.linearGradient(
-            colors = listOf(
-                MaterialTheme.colorScheme.background,
-                MaterialTheme.colorScheme.background,
-                MaterialTheme.colorScheme.background,
-            ),
-        )
-    } else {
-        Brush.linearGradient(
-            colors = listOf(
-                MaterialTheme.colorScheme.background,
-                MaterialTheme.colorScheme.background,
-            ),
-        )
-    }
+private fun screenBackgroundBrush(): Brush {
+    val background = MaterialTheme.colorScheme.background
+    return Brush.verticalGradient(colors = listOf(background, background))
+}
 
 @Composable
 private fun sectionCardBrush(enhanced: Boolean, accent: Color): Brush =
@@ -3030,16 +3542,7 @@ private fun threadRowBrush(enhanced: Boolean, selected: Boolean): Brush {
     } else {
         MaterialTheme.colorScheme.surface.copy(alpha = if (enhanced) 0.8f else 1f)
     }
-    return if (enhanced) {
-        Brush.linearGradient(
-            colors = listOf(
-                base,
-                base,
-            ),
-        )
-    } else {
-        Brush.linearGradient(colors = listOf(base, base))
-    }
+    return Brush.verticalGradient(colors = listOf(base, base))
 }
 
 @Composable
@@ -3067,16 +3570,7 @@ private fun messageBubbleBrush(enhanced: Boolean, isLocal: Boolean, hasWarning: 
         isLocal -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (enhanced) 0.88f else 1f)
         else -> MaterialTheme.colorScheme.surface.copy(alpha = if (enhanced) 0.84f else 1f)
     }
-    return if (enhanced) {
-        Brush.linearGradient(
-            colors = listOf(
-                base,
-                base,
-            ),
-        )
-    } else {
-        Brush.linearGradient(colors = listOf(base, base))
-    }
+    return Brush.verticalGradient(colors = listOf(base, base))
 }
 
 @Composable

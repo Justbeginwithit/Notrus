@@ -1,0 +1,70 @@
+Categories:
+  - Connectivity
+  - Security
+License: Apache-2.0
+AuthorName: Notrus project
+WebSite: https://github.com/Justbeginwithit/Notrus
+SourceCode: https://github.com/Justbeginwithit/Notrus
+IssueTracker: https://github.com/Justbeginwithit/Notrus/issues
+Changelog: https://github.com/Justbeginwithit/Notrus/blob/main/RELEASE_NOTES.md
+AutoName: Notrus
+Summary: Self-hostable encrypted messenger client
+Description: |-
+  Notrus is a self-hostable encrypted messenger client for Android.
+  It is designed to talk to a Notrus relay that stores ciphertext,
+  attachment blobs, transparency data, device records, and abuse-control
+  state.
+
+  Message plaintext, attachment plaintext, private identity keys, local
+  ratchet state, and recovery secrets are intended to stay on user devices.
+  The relay still sees account identifiers, public keys, linked-device
+  metadata, opaque routing handles, delivery capabilities, timestamps,
+  traffic patterns, and conversation membership needed for routing.
+
+  Direct chats use a standards Signal path. Group chats use MLS-compatible
+  group delivery where supported by the current client state. Android local
+  secrets use Android Keystore or StrongBox-aware storage where available.
+
+  Notrus is beta software. It is not externally audited, does not provide
+  anonymity, and should not be described as proven secure. Users should read
+  the threat model, security documentation, and beta limitations before
+  relying on it.
+
+  The Android app does not include Firebase, Google Play Services, ads,
+  closed-source analytics SDKs, or crash-reporting SDKs in the current build
+  configuration. Relay attestation enforcement is operator-configured and is
+  documented separately.
+RepoType: git
+Repo: https://github.com/Justbeginwithit/Notrus.git
+Disabled: >-
+  Draft metadata prepared upstream. Enable after the corresponding public
+  release tag exists and F-Droid maintainers confirm the Android release
+  signing path should be unsigned for fdroiddata.
+Builds:
+  - versionName: 0.3.4-beta5
+    versionCode: 7
+    disable: Enable after tagging the release used for fdroiddata review.
+    commit: v0.3.4-beta5
+    subdir: native/android/NotrusAndroid
+    gradle:
+      - yes
+    buildjni: 'no'
+MaintainerNotes: |-
+  Upstream verification command:
+
+    cd native/android/NotrusAndroid
+    ./gradlew clean assembleRelease
+
+  The source tree has no Firebase, Google Play Services, ads, analytics SDKs,
+  or crash-reporting SDKs in the Android Gradle configuration at the time this
+  draft metadata was prepared.
+
+  The release build currently falls back to local debug signing when production
+  signing environment variables are absent. Before submitting to fdroiddata,
+  confirm whether the F-Droid build recipe should set a dedicated F-Droid
+  flag for unsigned release output or patch the signing config during
+  fdroiddata build review.
+AutoUpdateMode: None
+UpdateCheckMode: None
+CurrentVersion: 0.3.4-beta5
+CurrentVersionCode: 7

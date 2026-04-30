@@ -57,6 +57,7 @@ final class DeviceSecretStore {
 
     private var cachedData: Data?
     private var unlockedUntil: Date?
+    private var authenticatedContext: LAContext?
 
     static func shouldUseFileFallback(forKeychainStatus status: OSStatus) -> Bool {
         status == errSecMissingEntitlement ||
@@ -113,6 +114,7 @@ final class DeviceSecretStore {
     func lock() {
         cachedData = nil
         unlockedUntil = nil
+        authenticatedContext = nil
     }
 
     @discardableResult
@@ -366,7 +368,7 @@ final class DeviceSecretStore {
             throw DeviceSecretStoreError.authenticationFailed
         }
 
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, error in
                 if success {
                     continuation.resume(returning: ())
@@ -375,6 +377,7 @@ final class DeviceSecretStore {
                 }
             }
         }
+        authenticatedContext = context
     }
 
     private static func mapAuthenticationError(_ error: Error?) -> DeviceSecretStoreError {
@@ -411,15 +414,17 @@ final class DeviceSecretStore {
             throw DeviceSecretStoreError.keychain(deleteStatus)
         }
 
-        let status = SecItemAdd(
-            [
+        let item: [CFString: Any] = [
                 kSecClass: kSecClassGenericPassword,
                 kSecAttrService: service,
                 kSecAttrAccount: account,
                 kSecUseDataProtectionKeychain: true,
-                kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                kSecAttrAccessControl: try vaultKeyAccessControl(),
                 kSecValueData: data
-            ] as CFDictionary,
+        ]
+
+        let status = SecItemAdd(
+            item as CFDictionary,
             nil
         )
         if Self.shouldUseFileFallback(forKeychainStatus: status) {
@@ -447,6 +452,21 @@ final class DeviceSecretStore {
             }
         }
         return nil
+    }
+
+    private func vaultKeyAccessControl() throws -> SecAccessControl {
+        var error: Unmanaged<CFError>?
+        guard let accessControl = SecAccessControlCreateWithFlags(
+            nil,
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            .userPresence,
+            &error
+        ) else {
+            error?.release()
+            throw DeviceSecretStoreError.keychain(errSecParam)
+        }
+        error?.release()
+        return accessControl
     }
 
     private func saveMetadata(_ data: Data, for scope: String) throws {
@@ -733,6 +753,9 @@ final class DeviceSecretStore {
         }
         if let matchLimit {
             query[kSecMatchLimit] = matchLimit
+        }
+        if let authenticatedContext {
+            query[kSecUseAuthenticationContext] = authenticatedContext
         }
 
         return query

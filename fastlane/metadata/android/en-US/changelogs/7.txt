@@ -1,0 +1,8 @@
+Beta 0.3.4-beta5
+
+- Improves Android background notification reliability with foreground data-sync delivery, boot/package rescheduling, dedupe hardening, and non-committing preview decrypt.
+- Hardens Android local message persistence so notification-received messages and update-time syncs keep durable ciphertext/session state before notification bookkeeping.
+- Adds Android archived chats, restore, mute, per-message local deletion, read receipts, build identifiers, and clearer About/settings surfaces.
+- Fixes restored Android archived chats falling back into Archived after manual sync or newly reopened direct chats.
+- Improves macOS account recovery and encrypted chat backup import/export, safety-number verification recovery, relay settings display, and secure-session reset handling.
+- Documents F-Droid preparation status, conservative security wording, and remaining beta boundaries.

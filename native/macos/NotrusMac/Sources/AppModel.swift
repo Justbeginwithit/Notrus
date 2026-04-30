@@ -52,6 +52,7 @@ final class AppModel: ObservableObject {
     @Published var relayOrigin: String
     @Published var witnessOriginsText: String
     @Published var privacyModeEnabled: Bool
+    @Published var sendReadReceiptsToOthers: Bool
     @Published var contactSecurityState = ContactSecurityState(version: 1, contacts: [:], events: [])
     @Published var localProfiles: [LocalIdentity] = []
     @Published var localDeviceInventory = LocalDeviceInventory.empty
@@ -62,9 +63,13 @@ final class AppModel: ObservableObject {
     @Published var linkedDevices: [RelayLinkedDevice] = []
     @Published var users: [RelayUser] = []
     @Published var threads: [ConversationThread] = []
+    @Published var archivedThreads: [ConversationThread] = []
     @Published var selectedThreadID: String? {
         didSet {
             UserDefaults.standard.set(selectedThreadID, forKey: selectedThreadKey)
+            Task { @MainActor [weak self] in
+                await self?.sendReadReceiptForSelectedThread()
+            }
         }
     }
     @Published var draftText = ""
@@ -82,6 +87,7 @@ final class AppModel: ObservableObject {
     @Published var statusMessage = "Native macOS client ready."
     @Published var errorMessage: String?
     @Published var relayProtocolPolicy: ProtocolPolicySummary?
+    @Published var relayHealthStatus: RelayHealth?
     @Published var transparency = TransparencyVerificationResult.empty
     @Published var integrityReport: ClientIntegrityReport?
 
@@ -92,6 +98,7 @@ final class AppModel: ObservableObject {
     private let relayOriginKey = "NotrusMac.relayOrigin"
     private let witnessOriginsKey = "NotrusMac.witnessOrigins"
     private let privacyModeKey = "NotrusMac.privacyModeEnabled"
+    private let readReceiptsKey = "NotrusMac.sendReadReceiptsToOthers"
     private let selectedThreadKey = "NotrusMac.selectedThreadID"
     private let groupEpochRotationInterval = 12
     private let configuredProtocolPolicy = ProtocolPolicyMode(
@@ -104,6 +111,7 @@ final class AppModel: ObservableObject {
     private var appInstanceId: String?
     private var currentDeviceDescriptor: DeviceDescriptor?
     private var relaySession: RelaySession?
+    private var lastSentReadReceiptByThread: [String: String] = [:]
     private var cachedRelayHealth: RelayHealth?
     private var cachedRelayHealthOrigin: String?
     private var bootstrapStarted = false
@@ -121,6 +129,7 @@ final class AppModel: ObservableObject {
         self.relayOrigin = Self.bootstrapRelayOrigin(UserDefaults.standard.string(forKey: "NotrusMac.relayOrigin"))
         self.witnessOriginsText = UserDefaults.standard.string(forKey: witnessOriginsKey) ?? ""
         self.privacyModeEnabled = UserDefaults.standard.bool(forKey: privacyModeKey)
+        self.sendReadReceiptsToOthers = UserDefaults.standard.object(forKey: readReceiptsKey) as? Bool ?? true
         self.selectedThreadID = UserDefaults.standard.string(forKey: selectedThreadKey)
         self.transparencyPins = Self.loadPinnedHeads()
         self.transparencySignerPins = Self.loadPinnedSignerKeys()
@@ -138,10 +147,9 @@ final class AppModel: ObservableObject {
     }
 
     var composeCandidates: [RelayUser] {
-        let merged = Dictionary(
-            uniqueKeysWithValues: (contacts + directorySearchResults)
-                .map { ($0.id, $0) }
-        )
+        let merged = (contacts + directorySearchResults).reduce(into: [String: RelayUser]()) { partial, user in
+            partial[user.id] = user
+        }
         let candidates = merged.values
             .filter { !isContactBlocked($0.id) }
             .sorted {
@@ -162,7 +170,47 @@ final class AppModel: ObservableObject {
     }
 
     var selectedThread: ConversationThread? {
-        threads.first(where: { $0.id == selectedThreadID })
+        (threads + archivedThreads).first(where: { $0.id == selectedThreadID })
+    }
+
+    func isThreadArchived(_ threadId: String) -> Bool {
+        threadRecords[threadId]?.hiddenAt != nil
+    }
+
+    func isThreadMuted(_ threadId: String) -> Bool {
+        threadRecords[threadId]?.mutedAt != nil
+    }
+
+    func readReceiptSummary(for message: DecryptedMessage, in thread: ConversationThread) -> String? {
+        guard message.senderId == currentIdentity?.id else {
+            return nil
+        }
+        let orderedMessageIds = thread.rawThread.messages.map(\.id)
+        guard let messageIndex = orderedMessageIds.firstIndex(of: message.id) else {
+            return nil
+        }
+        let indexByMessageId = orderedMessageIds.enumerated().reduce(into: [String: Int]()) { partial, entry in
+            partial[entry.element] = entry.offset
+        }
+        let readers = (thread.rawThread.readReceipts ?? [])
+            .filter { $0.userId != currentIdentity?.id }
+            .filter { receipt in
+                guard let readIndex = indexByMessageId[receipt.lastReadMessageId] else {
+                    return false
+                }
+                return readIndex >= messageIndex
+            }
+            .compactMap { receipt in
+                thread.participants.first(where: { $0.id == receipt.userId })?.displayName
+            }
+            .sorted()
+        guard !readers.isEmpty else {
+            return nil
+        }
+        if readers.count == 1, let reader = readers.first {
+            return "Read by \(reader)"
+        }
+        return "Read by \(readers.count) people"
     }
 
     var canSendMessage: Bool {
@@ -300,12 +348,14 @@ final class AppModel: ObservableObject {
         cachedRelayHealth = health
         cachedRelayHealthOrigin = origin
         relayProtocolPolicy = health.protocolPolicy
+        relayHealthStatus = health
     }
 
     private func clearRelayHealthCache() {
         cachedRelayHealth = nil
         cachedRelayHealthOrigin = nil
         relayProtocolPolicy = nil
+        relayHealthStatus = nil
     }
 
     private func relayClientAndHealth(
@@ -485,6 +535,7 @@ final class AppModel: ObservableObject {
         }
         users = []
         threads = []
+        archivedThreads = []
         selectedThreadID = nil
         draftText = ""
         transparency = .empty
@@ -595,6 +646,13 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(privacyModeEnabled, forKey: privacyModeKey)
     }
 
+    func persistReadReceiptsPreference() {
+        UserDefaults.standard.set(sendReadReceiptsToOthers, forKey: readReceiptsKey)
+        if !sendReadReceiptsToOthers {
+            lastSentReadReceiptByThread.removeAll()
+        }
+    }
+
     private func applyPrivacyDelayIfEnabled(_ kind: PrivacyDelayKind) async {
         guard privacyModeEnabled else {
             return
@@ -656,15 +714,17 @@ final class AppModel: ObservableObject {
                 signalBundle: standards.signalBundle,
                 signalState: standards.signalState
             )
-            _ = try identityStore.saveIdentity(standardsIdentity, makeActive: true)
-            try threadStateStore.saveRecords([:], for: standardsIdentity)
+            let registration = try await bootstrapRelaySession(identity: standardsIdentity)
+            let registeredIdentity = mergeRegisteredIdentity(standardsIdentity, registered: registration.user)
+            _ = try identityStore.saveIdentity(registeredIdentity, makeActive: true)
+            try threadStateStore.saveRecords([:], for: registeredIdentity)
             refreshUnlockedDeviceSessionMetadata()
-            try reloadLocalProfiles(preferredUserId: standardsIdentity.id)
+            try reloadLocalProfiles(preferredUserId: registeredIdentity.id)
             clearRemoteWorkspace()
             localVaultLocked = false
             onboardingDisplayName = ""
             onboardingUsername = ""
-            try await registerAndSync()
+            try await sync()
             statusMessage = "Created a device-protected macOS profile with \(unlockMethod)."
         } catch {
             errorMessage = renderCreateIdentityError(error, attemptedUsername: username)
@@ -678,6 +738,11 @@ final class AppModel: ObservableObject {
             .sorted { $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending }
             .map { "@\($0.username) (\($0.id))" }
             .joined(separator: "; ")
+        if normalized.contains("already bound to another relay account") ||
+            normalized.contains("reserved by a deactivated relay account")
+        {
+            return "That username is already taken. Choose another username."
+        }
         if
             normalized.contains("already bound to a different device identity") ||
             normalized.contains("device identity does not match the stored account record")
@@ -794,7 +859,9 @@ final class AppModel: ObservableObject {
         let transparencySnapshot = try await client.transparency()
         let deviceSnapshot = try await client.securityDevices()
         let directory = payload.users.sorted { $0.username < $1.username }
-        let lookup = Dictionary(uniqueKeysWithValues: directory.map { ($0.id, $0) })
+        let lookup = directory.reduce(into: [String: RelayUser]()) { partial, user in
+            partial[user.id] = user
+        }
         transparency = try await verifyTransparency(
             entryCount: transparencySnapshot.entryCount ?? transparencySnapshot.transparencyEntries?.count ?? 0,
             entries: transparencySnapshot.transparencyEntries ?? [],
@@ -806,10 +873,11 @@ final class AppModel: ObservableObject {
 
         let decryptedThreads = try payload.threads
             .map { thread in
-                try materialize(thread: thread, usersById: lookup, identity: &identity)
+                return try materialize(thread: thread, usersById: lookup, identity: &identity)
             }
             .sorted(by: sortConversationThreads)
         let visibleThreads = decryptedThreads.filter { threadRecords[$0.id]?.hiddenAt == nil }
+        let archived = decryptedThreads.filter { threadRecords[$0.id]?.hiddenAt != nil }
 
         if identity != currentIdentity {
             try persistCurrentIdentity(identity)
@@ -822,6 +890,7 @@ final class AppModel: ObservableObject {
         linkedDevices = deviceSnapshot.devices.sorted { $0.updatedAt > $1.updatedAt }
         linkedDeviceEvents = deviceSnapshot.deviceEvents.sorted { $0.createdAt > $1.createdAt }
         threads = visibleThreads
+        archivedThreads = archived
 
         if selectedThreadID == nil {
             selectedThreadID = visibleThreads.first?.id
@@ -836,6 +905,8 @@ final class AppModel: ObservableObject {
         } else {
             statusMessage = "Synced \(directory.count) identities and \(visibleThreads.count) threads from the relay."
         }
+
+        await sendReadReceiptForSelectedThread()
     }
 
     func presentComposer() {
@@ -1040,13 +1111,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func prepareCurrentAccountExport(passphrase: String) async -> PreparedRecoveryArchiveExport? {
+    func prepareCurrentAccountExport(secret: String) async -> PreparedRecoveryArchiveExport? {
         guard let identity = currentIdentity else {
             return nil
         }
 
-        guard passphrase.trimmingCharacters(in: .whitespacesAndNewlines).count >= 8 else {
-            errorMessage = "Use an export passphrase with at least 8 characters."
+        guard secret.trimmingCharacters(in: .whitespacesAndNewlines).count >= 8 else {
+            errorMessage = "Use an export secret with at least 8 characters."
             return nil
         }
 
@@ -1058,12 +1129,10 @@ final class AppModel: ObservableObject {
                 reason: "Confirm local device authentication before exporting an encrypted recovery archive."
             )
             refreshUnlockedDeviceSessionMetadata()
-            let records = threadRecords
             let data = try await NativeExecution.run {
                 try AccountPortability.exportArchiveData(
                     identity: identity,
-                    threadRecords: records,
-                    passphrase: passphrase
+                    secret: secret
                 )
             }
             statusMessage = "Choose where to save \(identity.displayName)'s encrypted recovery archive."
@@ -1092,18 +1161,24 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func importAccount(from url: URL, passphrase: String) async {
-        guard passphrase.trimmingCharacters(in: .whitespacesAndNewlines).count >= 8 else {
-            errorMessage = "Use the recovery archive passphrase to import a profile."
+    func importAccount(from url: URL, secret: String) async {
+        guard secret.trimmingCharacters(in: .whitespacesAndNewlines).count >= 8 else {
+            errorMessage = "Use the recovery archive secret to import a profile."
             return
         }
 
         do {
             beginBlockingBusy("Importing the encrypted recovery archive onto this Mac...")
             defer { endBlockingBusy() }
+            let hasScopedAccess = url.startAccessingSecurityScopedResource()
+            defer {
+                if hasScopedAccess {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
 
             let payload = try await NativeExecution.run {
-                try AccountPortability.importArchive(from: url, passphrase: passphrase)
+                try AccountPortability.importArchive(from: url, secret: secret)
             }
             _ = try await deviceSecretStore.reauthenticateInteractively(
                 reason: "Confirm local device authentication before importing a recovery archive onto this Mac.",
@@ -1125,11 +1200,137 @@ final class AppModel: ObservableObject {
 
     private func importPortableArchive(_ archive: PortableAccountArchive, sourceFileName: String) async throws {
         _ = try identityStore.saveIdentity(archive.identity, makeActive: true)
-        try threadStateStore.saveRecords(archive.threadRecords, for: archive.identity)
         try reloadLocalProfiles(preferredUserId: archive.identity.id)
         clearRemoteWorkspace()
         try await registerAndSync()
-        statusMessage = "Imported \(archive.identity.displayName)'s encrypted recovery archive from \(sourceFileName)."
+        statusMessage = "Imported \(archive.identity.displayName)'s legacy recovery archive from \(sourceFileName). Chat history was not restored; use Restore chat backup for old messages."
+    }
+
+    func prepareCurrentChatBackupExport(secret: String) async -> PreparedChatBackupExport? {
+        guard let identity = currentIdentity else {
+            return nil
+        }
+
+        guard secret.trimmingCharacters(in: .whitespacesAndNewlines).count >= 8 else {
+            errorMessage = "Use a chat-backup secret with at least 8 characters."
+            return nil
+        }
+
+        do {
+            beginBlockingBusy("Preparing the encrypted chat backup...")
+            defer { endBlockingBusy() }
+
+            _ = try await deviceSecretStore.reauthenticateInteractively(
+                reason: "Confirm local device authentication before exporting chat history."
+            )
+            refreshUnlockedDeviceSessionMetadata()
+            let records = threadRecords
+            let data = try await NativeExecution.run {
+                try ChatBackupPortability.exportBackupData(
+                    identity: identity,
+                    threadRecords: records,
+                    secret: secret
+                )
+            }
+            statusMessage = "Choose where to save \(identity.displayName)'s encrypted chat backup."
+            return PreparedChatBackupExport(
+                defaultFileName: "notrus-\(identity.username)-chat-backup.json",
+                displayName: identity.displayName,
+                document: RecoveryArchiveDocument(data: data)
+            )
+        } catch {
+            if !isUserCancellation(error) {
+                errorMessage = error.localizedDescription
+            }
+            return nil
+        }
+    }
+
+    func completePreparedChatBackupExport(_ prepared: PreparedChatBackupExport, result: Result<URL, Error>) {
+        switch result {
+        case .success(let url):
+            AccountPortability.revealExportedArchive(at: url)
+            statusMessage = "Exported \(prepared.displayName)'s encrypted chat backup to \(url.lastPathComponent)."
+        case .failure(let error):
+            if !isUserCancellation(error) {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func importChatBackup(from url: URL, secret: String) async {
+        guard secret.trimmingCharacters(in: .whitespacesAndNewlines).count >= 8 else {
+            errorMessage = "Use the chat-backup secret to restore message history."
+            return
+        }
+        guard let identity = currentIdentity else {
+            errorMessage = "Recover or create the account before restoring chat history."
+            return
+        }
+
+        do {
+            beginBlockingBusy("Restoring encrypted chat backup onto this Mac...")
+            defer { endBlockingBusy() }
+            let hasScopedAccess = url.startAccessingSecurityScopedResource()
+            defer {
+                if hasScopedAccess {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            let backup = try await NativeExecution.run {
+                try ChatBackupPortability.importBackup(from: url, secret: secret)
+            }
+            guard backup.identity.id == identity.id else {
+                errorMessage = "This chat backup belongs to @\(backup.identity.username), not the active account."
+                return
+            }
+            _ = try await deviceSecretStore.reauthenticateInteractively(
+                reason: "Confirm local device authentication before restoring chat history onto this Mac."
+            )
+            refreshUnlockedDeviceSessionMetadata()
+            let restoredIdentity = identity.updatingStandards(
+                mlsKeyPackage: backup.identity.standardsMlsKeyPackage,
+                mlsState: backup.identity.standardsMlsState,
+                signalBundle: backup.identity.standardsSignalBundle,
+                signalState: backup.identity.standardsSignalState
+            )
+            if restoredIdentity != identity {
+                _ = try identityStore.saveIdentity(restoredIdentity, makeActive: true)
+                currentIdentity = restoredIdentity
+                try reloadLocalProfiles(preferredUserId: restoredIdentity.id)
+            }
+            threadRecords.merge(backup.threadRecords) { existing, restored in
+                mergeThreadStoreRecordsForRestore(existing: existing, restored: restored)
+            }
+            try persistThreadStore()
+            try await sync()
+            statusMessage = "Restored \(backup.threadRecords.count) conversations from \(url.lastPathComponent). Attachments are restored as encrypted references; blobs remain relay-backed unless separately available."
+        } catch {
+            if !isUserCancellation(error) {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func mergeThreadStoreRecordsForRestore(
+        existing: ThreadStoreRecord,
+        restored: ThreadStoreRecord
+    ) -> ThreadStoreRecord {
+        var merged = restored
+        var messageCache = existing.messageCache
+        restored.messageCache.forEach { messageId, restoredState in
+            if canSkipLocalDecrypt(messageCache[messageId]) {
+                return
+            }
+            messageCache[messageId] = restoredState
+        }
+        merged.messageCache = messageCache
+        merged.localTitle = restored.localTitle ?? existing.localTitle
+        merged.hiddenAt = restored.hiddenAt ?? existing.hiddenAt
+        merged.mutedAt = restored.mutedAt ?? existing.mutedAt
+        merged.purgedAt = restored.purgedAt ?? existing.purgedAt
+        return merged
     }
 
     private func importTransferArchive(_ archive: RecoveryTransferArchive, sourceFileName: String) async throws {
@@ -1245,7 +1446,7 @@ final class AppModel: ObservableObject {
     }
 
     func createThread() async {
-        guard let identity = currentIdentity else {
+        guard var identity = currentIdentity else {
             return
         }
 
@@ -1272,6 +1473,19 @@ final class AppModel: ObservableObject {
             return
         }
 
+        if selected.count == 1, let remoteUserId = selected.first {
+            if let archivedDirectThreadId = threadRecords.first(where: { _, record in
+                record.protocolField == "signal-pqxdh-double-ratchet-v1" &&
+                    record.standardsSignalPeerUserId == remoteUserId &&
+                    record.hiddenAt != nil
+            })?.key {
+                await restoreConversation(archivedDirectThreadId)
+                composePresented = false
+                statusMessage = "Restored the archived direct chat instead of creating a duplicate."
+                return
+            }
+        }
+
         beginBlockingBusy("Creating the secure thread on this Mac...")
         defer { endBlockingBusy() }
 
@@ -1287,22 +1501,18 @@ final class AppModel: ObservableObject {
                     "\(protocolSpec.label) is blocked by the active standards policy. Notrus still needs a real PQXDH/Double Ratchet 1:1 path and RFC 9420 MLS groups before this mode can create conversations."
                 )
             }
-            let participantsById = try await refreshedRoutingUsers(
+            var participantsById = try await refreshedRoutingUsers(
                 selectedUserIds: selected,
-                participantsById: Dictionary(uniqueKeysWithValues: composeCandidates.map { ($0.id, $0) })
+                participantsById: composeCandidates.reduce(into: [String: RelayUser]()) { partial, user in
+                    partial[user.id] = user
+                }
             )
             let participantHandles = selected.compactMap { participantsById[$0]?.contactHandle }
-            if protocolName == "signal-pqxdh-double-ratchet-v1",
-               let remoteUserId = selected.first,
-               restoreHiddenDirectThreadIfPresent(remoteUserId: remoteUserId)
-            {
-                composePresented = false
-                try await sync()
-                if let restoredThreadId = threadRecords.first(where: { $0.value.standardsSignalPeerUserId == remoteUserId && $0.value.hiddenAt == nil })?.key {
-                    selectedThreadID = restoredThreadId
+            if protocolName == "signal-pqxdh-double-ratchet-v1", let remoteUserId = selected.first {
+                identity = try await resetSignalPeerForFreshDirectChat(identity: identity, remoteUserId: remoteUserId)
+                if let refreshedSelf = currentUser, refreshedSelf.id == identity.id {
+                    participantsById[identity.id] = refreshedSelf
                 }
-                statusMessage = "Reopened the local direct conversation on this Mac. Older locally-deleted history stays removed."
-                return
             }
             let prepared = try await NativeExecution.run {
                 let threadId = UUID().uuidString.lowercased()
@@ -1827,18 +2037,9 @@ final class AppModel: ObservableObject {
         do {
             if
                 wasChanged,
-                var identity = currentIdentity,
-                let signalState = identity.standardsSignalState
+                let identity = currentIdentity
             {
-                let reset = try await NativeExecution.run {
-                    try StandardsCoreBridge.signalResetPeer(localSignalState: signalState, remoteUserId: userId)
-                }
-                identity = identity.updatingStandards(signalState: reset.localSignalState)
-                try persistCurrentIdentity(identity)
-                threadRecords = threadRecords.filter { _, value in
-                    value.standardsSignalPeerUserId != userId
-                }
-                try persistThreadStore()
+                currentIdentity = try await resetSignalPeerForFreshDirectChat(identity: identity, remoteUserId: userId)
             }
 
             record.trustedFingerprint = record.observedFingerprint
@@ -1859,7 +2060,7 @@ final class AppModel: ObservableObject {
             try persistSecurityState()
             if wasChanged {
                 try await sync()
-                statusMessage = "Verified \(record.displayName)'s new safety number and cleared stale direct-session state on this Mac. Recreate direct conversations if needed."
+                statusMessage = "Verified \(record.displayName)'s new safety number, kept local chat history, and republished fresh secure-session keys."
             } else {
                 statusMessage = "Marked \(record.displayName)'s current safety number as verified on this Mac."
             }
@@ -1952,31 +2153,194 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func deleteConversationLocally(_ threadId: String) {
+    func deleteConversationLocally(_ threadId: String) async {
         guard var record = threadRecords[threadId] else {
             return
         }
 
         let purgeAt = NotrusCrypto.isoNow()
-        let currentMessageCount = threads.first(where: { $0.id == threadId })?.rawThread.messages.count ?? 0
+        let existingThread = (threads + archivedThreads).first(where: { $0.id == threadId })
+        let currentMessageCount = existingThread?.rawThread.messages.count ?? 0
         record.hiddenAt = purgeAt
         record.purgedAt = purgeAt
         record.messageCache.removeAll()
         record.processedMessageCount = max(record.processedMessageCount, currentMessageCount)
-        record.lastProcessedMessageId = threads.first(where: { $0.id == threadId })?.rawThread.messages.last?.id ?? record.lastProcessedMessageId
+        record.lastProcessedMessageId = existingThread?.rawThread.messages.last?.id ?? record.lastProcessedMessageId
         threadRecords[threadId] = record
+        lastSentReadReceiptByThread.removeValue(forKey: threadId)
         threads.removeAll { $0.id == threadId }
+        if let existingThread {
+            archivedThreads.removeAll { $0.id == threadId }
+            archivedThreads.append(existingThread)
+            archivedThreads.sort(by: sortConversationThreads)
+        }
         if selectedThreadID == threadId {
-            selectedThreadID = threads.first?.id
+            selectedThreadID = nil
             draftText = ""
             pendingAttachments = []
         }
 
         do {
             try persistThreadStore()
-            statusMessage = "Deleted the local copy of this conversation from this Mac."
+            statusMessage = "Deleted local message history and moved the conversation to Archived. Secure-session state was kept for future messages."
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func archiveConversation(_ threadId: String) async {
+        guard var record = threadRecords[threadId] else {
+            return
+        }
+        record.hiddenAt = record.hiddenAt ?? NotrusCrypto.isoNow()
+        threadRecords[threadId] = record
+        if let thread = threads.first(where: { $0.id == threadId }) {
+            threads.removeAll { $0.id == threadId }
+            archivedThreads.removeAll { $0.id == threadId }
+            archivedThreads.append(thread)
+            archivedThreads.sort(by: sortConversationThreads)
+        }
+        if selectedThreadID == threadId {
+            selectedThreadID = nil
+            draftText = ""
+            pendingAttachments = []
+        }
+        do {
+            try persistThreadStore()
+            statusMessage = "Archived this conversation on this Mac."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func restoreConversation(_ threadId: String) async {
+        guard var record = threadRecords[threadId] else {
+            return
+        }
+        record.hiddenAt = nil
+        threadRecords[threadId] = record
+        if let thread = archivedThreads.first(where: { $0.id == threadId }) {
+            archivedThreads.removeAll { $0.id == threadId }
+            threads.removeAll { $0.id == threadId }
+            threads.append(thread)
+            threads.sort(by: sortConversationThreads)
+        }
+        selectedThreadID = threadId
+        do {
+            try persistThreadStore()
+            try await sync()
+            selectedThreadID = threadId
+            statusMessage = "Restored this conversation."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func toggleConversationMuted(_ threadId: String) {
+        guard var record = threadRecords[threadId] else {
+            return
+        }
+        record.mutedAt = record.mutedAt == nil ? NotrusCrypto.isoNow() : nil
+        threadRecords[threadId] = record
+        do {
+            try persistThreadStore()
+            statusMessage = record.mutedAt == nil ? "Unmuted conversation notifications." : "Muted conversation notifications."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func resetConversationSession(_ threadId: String) async {
+        guard
+            let identity = currentIdentity,
+            let record = threadRecords[threadId],
+            let remoteUserId = record.standardsSignalPeerUserId
+        else {
+            errorMessage = "Only direct chats with local secure-message state can reset their secure session."
+            return
+        }
+        do {
+            let refreshedIdentity = try await resetSignalPeerForFreshDirectChat(identity: identity, remoteUserId: remoteUserId)
+            currentIdentity = refreshedIdentity
+            statusMessage = "Reset and republished this Mac's secure-session pre-key bundle. Existing local messages were kept."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func deleteMessageLocally(threadId: String, messageId: String) {
+        guard let existingThread = threads.first(where: { $0.id == threadId }) else {
+            return
+        }
+        var record = threadRecords[threadId] ?? ThreadStoreRecord(protocolField: existingThread.rawThread.protocolField ?? "static-room-v1")
+        let cached = record.messageCache[messageId]
+        record.messageCache[messageId] = CachedMessageState(
+            attachments: cached?.attachments ?? [],
+            body: cached?.body ?? "",
+            hidden: true,
+            status: cached?.status ?? "deleted-local"
+        )
+        threadRecords[threadId] = record
+        let visibleMessages = existingThread.messages.filter { $0.id != messageId }
+        if let index = threads.firstIndex(where: { $0.id == threadId }) {
+            threads[index] = ConversationThread(
+                id: existingThread.id,
+                title: existingThread.title,
+                protocolLabel: existingThread.protocolLabel,
+                participants: existingThread.participants,
+                rawThread: existingThread.rawThread,
+                messages: visibleMessages,
+                warning: existingThread.warning,
+                supported: existingThread.supported
+            )
+        }
+
+        do {
+            try persistThreadStore()
+            statusMessage = "Deleted one local message from this Mac."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func sendReadReceiptForSelectedThread() async {
+        guard let thread = selectedThread else {
+            return
+        }
+        await sendReadReceiptIfNeeded(for: thread)
+    }
+
+    private func sendReadReceiptIfNeeded(for thread: ConversationThread) async {
+        guard sendReadReceiptsToOthers, let identity = currentIdentity else {
+            return
+        }
+        guard let latestRemoteMessage = thread.rawThread.messages.last(where: { $0.senderId != identity.id }) else {
+            return
+        }
+        guard lastSentReadReceiptByThread[thread.id] != latestRemoteMessage.id else {
+            return
+        }
+        guard
+            let mailboxHandle = thread.rawThread.mailboxHandle,
+            let deliveryCapability = thread.rawThread.deliveryCapability,
+            !mailboxHandle.isEmpty,
+            !deliveryCapability.isEmpty
+        else {
+            return
+        }
+
+        do {
+            _ = try await currentRelayClient.postReadReceipt(
+                mailboxHandle: mailboxHandle,
+                deliveryCapability: deliveryCapability,
+                receipt: ReadReceiptRequest(
+                    lastReadMessageId: latestRemoteMessage.id,
+                    readAt: NotrusCrypto.isoNow()
+                )
+            )
+            lastSentReadReceiptByThread[thread.id] = latestRemoteMessage.id
+        } catch {
+            // Read receipts must never block message sync or make the chat feel broken.
         }
     }
 
@@ -2163,7 +2527,9 @@ final class AppModel: ObservableObject {
             throw RelayClientError.requestFailed("This macOS profile is missing its Signal standards state.")
         }
 
-        let usersById = Dictionary(uniqueKeysWithValues: users.map { ($0.id, $0) })
+        let usersById = users.reduce(into: [String: RelayUser]()) { partial, user in
+            partial[user.id] = user
+        }
         guard var record = threadRecords[thread.id] else {
             throw RelayClientError.requestFailed("This direct thread is missing local Signal session metadata on this Mac.")
         }
@@ -2383,7 +2749,9 @@ final class AppModel: ObservableObject {
         }
 
         let previousState = state
-        let usersById = Dictionary(uniqueKeysWithValues: users.map { ($0.id, $0) })
+        let usersById = users.reduce(into: [String: RelayUser]()) { partial, user in
+            partial[user.id] = user
+        }
         let createdAt = NotrusCrypto.isoNow()
         var activeState = state
         var groupCommit: RelayGroupCommit? = nil
@@ -2442,19 +2810,27 @@ final class AppModel: ObservableObject {
         return leftDate > rightDate
     }
 
-    @discardableResult
-    private func restoreHiddenDirectThreadIfPresent(remoteUserId: String) -> Bool {
-        guard let entry = threadRecords.first(where: { $0.value.standardsSignalPeerUserId == remoteUserId && $0.value.hiddenAt != nil }) else {
-            return false
+    private func resetSignalPeerForFreshDirectChat(identity: LocalIdentity, remoteUserId: String) async throws -> LocalIdentity {
+        guard let signalState = identity.standardsSignalState else {
+            return identity
         }
-        var record = entry.value
-        record.hiddenAt = nil
-        if record.purgedAt != nil {
-            record.messageCache.removeAll()
+        let reset = try await NativeExecution.run {
+            try StandardsCoreBridge.signalResetPeer(localSignalState: signalState, remoteUserId: remoteUserId)
         }
-        threadRecords[entry.key] = record
-        try? persistThreadStore()
-        return true
+        let refreshed = try await NativeExecution.run {
+            try StandardsCoreBridge.refreshSignalBundle(signalState: reset.localSignalState)
+        }
+        let refreshedIdentity = identity.updatingStandards(
+            signalBundle: refreshed.signalBundle,
+            signalState: refreshed.signalState
+        )
+        try persistCurrentIdentity(refreshedIdentity)
+        let registration = try await bootstrapRelaySession(identity: refreshedIdentity)
+        let registeredIdentity = mergeRegisteredIdentity(refreshedIdentity, registered: registration.user)
+        if registeredIdentity != refreshedIdentity {
+            try persistCurrentIdentity(registeredIdentity)
+        }
+        return registeredIdentity
     }
 
     private func restoreDeletedContactsIfPresent(_ userIds: [String]) throws {
@@ -2518,7 +2894,11 @@ final class AppModel: ObservableObject {
     }
 
     private func mergeDirectoryMatches(_ lists: [RelayUser]...) -> [RelayUser] {
-        Dictionary(uniqueKeysWithValues: lists.flatMap { $0 }.map { ($0.id, $0) })
+        lists
+            .flatMap { $0 }
+            .reduce(into: [String: RelayUser]()) { partial, user in
+                partial[user.id] = user
+            }
             .values
             .sorted { $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending }
     }
@@ -2692,10 +3072,29 @@ final class AppModel: ObservableObject {
         if cached?.hidden == true {
             return false
         }
-        guard let purgedAt = record?.purgedAt, cached == nil else {
+        guard let purgedAt = record?.purgedAt else {
             return true
         }
         return message.createdAt > purgedAt
+    }
+
+    private func hiddenMaterializedThread(
+        thread: RelayThread,
+        usersById: [String: RelayUser],
+        identityId: String,
+        record: ThreadStoreRecord
+    ) -> ConversationThread {
+        let participants = thread.participantIds.compactMap { usersById[$0] }
+        return ConversationThread(
+            id: thread.id,
+            title: resolvedThreadTitle(thread: thread, participants: participants, identityID: identityId),
+            protocolLabel: NotrusProtocolCatalog.spec(for: thread.protocolField ?? "static-room-v1").label,
+            participants: participants,
+            rawThread: thread,
+            messages: [],
+            warning: "This local conversation was deleted on this Mac.",
+            supported: false
+        )
     }
 
     private func materialize(
@@ -2807,6 +3206,14 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func canSkipLocalDecrypt(_ cached: CachedMessageState?) -> Bool {
+        guard let cached else { return false }
+        if cached.hidden { return true }
+        if cached.status == "ok", !cached.body.isEmpty { return true }
+        if cached.status == "missing-local-state", !cached.body.isEmpty { return true }
+        return false
+    }
+
     private func materializeStandardsSignalThread(
         thread: RelayThread,
         usersById: [String: RelayUser],
@@ -2852,32 +3259,28 @@ final class AppModel: ObservableObject {
                 thread.messages[record.processedMessageCount - 1].id != record.lastProcessedMessageId
             )
         {
-            return materializeUnsupportedThread(
-                thread: thread,
-                participants: participants,
-                usersById: usersById,
-                title: resolvedThreadTitle(thread: thread, participants: participants, identityID: identity.id),
-                protocolName: "signal-pqxdh-double-ratchet-v1",
-                reason: "The local Signal session history on this Mac no longer matches the relay transcript. Recreate the conversation or restore a newer recovery archive.",
-                warnings: threadWarnings
-            )
+            record.processedMessageCount = 0
+            record.lastProcessedMessageId = nil
+            threadWarnings.append("This Mac detected changed relay transcript ordering and preserved readable local messages while rechecking newer ciphertext.")
         }
 
-        for message in thread.messages.dropFirst(record.processedMessageCount) {
+        for message in thread.messages {
+            if canSkipLocalDecrypt(record.messageCache[message.id]) {
+                continue
+            }
+
             guard let sender = usersById[message.senderId] else {
                 record.messageCache[message.id] = CachedMessageState(
                     body: "Sender record missing from directory.",
                     hidden: false,
                     status: "missing-sender"
                 )
-                record.processedMessageCount += 1
-                record.lastProcessedMessageId = message.id
                 continue
             }
 
             if message.senderId == identity.id {
                 record.messageCache[message.id] = record.messageCache[message.id] ?? CachedMessageState(
-                    body: "Local plaintext unavailable on this Mac for that previously-sent Signal message.",
+                    body: "Local plaintext unavailable on this Mac for that previously-sent Notrus message.",
                     hidden: false,
                     status: "missing-local-state"
                 )
@@ -2900,26 +3303,28 @@ final class AppModel: ObservableObject {
                         status: "ok"
                     )
                 } catch {
-                    threadWarnings.append("A Signal message from \(sender.displayName) failed decryption or authentication.")
-                    record.messageCache[message.id] = CachedMessageState(
-                        body: error.localizedDescription,
-                        hidden: false,
-                        status: "invalid"
-                    )
+                    threadWarnings.append("A Notrus message from \(sender.displayName) failed decryption or authentication.")
+                    if !canSkipLocalDecrypt(record.messageCache[message.id]) {
+                        record.messageCache[message.id] = CachedMessageState(
+                            body: error.localizedDescription,
+                            hidden: false,
+                            status: "invalid"
+                        )
+                    }
                 }
             } else {
-                threadWarnings.append("A Signal message was missing its authenticated wire payload.")
+                threadWarnings.append("A Notrus message was missing its authenticated wire payload.")
                 record.messageCache[message.id] = CachedMessageState(
-                    body: "The Signal wire message was incomplete.",
+                    body: "The Notrus wire message was incomplete.",
                     hidden: false,
                     status: "invalid"
                 )
             }
 
-            record.processedMessageCount += 1
-            record.lastProcessedMessageId = message.id
         }
 
+        record.processedMessageCount = thread.messages.count
+        record.lastProcessedMessageId = thread.messages.last?.id
         threadRecords[thread.id] = record
 
         let messages = thread.messages.compactMap { message -> DecryptedMessage? in
@@ -2934,7 +3339,7 @@ final class AppModel: ObservableObject {
                 senderId: message.senderId,
                 senderName: usersById[message.senderId]?.displayName ?? "Unknown user",
                 createdAt: message.createdAt,
-                body: cached?.body ?? "Local plaintext unavailable for this Signal message.",
+                body: cached?.body ?? "Local plaintext unavailable for this Notrus message.",
                 status: cached?.status ?? "missing-local-state"
             )
         }
@@ -2982,15 +3387,21 @@ final class AppModel: ObservableObject {
             {
                 record = ThreadStoreRecord(
                     hiddenAt: record.hiddenAt,
+                    mutedAt: record.mutedAt,
                     purgedAt: record.purgedAt,
                     localTitle: record.localTitle,
-                    messageCache: [:],
+                    messageCache: record.messageCache,
                     processedMessageCount: 0,
                     protocolField: "mls-rfc9420-v1"
                 )
+                threadWarnings.append("This Mac detected changed relay transcript ordering and preserved readable local group messages while rechecking newer ciphertext.")
             }
 
-            for message in thread.messages.dropFirst(record.processedMessageCount) {
+            for message in thread.messages {
+                if canSkipLocalDecrypt(record.messageCache[message.id]) {
+                    continue
+                }
+
                 if message.senderId == identity.id {
                     record.messageCache[message.id] = record.messageCache[message.id] ?? CachedMessageState(
                         body: "Local plaintext unavailable on this Mac for that previously-sent compatible group message.",
@@ -3038,10 +3449,10 @@ final class AppModel: ObservableObject {
                     )
                 }
 
-                record.processedMessageCount += 1
-                record.lastProcessedMessageId = message.id
             }
 
+            record.processedMessageCount = thread.messages.count
+            record.lastProcessedMessageId = thread.messages.last?.id
             threadRecords[thread.id] = record
             let messages = thread.messages.compactMap { message -> DecryptedMessage? in
                 let cached = record.messageCache[message.id]
@@ -3740,7 +4151,9 @@ final class AppModel: ObservableObject {
             throw RelayClientError.requestFailed("This Mac does not have a wrapped room key for the selected thread.")
         }
 
-        let directory = usersById ?? Dictionary(uniqueKeysWithValues: users.map { ($0.id, $0) })
+        let directory = usersById ?? users.reduce(into: [String: RelayUser]()) { partial, user in
+            partial[user.id] = user
+        }
         guard let sender = directory[envelope.fromUserId] else {
             throw RelayClientError.requestFailed("The room-key sender is missing from the relay directory.")
         }
