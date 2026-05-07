@@ -5,7 +5,7 @@ plugins {
 
 @Suppress("UnstableApiUsage")
 
-val signalVersion = "0.92.2"
+val signalVersion = "0.93.2"
 val defaultRelayOrigin = System.getenv("NOTRUS_DEFAULT_RELAY_ORIGIN") ?: "https://relay.notrus.cloud"
 val releaseKeystorePath = System.getenv("NOTRUS_ANDROID_KEYSTORE_PATH")
 val releaseKeystorePassword = System.getenv("NOTRUS_ANDROID_KEYSTORE_PASSWORD")
