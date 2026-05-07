@@ -47,7 +47,8 @@ const ATTESTATION_ORIGIN = env("NOTRUS_ATTESTATION_ORIGIN")?.trim() ?? "";
 const REQUIRE_ANDROID_ATTESTATION = env("NOTRUS_REQUIRE_ANDROID_ATTESTATION") === "true";
 const REQUIRE_ANDROID_PLAY_INTEGRITY = env("NOTRUS_REQUIRE_ANDROID_PLAY_INTEGRITY") === "true";
 const REQUIRE_APPLE_DEVICECHECK = env("NOTRUS_REQUIRE_APPLE_DEVICECHECK") === "true";
-const ENABLE_LEGACY_API_ROUTES = env("NOTRUS_ENABLE_LEGACY_API") === "true" || process.env.NODE_ENV !== "production";
+const ENABLE_LEGACY_API_ROUTES =
+  env("NOTRUS_ENABLE_DEVELOPMENT_COMPAT_ROUTES") === "true" || env("NOTRUS_ENABLE_LEGACY_API") === "true";
 const TRUST_PROXY = process.env.TRUST_PROXY === "true";
 const CLIENT_ORIGINS = (process.env.CLIENT_ORIGIN ?? "*")
   .split(",")
@@ -511,7 +512,7 @@ function pruneEphemeralPrivacyState() {
   for (const [token, record] of MAILBOX_CAPABILITIES.entries()) {
     if (!record || now >= record.expiresAtMs) {
       MAILBOX_CAPABILITIES.delete(token);
-      MAILBOX_CAPABILITY_INDEX.delete(`${record?.threadId ?? ""}:${record?.userId ?? ""}`);
+      MAILBOX_CAPABILITY_INDEX.delete(mailboxCapabilityCacheKey(record?.threadId, record?.userId, record?.deviceId));
     }
   }
 }
@@ -750,9 +751,13 @@ function resolveMailboxHandle(handle) {
   return null;
 }
 
-function issueMailboxCapability({ threadId, userId }) {
+function mailboxCapabilityCacheKey(threadId, userId, deviceId = null) {
+  return `${threadId ?? ""}:${userId ?? ""}:${deviceId ?? "no-device"}`;
+}
+
+function issueMailboxCapability({ threadId, userId, deviceId = null }) {
   pruneEphemeralPrivacyState();
-  const cacheKey = `${threadId}:${userId}`;
+  const cacheKey = mailboxCapabilityCacheKey(threadId, userId, deviceId);
   const existingToken = MAILBOX_CAPABILITY_INDEX.get(cacheKey);
   const existingRecord = existingToken ? MAILBOX_CAPABILITIES.get(existingToken) : null;
   const now = Date.now();
@@ -769,7 +774,7 @@ function issueMailboxCapability({ threadId, userId }) {
 
   const token = opaqueToken(24);
   const expiresAtMs = now + MAILBOX_CAPABILITY_TTL_MS;
-  MAILBOX_CAPABILITIES.set(token, { expiresAtMs, kind: "mailbox", threadId, userId });
+  MAILBOX_CAPABILITIES.set(token, { deviceId, expiresAtMs, kind: "mailbox", threadId, userId });
   MAILBOX_CAPABILITY_INDEX.set(cacheKey, token);
   return {
     expiresAt: new Date(expiresAtMs).toISOString(),
@@ -796,6 +801,24 @@ function requireMailboxCapability(request, response, mailboxHandle) {
   if (!threadId || threadId !== record.threadId) {
     sendError(request, response, 403, "That mailbox handle is no longer valid for this delivery capability.");
     return null;
+  }
+
+  const user = getStoredUser(record.userId);
+  if (!user || user.deactivatedAt) {
+    MAILBOX_CAPABILITIES.delete(token);
+    MAILBOX_CAPABILITY_INDEX.delete(mailboxCapabilityCacheKey(record.threadId, record.userId, record.deviceId));
+    sendError(request, response, 401, "The mailbox capability is no longer linked to an active account.");
+    return null;
+  }
+
+  if (record.deviceId) {
+    const device = findUserDevice(user, record.deviceId);
+    if (!device || device.revokedAt) {
+      MAILBOX_CAPABILITIES.delete(token);
+      MAILBOX_CAPABILITY_INDEX.delete(mailboxCapabilityCacheKey(record.threadId, record.userId, record.deviceId));
+      sendError(request, response, 403, "That linked device can no longer use this mailbox capability.");
+      return null;
+    }
   }
 
   return record;
@@ -2411,9 +2434,9 @@ function storedIdentityMaterialMatchesRegistration(user, body, { fingerprint, re
   );
 }
 
-function sanitizeThreadForUser(thread, userId) {
+function sanitizeThreadForUser(thread, userId, options = {}) {
   const mailboxHandle = issueMailboxHandle(thread.id);
-  const deliveryCapability = issueMailboxCapability({ threadId: thread.id, userId });
+  const deliveryCapability = issueMailboxCapability({ deviceId: options.deviceId ?? null, threadId: thread.id, userId });
   return {
     deliveryCapability: deliveryCapability.token,
     id: thread.id,
@@ -2440,6 +2463,9 @@ function sanitizeThreadForUser(thread, userId) {
     createdBy: thread.createdBy,
     participantIds: [...thread.participantIds],
     envelopes: thread.envelopes.filter((envelope) => envelope.toUserId === userId).sort(sortByDateAscending),
+    deliveryReceipts: Object.values(thread.deliveryReceipts ?? {})
+      .filter((receipt) => thread.participantIds.includes(receipt.userId))
+      .sort((left, right) => left.userId.localeCompare(right.userId)),
     readReceipts: Object.values(thread.readReceipts ?? {})
       .filter((receipt) => thread.participantIds.includes(receipt.userId))
       .sort((left, right) => left.userId.localeCompare(right.userId)),
@@ -2457,6 +2483,9 @@ function sanitizeThreadForUser(thread, userId) {
               removedIds: [...message.groupCommit.removedIds],
             }
           : null,
+        deletedBy: message.deletedBy ?? null,
+        deletedForEveryoneAt: message.deletedForEveryoneAt ?? null,
+        editOf: message.editOf ?? null,
         messageKind: message.messageKind ?? null,
         paddingBucket: message.paddingBucket ?? null,
         protocol: message.protocol ?? thread.protocol ?? "static-room-v1",
@@ -2466,6 +2495,43 @@ function sanitizeThreadForUser(thread, userId) {
       }))
       .sort(sortByDateAscending),
   };
+}
+
+function markThreadDeliveredForUser(thread, userId, deliveredAt = new Date().toISOString()) {
+  const latestRemoteMessage = [...thread.messages].reverse().find((message) => message.senderId !== userId);
+  if (!latestRemoteMessage) {
+    return false;
+  }
+
+  const indexByMessageId = new Map(thread.messages.map((message, index) => [message.id, index]));
+  const latestIndex = indexByMessageId.get(latestRemoteMessage.id) ?? -1;
+  const existing = thread.deliveryReceipts?.[userId] ?? null;
+  const existingIndex = indexByMessageId.get(existing?.lastDeliveredMessageId) ?? -1;
+  if (existingIndex >= latestIndex) {
+    return false;
+  }
+
+  thread.deliveryReceipts = thread.deliveryReceipts ?? {};
+  thread.deliveryReceipts[userId] = {
+    deliveredAt,
+    lastDeliveredMessageId: latestRemoteMessage.id,
+    threadId: thread.id,
+    userId,
+  };
+  return true;
+}
+
+function markDeliveredThreadsForUser(userId) {
+  const changedThreads = [];
+  for (const thread of Object.values(store.threads)) {
+    if (!thread.participantIds.includes(userId)) {
+      continue;
+    }
+    if (markThreadDeliveredForUser(thread, userId)) {
+      changedThreads.push(thread);
+    }
+  }
+  return changedThreads;
 }
 
 function invalidateUserEphemeralState(userId) {
@@ -2485,7 +2551,7 @@ function invalidateUserEphemeralState(userId) {
   for (const [token, record] of MAILBOX_CAPABILITIES.entries()) {
     if (record?.userId === userId) {
       MAILBOX_CAPABILITIES.delete(token);
-      MAILBOX_CAPABILITY_INDEX.delete(`${record?.threadId ?? ""}:${record?.userId ?? ""}`);
+      MAILBOX_CAPABILITY_INDEX.delete(mailboxCapabilityCacheKey(record?.threadId, record?.userId, record?.deviceId));
     }
   }
 }
@@ -2510,7 +2576,7 @@ function invalidateUserMailboxCapabilities(userId) {
   for (const [token, record] of MAILBOX_CAPABILITIES.entries()) {
     if (record?.userId === userId) {
       MAILBOX_CAPABILITIES.delete(token);
-      MAILBOX_CAPABILITY_INDEX.delete(`${record?.threadId ?? ""}:${record?.userId ?? ""}`);
+      MAILBOX_CAPABILITY_INDEX.delete(mailboxCapabilityCacheKey(record?.threadId, record?.userId, record?.deviceId));
     }
   }
 }
@@ -2676,7 +2742,7 @@ function purgeUserFromRelay(userId) {
     for (const [token, record] of MAILBOX_CAPABILITIES.entries()) {
       if (record?.threadId === threadId) {
         MAILBOX_CAPABILITIES.delete(token);
-        MAILBOX_CAPABILITY_INDEX.delete(`${record?.threadId ?? ""}:${record?.userId ?? ""}`);
+        MAILBOX_CAPABILITY_INDEX.delete(mailboxCapabilityCacheKey(record?.threadId, record?.userId, record?.deviceId));
       }
     }
   }
@@ -2728,7 +2794,7 @@ function scopedUsersFor(userId) {
     .map((user) => publicUserRecord(user, { viewerUserId: userId }));
 }
 
-function scopedThreadsFor(userId) {
+function scopedThreadsFor(userId, options = {}) {
   return Object.values(store.threads)
     .filter((thread) => thread.participantIds.includes(userId))
     .sort((left, right) => {
@@ -2736,7 +2802,7 @@ function scopedThreadsFor(userId) {
       const rightNewest = right.messages[right.messages.length - 1]?.createdAt ?? right.createdAt;
       return new Date(rightNewest).getTime() - new Date(leftNewest).getTime();
     })
-    .map((thread) => sanitizeThreadForUser(thread, userId));
+    .map((thread) => sanitizeThreadForUser(thread, userId, { deviceId: options.deviceId ?? null }));
 }
 
 function publicDeviceSnapshot(userId, currentDeviceId = null) {
@@ -2757,6 +2823,10 @@ function publicDeviceSnapshot(userId, currentDeviceId = null) {
 function sendSseEvent(response, eventName, payload) {
   response.write(`event: ${eventName}\n`);
   response.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function sendSseHeartbeat(response) {
+  response.write(`: notrus-keepalive ${new Date().toISOString()}\n\n`);
 }
 
 function sseListenerStillAuthorized(userId, listener) {
@@ -2800,8 +2870,7 @@ function broadcastSync(userIds, reason, threadId = null) {
         continue;
       }
       sendSseEvent(listener.response, "sync", {
-        reason,
-        threadId,
+        event: "sync-required",
         timestamp,
       });
     }
@@ -2843,6 +2912,7 @@ function handleSse(request, response) {
     Connection: "keep-alive",
     "Content-Type": "text/event-stream; charset=utf-8",
   });
+  response.flushHeaders?.();
 
   let listeners = SSE_CLIENTS.get(userId);
   if (!listeners) {
@@ -2861,8 +2931,20 @@ function handleSse(request, response) {
     mode: "session-v2",
     timestamp: new Date().toISOString(),
   });
+  const heartbeat = setInterval(() => {
+    if (!sseListenerStillAuthorized(userId, listener)) {
+      clearInterval(heartbeat);
+      listeners.delete(listener);
+      try {
+        response.end();
+      } catch {}
+      return;
+    }
+    sendSseHeartbeat(response);
+  }, 20_000);
 
   request.on("close", () => {
+    clearInterval(heartbeat);
     listeners.delete(listener);
 
     if (listeners.size === 0) {
@@ -3348,6 +3430,14 @@ async function handleSync(request, response, url, options = {}) {
     await queuePersist();
   }
 
+  const deliveredThreads = markDeliveredThreadsForUser(userId);
+  if (deliveredThreads.length > 0) {
+    await queuePersist();
+    for (const thread of deliveredThreads) {
+      broadcastSync(thread.participantIds.filter((participantId) => participantId !== userId), "thread-delivered", thread.id);
+    }
+  }
+
   const threads = Object.values(store.threads)
     .filter((thread) => thread.participantIds.includes(userId))
     .sort((left, right) => {
@@ -3355,7 +3445,7 @@ async function handleSync(request, response, url, options = {}) {
       const rightNewest = right.messages[right.messages.length - 1]?.createdAt ?? right.createdAt;
       return new Date(rightNewest).getTime() - new Date(leftNewest).getTime();
     })
-    .map((thread) => sanitizeThreadForUser(thread, userId));
+    .map((thread) => sanitizeThreadForUser(thread, userId, { deviceId: options.sessionDeviceId ?? null }));
 
   const users = relatedUserIdsFor(userId)
     .map((relatedUserId) => getStoredUser(relatedUserId))
@@ -3873,7 +3963,12 @@ async function handleCreateThread(request, response, options = {}) {
   }
 
   if (dedupedParticipants.length > MAX_THREAD_PARTICIPANTS) {
-    sendError(request, response, 400, `Threads may include at most ${MAX_THREAD_PARTICIPANTS} participants.`);
+    sendError(
+      request,
+      response,
+      400,
+      `Groups currently support up to ${MAX_THREAD_PARTICIPANTS} members. Larger groups are not supported yet.`
+    );
     return;
   }
 
@@ -3991,6 +4086,7 @@ async function handleCreateThread(request, response, options = {}) {
     participantIds: dedupedParticipants,
     envelopes: sanitizedEnvelopes.sort(sortByDateAscending),
     attachments: [],
+    deliveryReceipts: {},
     messages: [],
     readReceipts: {},
   };
@@ -4014,7 +4110,7 @@ async function handlePostMessage(request, response, threadId, options = {}) {
     return;
   }
 
-  const body = await readJsonBody(request);
+  const body = options.body ?? (await readJsonBody(request));
   const messageId = isNonEmptyString(body.id, 120) ? body.id.trim() : "";
   const senderId = options.forcedSenderId ?? (isNonEmptyString(body.senderId, 120) ? body.senderId.trim() : "");
   const createdAt = isNonEmptyString(body.createdAt, 60) ? body.createdAt.trim() : "";
@@ -4033,6 +4129,9 @@ async function handlePostMessage(request, response, threadId, options = {}) {
   const ratchetPublicJwk = body.ratchetPublicJwk ?? null;
   const signature = isNonEmptyString(body.signature, 20_000) ? body.signature.trim() : "";
   const wireMessage = isNonEmptyString(body.wireMessage, 400_000) ? body.wireMessage.trim() : "";
+  const editOf = isNonEmptyString(options.editOf ?? body.editOf, 120)
+    ? String(options.editOf ?? body.editOf).trim()
+    : null;
 
   if (!messageId || thread.messages.some((message) => message.id === messageId)) {
     sendError(request, response, 409, "Message id is missing or already exists in this thread.");
@@ -4042,6 +4141,30 @@ async function handlePostMessage(request, response, threadId, options = {}) {
   if (!thread.participantIds.includes(senderId)) {
     sendError(request, response, 403, "Only participants may post to this thread.");
     return;
+  }
+
+  if (editOf) {
+    const targetMessage = thread.messages.find((message) => message.id === editOf);
+    if (!targetMessage) {
+      sendError(request, response, 404, "Message to edit was not found.");
+      return;
+    }
+    if (targetMessage.editOf) {
+      sendError(request, response, 400, "Edit events cannot be edited.");
+      return;
+    }
+    if (targetMessage.deletedForEveryoneAt) {
+      sendError(request, response, 409, "Deleted messages cannot be edited.");
+      return;
+    }
+    if (targetMessage.senderId !== senderId) {
+      sendError(request, response, 403, "Only the original sender can edit that message.");
+      return;
+    }
+    if ((targetMessage.protocol ?? thread.protocol ?? "static-room-v1") !== protocol) {
+      sendError(request, response, 400, "Message edits must use the original message protocol.");
+      return;
+    }
   }
 
   if (
@@ -4151,6 +4274,7 @@ async function handlePostMessage(request, response, threadId, options = {}) {
     counter,
     ciphertext: ciphertext || null,
     epoch,
+    editOf,
     groupCommit: sanitizedGroupCommit,
     id: messageId,
     iv: iv || null,
@@ -4202,6 +4326,10 @@ async function handleUploadAttachment(request, response, threadId, options = {})
 
   const body = await readJsonBody(request);
   const senderId = options.forcedSenderId ?? (isNonEmptyString(body.senderId, 120) ? body.senderId.trim() : "");
+  if (options.forcedSenderId) {
+    body.senderId = senderId;
+    body.threadId = threadId;
+  }
   if (!thread.participantIds.includes(senderId)) {
     sendError(request, response, 403, "Only participants may upload attachments for this thread.");
     return;
@@ -4284,9 +4412,21 @@ async function handlePrivacySync(request, response) {
     return;
   }
 
+  const deliveredThreads = markDeliveredThreadsForUser(session.userId);
+  if (deliveredThreads.length > 0) {
+    await queuePersist();
+    for (const thread of deliveredThreads) {
+      broadcastSync(
+        thread.participantIds.filter((participantId) => participantId !== session.userId),
+        "thread-delivered",
+        thread.id
+      );
+    }
+  }
+
   sendJson(request, response, 200, {
     directoryDiscoveryMode: "username-or-invite",
-    threads: scopedThreadsFor(session.userId),
+    threads: scopedThreadsFor(session.userId, { deviceId: session.deviceId ?? null }),
     users: scopedUsersFor(session.userId),
   });
 }
@@ -4799,6 +4939,84 @@ async function handlePostMailboxMessage(request, response, mailboxHandle) {
   });
 }
 
+async function handlePostMailboxMessageEdit(request, response, mailboxHandle, messageId) {
+  const capability = requireMailboxCapability(request, response, mailboxHandle);
+  if (!capability) {
+    return;
+  }
+
+  if (
+    !enforceRateLimits(
+      request,
+      response,
+      [
+        { config: RATE_LIMITS.messagePerIp, key: privacyPreservingRateLimitKey(getRequestIp(request)), scope: "message-edit-ip-v2" },
+        { config: RATE_LIMITS.messagePerUser, key: mailboxBucketKey(capability, "message-edit"), scope: "message-edit-capability-v2" },
+      ],
+      "Message edit"
+    )
+  ) {
+    return;
+  }
+
+  await handlePostMessage(request, response, capability.threadId, {
+    editOf: messageId,
+    forcedSenderId: capability.userId,
+    skipProofOfWork: true,
+  });
+}
+
+async function handlePostMailboxMessageDelete(request, response, mailboxHandle, messageId) {
+  const capability = requireMailboxCapability(request, response, mailboxHandle);
+  if (!capability) {
+    return;
+  }
+
+  const thread = getStoredThread(capability.threadId);
+  if (!thread || !thread.participantIds.includes(capability.userId)) {
+    sendError(request, response, 404, "Thread not found.");
+    return;
+  }
+
+  const message = thread.messages.find((candidate) => candidate.id === messageId);
+  if (!message) {
+    sendError(request, response, 404, "Message not found.");
+    return;
+  }
+  if (message.editOf) {
+    sendError(request, response, 400, "Edit events cannot be deleted for everyone.");
+    return;
+  }
+  if (message.senderId !== capability.userId) {
+    sendError(request, response, 403, "Only the original sender can delete that message for everyone.");
+    return;
+  }
+
+  const body = await readJsonBody(request);
+  const requestedDeletedAt = isNonEmptyString(body.deletedAt, 60) ? body.deletedAt.trim() : "";
+  const deletedAt =
+    requestedDeletedAt && !Number.isNaN(new Date(requestedDeletedAt).getTime())
+      ? requestedDeletedAt
+      : new Date().toISOString();
+
+  message.deletedBy = capability.userId;
+  message.deletedForEveryoneAt = message.deletedForEveryoneAt ?? deletedAt;
+  message.ciphertext = null;
+  message.groupCommit = null;
+  message.iv = null;
+  message.ratchetPublicJwk = null;
+  message.signature = null;
+  message.wireMessage = null;
+
+  await queuePersist();
+  broadcastSync(thread.participantIds, "message-deleted", thread.id);
+  sendJson(request, response, 200, {
+    ok: true,
+    deletedAt: message.deletedForEveryoneAt,
+    messageId: message.id,
+  });
+}
+
 async function handlePostMailboxReadReceipt(request, response, mailboxHandle) {
   const capability = requireMailboxCapability(request, response, mailboxHandle);
   if (!capability) {
@@ -5024,6 +5242,9 @@ async function requestListener(request, response) {
     }
 
     if (request.method === "GET" && pathname === "/events") {
+      if (!ensureLegacyRouteEnabled(request, response, "/events")) {
+        return;
+      }
       handleSse(request, response);
       return;
     }
@@ -5056,7 +5277,7 @@ async function requestListener(request, response) {
       if (!session) {
         return;
       }
-      await handleSync(request, response, url, { forcedUserId: session.userId });
+      await handleSync(request, response, url, { forcedUserId: session.userId, sessionDeviceId: session.deviceId ?? null });
       return;
     }
 
@@ -5080,6 +5301,28 @@ async function requestListener(request, response) {
     const mailboxReadReceiptMatch = pathname.match(/^\/api\/mailboxes\/([^/]+)\/read-receipts$/);
     if (request.method === "POST" && mailboxReadReceiptMatch) {
       await handlePostMailboxReadReceipt(request, response, decodeURIComponent(mailboxReadReceiptMatch[1]));
+      return;
+    }
+
+    const mailboxMessageEditMatch = pathname.match(/^\/api\/mailboxes\/([^/]+)\/messages\/([^/]+)\/edit$/);
+    if (request.method === "POST" && mailboxMessageEditMatch) {
+      await handlePostMailboxMessageEdit(
+        request,
+        response,
+        decodeURIComponent(mailboxMessageEditMatch[1]),
+        decodeURIComponent(mailboxMessageEditMatch[2])
+      );
+      return;
+    }
+
+    const mailboxMessageDeleteMatch = pathname.match(/^\/api\/mailboxes\/([^/]+)\/messages\/([^/]+)\/delete$/);
+    if (request.method === "POST" && mailboxMessageDeleteMatch) {
+      await handlePostMailboxMessageDelete(
+        request,
+        response,
+        decodeURIComponent(mailboxMessageDeleteMatch[1]),
+        decodeURIComponent(mailboxMessageDeleteMatch[2])
+      );
       return;
     }
 
@@ -5201,6 +5444,9 @@ async function createListeningServer() {
 }
 
 const { port: listeningPort, protocol, server } = await createListeningServer();
+server.keepAliveTimeout = 70_000;
+server.headersTimeout = 75_000;
+server.requestTimeout = 0;
 
 server.listen(listeningPort, HOST, () => {
   console.log(`Notrus Relay listening on ${protocol}://${HOST}:${listeningPort}`);

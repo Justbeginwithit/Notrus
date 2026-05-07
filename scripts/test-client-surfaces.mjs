@@ -11,7 +11,7 @@ const androidBackupRulesPath = path.join(rootDir, "native", "android", "NotrusAn
 const androidExtractionRulesPath = path.join(rootDir, "native", "android", "NotrusAndroid", "app", "src", "main", "res", "xml", "data_extraction_rules.xml");
 
 const forbiddenPatterns = [
-  { pattern: /UserNotifications|UNUserNotificationCenter|aps-environment|FirebaseMessaging|FCM/i, reason: "push-notification surface" },
+  { pattern: /aps-environment|FirebaseMessaging|FCM/i, reason: "third-party or remote push-notification surface" },
   { pattern: /NSPasteboard|UIPasteboard/i, reason: "clipboard surface" },
   { pattern: /onOpenURL|handlesExternalEvents|CFBundleURLTypes|LSItemContentTypes/i, reason: "deep-link or document-open surface" },
   { pattern: /NSSharingService|UIActivityViewController|ShareLink/i, reason: "share-sheet surface" },

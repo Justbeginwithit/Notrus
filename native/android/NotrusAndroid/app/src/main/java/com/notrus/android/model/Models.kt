@@ -150,6 +150,9 @@ data class RelayMessage(
     val protocol: String? = null,
     val wireMessage: String? = null,
     val counter: Int? = null,
+    val deletedBy: String? = null,
+    val deletedForEveryoneAt: String? = null,
+    val editOf: String? = null,
     val epoch: Int? = null,
 )
 
@@ -195,7 +198,15 @@ data class RelayThread(
     val participantIds: List<String>,
     val attachmentCount: Int,
     val messages: List<RelayMessage>,
+    val deliveryReceipts: List<RelayDeliveryReceipt> = emptyList(),
     val readReceipts: List<RelayReadReceipt> = emptyList(),
+)
+
+data class RelayDeliveryReceipt(
+    val userId: String,
+    val threadId: String,
+    val lastDeliveredMessageId: String,
+    val deliveredAt: String,
 )
 
 data class RelayReadReceipt(
@@ -355,6 +366,7 @@ data class CachedMessageState(
     val relaySenderId: String? = null,
     val relayThreadId: String? = null,
     val relayWireMessage: String? = null,
+    val editedAt: String? = null,
     val status: String = "ok",
 )
 
@@ -464,6 +476,9 @@ data class DecryptedMessage(
     val senderId: String,
     val senderName: String,
     val status: String,
+    val deliveryReceiptSummary: String? = null,
+    val editedAt: String? = null,
+    val messageInfoText: String? = null,
     val readReceiptSummary: String? = null,
 )
 
@@ -543,6 +558,7 @@ data class AppUiState(
     val colorThemePreset: String = "ocean",
     val themeMode: String = "system",
     val sendReadReceiptsToOthers: Boolean = true,
+    val showReadReceiptsFromOthers: Boolean = true,
     val deviceInventory: LocalDeviceInventory = LocalDeviceInventory.empty,
     val currentDevice: DeviceDescriptor? = null,
     val currentIdentity: LocalIdentity? = null,

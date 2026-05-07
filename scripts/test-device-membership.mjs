@@ -170,6 +170,7 @@ async function startRelay() {
     cwd: rootDir,
     env: {
       ...process.env,
+      NOTRUS_ENABLE_DEVELOPMENT_COMPAT_ROUTES: "true",
       PORT: String(relayPort),
       NOTRUS_DATA_DIR: dataDir,
       NOTRUS_PROTOCOL_POLICY: "require-standards",

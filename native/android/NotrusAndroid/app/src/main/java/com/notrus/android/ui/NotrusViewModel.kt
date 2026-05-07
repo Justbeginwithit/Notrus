@@ -177,6 +177,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 NotrusThemeMode.Default.key,
             ) ?: NotrusThemeMode.Default.key,
             sendReadReceiptsToOthers = settings.getBoolean(KEY_SEND_READ_RECEIPTS_TO_OTHERS, true),
+            showReadReceiptsFromOthers = settings.getBoolean(KEY_SHOW_READ_RECEIPTS_FROM_OTHERS, true),
             relayOriginInput = bootstrapRelayOrigin(settings.getString(KEY_RELAY_ORIGIN, null)),
             witnessOriginsInput = settings.getString(KEY_WITNESS_ORIGINS, "") ?: "",
         )
@@ -292,6 +293,11 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         if (enabled) {
             state.selectedThreadId?.let(::sendReadReceiptForThreadId)
         }
+    }
+
+    fun updateShowReadReceiptsFromOthers(enabled: Boolean) {
+        state = state.copy(showReadReceiptsFromOthers = enabled, errorMessage = null)
+        settings.edit().putBoolean(KEY_SHOW_READ_RECEIPTS_FROM_OTHERS, enabled).apply()
     }
 
     fun updateVisualEffects(enabled: Boolean) {
@@ -523,6 +529,9 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         participants: List<RelayUser>,
         identityId: String,
     ): String? {
+        if (!state.showReadReceiptsFromOthers) {
+            return null
+        }
         if (message.senderId != identityId) {
             return null
         }
@@ -547,6 +556,101 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             else -> "Read by ${readers.size} people"
         }
     }
+
+    private fun deliveryReceiptSummaryFor(
+        message: RelayMessage,
+        thread: RelayThread,
+        participants: List<RelayUser>,
+        identityId: String,
+    ): String? {
+        if (message.senderId != identityId) {
+            return null
+        }
+        val messageIndex = thread.messages.indexOfFirst { it.id == message.id }
+        if (messageIndex < 0) {
+            return null
+        }
+        val indexByMessageId = thread.messages.mapIndexed { index, relayMessage ->
+            relayMessage.id to index
+        }.toMap()
+        val deliveredTo = thread.deliveryReceipts
+            .asSequence()
+            .filter { it.userId != identityId }
+            .filter { receipt -> (indexByMessageId[receipt.lastDeliveredMessageId] ?: -1) >= messageIndex }
+            .mapNotNull { receipt -> participants.firstOrNull { it.id == receipt.userId }?.displayName }
+            .distinct()
+            .sorted()
+            .toList()
+        return when (deliveredTo.size) {
+            0 -> null
+            1 -> "Delivered to ${deliveredTo.first()}"
+            else -> "Delivered to ${deliveredTo.size} people"
+        }
+    }
+
+    private fun messageInfoTextFor(
+        message: RelayMessage,
+        thread: RelayThread,
+        participants: List<RelayUser>,
+        identityId: String,
+        status: String,
+    ): String {
+        val lines = mutableListOf("Sent: ${message.createdAt}")
+        if (message.senderId == identityId) {
+            val indexByMessageId = thread.messages.mapIndexed { index, relayMessage ->
+                relayMessage.id to index
+            }.toMap()
+            val messageIndex = indexByMessageId[message.id] ?: -1
+            val recipients = participants
+                .filter { it.id != identityId }
+                .sortedBy { it.displayName }
+            val deliveredByUserId = thread.deliveryReceipts
+                .filter { receipt -> (indexByMessageId[receipt.lastDeliveredMessageId] ?: -1) >= messageIndex }
+                .associateBy { it.userId }
+            val readByUserId = thread.readReceipts
+                .filter { receipt -> (indexByMessageId[receipt.lastReadMessageId] ?: -1) >= messageIndex }
+                .associateBy { it.userId }
+            fun deliveredLabels(): List<String> =
+                recipients.mapNotNull { recipient ->
+                    deliveredByUserId[recipient.id]?.let { "${recipient.displayName} — ${it.deliveredAt}" }
+                }
+            fun readLabels(): List<String> =
+                recipients.mapNotNull { recipient ->
+                    readByUserId[recipient.id]?.let { "${recipient.displayName} — ${it.readAt}" }
+                }
+            fun missingNames(ids: Set<String>): String =
+                recipients.filterNot { ids.contains(it.id) }.map { it.displayName }.ifEmpty { listOf("None") }.joinToString(", ")
+            val delivered = deliveredLabels()
+            lines += "Delivered to: ${delivered.ifEmpty { listOf("None yet") }.joinToString(", ")}"
+            if (state.showReadReceiptsFromOthers) {
+                val read = readLabels()
+                lines += "Read by: ${read.ifEmpty { listOf("None yet") }.joinToString(", ")}"
+            } else {
+                lines += "Read by: hidden on this device"
+            }
+            lines += "Not delivered yet: ${missingNames(deliveredByUserId.keys)}"
+            lines += "Failed: None reported"
+        } else {
+            lines += "Delivered: stored on this device after sync"
+            lines += if (state.showReadReceiptsFromOthers) {
+                "Read: local to this device"
+            } else {
+                "Read: hidden on this device"
+            }
+        }
+        if (status != "ok") {
+            lines += "State: ${messageStatusText(status)}"
+        }
+        return lines.joinToString("\n")
+    }
+
+    private fun messageStatusText(status: String): String =
+        when (status) {
+            "invalid" -> "Could not decrypt or validate this message."
+            "missing-local-state" -> "Local plaintext/session state is unavailable on this device."
+            "ok" -> "Readable"
+            else -> status
+        }
 
     fun onAppForegroundChanged(inForeground: Boolean) {
         appInForeground = inForeground
@@ -1577,7 +1681,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             record.copy(
                 threadRecords = record.threadRecords + mapOf(
                     threadId to existing.copy(
-                        hiddenAt = purgeAt,
+                        hiddenAt = null,
                         purgedAt = purgeAt,
                         messageCache = emptyMap(),
                         processedMessageCount = preservedCount,
@@ -1591,20 +1695,11 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         val deletingSelectedThread = state.selectedThreadId == threadId
         state = state.copy(
             threads = visibleThreads,
-            archivedThreads = if (thread == null) {
-                state.archivedThreads
-            } else {
-                (state.archivedThreads.filterNot { it.id == threadId } + thread.copy(
-                    archived = true,
-                    muted = existing.mutedAt != null,
-                    messages = emptyList(),
-                    messageCount = 0,
-                )).sortedByDescending { it.lastActivityAt }
-            },
+            archivedThreads = state.archivedThreads.filterNot { it.id == threadId },
             selectedThreadId = if (deletingSelectedThread) null else state.selectedThreadId,
             draftText = if (deletingSelectedThread) "" else state.draftText,
             pendingAttachments = if (deletingSelectedThread) emptyList() else state.pendingAttachments,
-            statusMessage = "Deleted local message history for ${threadTitle} and moved it to Archived. Secure-session state was kept for future messages.",
+            statusMessage = "Deleted local message history for ${threadTitle}. Sync will keep it out of the chat list; start a new chat to create a fresh secure session.",
             errorMessage = null,
         )
     }
@@ -1673,6 +1768,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                 messageId to CachedMessageState(
                     attachments = cached?.attachments ?: emptyList(),
                     body = cached?.body.orEmpty(),
+                    editedAt = cached?.editedAt,
                     hidden = true,
                     status = cached?.status ?: "deleted-local",
                 )
@@ -1694,6 +1790,88 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             statusMessage = "Deleted one local Android message.",
             errorMessage = null,
         )
+    }
+
+    fun editMessage(activity: FragmentActivity, threadId: String, messageId: String, newBody: String) {
+        val identity = state.currentIdentity ?: return
+        val thread = (state.threads + state.archivedThreads).firstOrNull { it.id == threadId } ?: return
+        val message = thread.messages.firstOrNull { it.id == messageId } ?: return
+        val trimmedBody = newBody.trim()
+        if (message.senderId != identity.id || trimmedBody.isBlank()) {
+            state = state.copy(errorMessage = "Only your own non-empty Notrus messages can be edited.")
+            return
+        }
+        when (thread.protocol) {
+            DIRECT_PROTOCOL -> {
+                val remoteUser = thread.participants.firstOrNull { it.id != identity.id }
+                if (remoteUser == null) {
+                    state = state.copy(errorMessage = "This direct conversation is missing its remote participant.")
+                    return
+                }
+                editDirectMessage(activity, identity, thread, remoteUser, messageId, trimmedBody)
+            }
+
+            GROUP_PROTOCOL -> {
+                val recipients = thread.participants.filter { it.id != identity.id }
+                if (recipients.isEmpty()) {
+                    state = state.copy(errorMessage = "This group has no remote recipients to receive the edit.")
+                    return
+                }
+                editGroupMessage(activity, identity, thread, recipients, messageId, trimmedBody)
+            }
+
+            else -> state = state.copy(errorMessage = "This protocol does not support message edits on Android yet.")
+        }
+    }
+
+    fun deleteMessageForEveryone(activity: FragmentActivity, threadId: String, messageId: String) {
+        val identity = state.currentIdentity ?: return
+        val thread = (state.threads + state.archivedThreads).firstOrNull { it.id == threadId } ?: return
+        val message = thread.messages.firstOrNull { it.id == messageId } ?: return
+        if (message.senderId != identity.id) {
+            state = state.copy(errorMessage = "Only your own messages can be deleted for everyone.")
+            return
+        }
+        viewModelScope.launch {
+            if (!authorizeSensitiveOperation(activity, "Authorize deleting this message for everyone.")) {
+                return@launch
+            }
+            state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Deleting message for everyone...")
+            runCatching {
+                val mailboxHandle = thread.mailboxHandle
+                    ?: error("This conversation is missing its current mailbox handle. Sync once, then try again.")
+                val deliveryCapability = thread.deliveryCapability
+                    ?: error("This conversation is missing its current delivery capability. Sync once, then try again.")
+                relayClient().deleteMessageForEveryone(
+                    mailboxHandle = mailboxHandle,
+                    deliveryCapability = deliveryCapability,
+                    messageId = messageId,
+                    deletedAt = Instant.now().toString(),
+                )
+                val storedRecord = currentStoredRecord(identity.id)
+                    ?: error("The local Android profile record is missing.")
+                val existingRecord = storedRecord.threadRecords[threadId] ?: ConversationThreadRecord(protocol = thread.protocol)
+                val updatedRecord = existingRecord.copy(
+                    messageCache = existingRecord.messageCache + (
+                        messageId to CachedMessageState(
+                            attachments = emptyList(),
+                            body = "Message deleted",
+                            hidden = existingRecord.messageCache[messageId]?.hidden ?: false,
+                            status = "deleted-everyone",
+                        )
+                    ),
+                )
+                persistStoredRecord(
+                    storedRecord.copy(
+                        threadRecords = storedRecord.threadRecords + mapOf(threadId to updatedRecord),
+                    ),
+                )
+                state = state.copy(isBusy = false, statusMessage = "Deleted message for everyone.", errorMessage = null)
+                registerAndSync(identity, preferredThreadId = threadId, presentation = SyncPresentation.Silent)
+            }.onFailure { error ->
+                state = state.copy(isBusy = false, errorMessage = error.message ?: "Could not delete that message for everyone.")
+            }
+        }
     }
 
     fun openDirectChat(activity: FragmentActivity, userId: String) {
@@ -1762,7 +1940,9 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         val hiddenDirectThreadId = storedRecord?.threadRecords
             ?.entries
             ?.firstOrNull { (_, threadRecord) ->
-                threadRecord.protocol == DIRECT_PROTOCOL && threadRecord.signalPeerUserId == user.id
+                threadRecord.protocol == DIRECT_PROTOCOL &&
+                    threadRecord.signalPeerUserId == user.id &&
+                    MessageCachePolicy.isArchived(threadRecord)
             }
             ?.key
         if (storedRecord != null && hiddenDirectThreadId != null) {
@@ -2109,6 +2289,199 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun editDirectMessage(
+        activity: FragmentActivity,
+        identity: LocalIdentity,
+        thread: ConversationThread,
+        remoteUser: RelayUser,
+        targetMessageId: String,
+        body: String,
+    ) {
+        viewModelScope.launch {
+            if (!authorizeSensitiveOperation(activity, "Authorize editing this encrypted message.")) {
+                return@launch
+            }
+            state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Encrypting message edit...")
+            runCatching {
+                val signalState = identity.standardsSignalState
+                    ?: error("This Android profile does not have local secure-message state.")
+                val mailboxHandle = thread.mailboxHandle
+                    ?: error("This conversation is missing its current mailbox handle. Sync once, then edit again.")
+                val deliveryCapability = thread.deliveryCapability
+                    ?: error("This conversation is missing its current delivery capability. Sync once, then edit again.")
+                val encodedPayload = encodeStandardsPayload(
+                    StandardsMessagePayload(
+                        attachments = emptyList(),
+                        text = body,
+                    ),
+                )
+                val sealed = StandardsSignalClient.encrypt(
+                    state = signalState,
+                    localUserId = identity.id,
+                    plaintext = encodedPayload,
+                    remoteBundle = requireNotNull(remoteUser.signalBundle),
+                    remoteUserId = remoteUser.id,
+                )
+                applyPrivacyDelayIfEnabled(PrivacyDelayKind.Delivery)
+                val editMessageId = relayClient().postSignalMessageEdit(
+                    mailboxHandle = mailboxHandle,
+                    deliveryCapability = deliveryCapability,
+                    targetMessageId = targetMessageId,
+                    messageKind = sealed.messageKind,
+                    wireMessage = sealed.wireMessage,
+                )
+                val refreshed = StandardsSignalClient.refreshBundle(sealed.state)
+                val updatedIdentity = identity.copy(
+                    standardsSignalReady = true,
+                    standardsSignalBundle = refreshed.bundle,
+                    standardsSignalState = refreshed.state,
+                )
+                cacheLocalMessageEdit(
+                    identity = updatedIdentity,
+                    thread = thread,
+                    targetMessageId = targetMessageId,
+                    editMessageId = editMessageId,
+                    body = body,
+                    protocol = DIRECT_PROTOCOL,
+                    remoteUserId = remoteUser.id,
+                )
+                state = state.copy(currentIdentity = updatedIdentity, isBusy = false, statusMessage = "Edited message.", errorMessage = null)
+                registerAndSync(updatedIdentity, preferredThreadId = thread.id, presentation = SyncPresentation.Silent)
+            }.onFailure { error ->
+                state = state.copy(isBusy = false, errorMessage = normalizeSignalSendFailure(error))
+            }
+        }
+    }
+
+    private fun editGroupMessage(
+        activity: FragmentActivity,
+        identity: LocalIdentity,
+        thread: ConversationThread,
+        remoteParticipants: List<RelayUser>,
+        targetMessageId: String,
+        body: String,
+    ) {
+        viewModelScope.launch {
+            if (!authorizeSensitiveOperation(activity, "Authorize editing this encrypted group message.")) {
+                return@launch
+            }
+            state = state.copy(isBusy = true, errorMessage = null, statusMessage = "Encrypting group message edit...")
+            runCatching {
+                var signalState = identity.standardsSignalState
+                    ?: error("This Android profile does not have local secure-message state.")
+                val mailboxHandle = thread.mailboxHandle
+                    ?: error("This Android group is missing its current mailbox handle. Sync once, then edit again.")
+                val deliveryCapability = thread.deliveryCapability
+                    ?: error("This Android group is missing its current delivery capability. Sync once, then edit again.")
+                val encodedPayload = encodeStandardsPayload(
+                    StandardsMessagePayload(
+                        attachments = emptyList(),
+                        text = body,
+                    ),
+                )
+                val recipientEnvelopes = buildList {
+                    for (participant in remoteParticipants.sortedBy { it.id }) {
+                        val sealed = StandardsSignalClient.encrypt(
+                            state = signalState,
+                            localUserId = identity.id,
+                            plaintext = encodedPayload,
+                            remoteBundle = requireNotNull(participant.signalBundle),
+                            remoteUserId = participant.id,
+                        )
+                        signalState = sealed.state
+                        add(
+                            MlsFanoutRecipientEnvelope(
+                                messageKind = sealed.messageKind,
+                                toUserId = participant.id,
+                                wireMessage = sealed.wireMessage,
+                            ),
+                        )
+                    }
+                }
+                val fanoutWire = encodeMlsFanoutEnvelope(
+                    MlsFanoutEnvelope(
+                        format = MLS_FANOUT_FORMAT,
+                        senderId = identity.id,
+                        version = 1,
+                        recipients = recipientEnvelopes,
+                    ),
+                )
+                applyPrivacyDelayIfEnabled(PrivacyDelayKind.Delivery)
+                val editMessageId = relayClient().postMlsMessageEdit(
+                    mailboxHandle = mailboxHandle,
+                    deliveryCapability = deliveryCapability,
+                    targetMessageId = targetMessageId,
+                    wireMessage = fanoutWire,
+                )
+                val refreshed = StandardsSignalClient.refreshBundle(signalState)
+                val updatedIdentity = identity.copy(
+                    standardsSignalReady = true,
+                    standardsSignalBundle = refreshed.bundle,
+                    standardsSignalState = refreshed.state,
+                )
+                cacheLocalMessageEdit(
+                    identity = updatedIdentity,
+                    thread = thread,
+                    targetMessageId = targetMessageId,
+                    editMessageId = editMessageId,
+                    body = body,
+                    protocol = GROUP_PROTOCOL,
+                    remoteUserId = null,
+                )
+                state = state.copy(currentIdentity = updatedIdentity, isBusy = false, statusMessage = "Edited group message.", errorMessage = null)
+                registerAndSync(updatedIdentity, preferredThreadId = thread.id, presentation = SyncPresentation.Silent)
+            }.onFailure { error ->
+                state = state.copy(isBusy = false, errorMessage = normalizeSignalSendFailure(error))
+            }
+        }
+    }
+
+    private fun cacheLocalMessageEdit(
+        identity: LocalIdentity,
+        thread: ConversationThread,
+        targetMessageId: String,
+        editMessageId: String,
+        body: String,
+        protocol: String,
+        remoteUserId: String?,
+    ) {
+        val currentRecord = currentStoredRecord(identity.id)
+            ?: error("The local Android profile record is missing.")
+        val threadRecord = currentRecord.threadRecords[thread.id]
+            ?: ConversationThreadRecord(protocol = protocol, signalPeerUserId = remoteUserId)
+        val editedAt = Instant.now().toString()
+        val updatedThreadRecord = threadRecord.copy(
+            protocol = protocol,
+            signalPeerUserId = remoteUserId,
+            messageCache = threadRecord.messageCache +
+                (
+                    targetMessageId to MessageCachePolicy.mergeCachedStates(
+                        threadRecord.messageCache[targetMessageId],
+                        CachedMessageState(
+                            attachments = emptyList(),
+                            body = body,
+                            editedAt = editedAt,
+                            hidden = threadRecord.messageCache[targetMessageId]?.hidden ?: false,
+                            status = "ok",
+                        ),
+                    )
+                ) +
+                (
+                    editMessageId to CachedMessageState(
+                        body = "",
+                        hidden = true,
+                        status = "ok",
+                    )
+                ),
+        )
+        persistStoredRecord(
+            currentRecord.copy(
+                identity = identity,
+                threadRecords = currentRecord.threadRecords + mapOf(thread.id to updatedThreadRecord),
+            ),
+        )
+    }
+
     private suspend fun uploadPendingAttachments(
         identity: LocalIdentity,
         mailboxHandle: String,
@@ -2383,11 +2756,14 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
     ): MaterializedSyncState {
         var updatedIdentity = identity
         val updatedRecords = threadRecords.toMutableMap()
-        val conversations = relayThreads.sortedByDescending { relayThreadLastActivity(it) }.map { thread ->
+        val conversations = relayThreads.sortedByDescending { relayThreadLastActivity(it) }.mapNotNull { thread ->
             val participants = thread.participantIds.map { userId ->
                 usersById[userId] ?: placeholderUser(userId)
             }
             val existingRecord = updatedRecords[thread.id]
+            if (MessageCachePolicy.isLocallyDeleted(existingRecord)) {
+                return@mapNotNull null
+            }
 
             when {
                 thread.protocol == DIRECT_PROTOCOL && participants.size == 2 -> {
@@ -2427,7 +2803,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         val conversationsWithLocalState = conversations.map { conversation ->
             val record = updatedRecords[conversation.id]
             conversation.copy(
-                archived = record?.hiddenAt != null,
+                archived = MessageCachePolicy.isArchived(record),
                 muted = record?.mutedAt != null,
             )
         }
@@ -2525,6 +2901,102 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
 
         for (message in thread.messages.drop(record.processedMessageCount)) {
             record = when {
+                message.deletedForEveryoneAt != null -> record.copy(
+                    messageCache = record.messageCache + (
+                        message.id to MessageCachePolicy.attachRelayEnvelope(
+                            CachedMessageState(
+                                attachments = emptyList(),
+                                body = "Message deleted",
+                                hidden = record.messageCache[message.id]?.hidden ?: false,
+                                status = "deleted-everyone",
+                            ),
+                            message,
+                        )
+                    ),
+                )
+
+                message.editOf != null -> {
+                    val existingEditCache = record.messageCache[message.id]
+                    when {
+                        existingEditCache?.hidden == true -> record
+                        message.senderId == identity.id -> record.copy(
+                            messageCache = record.messageCache + (
+                                message.id to MessageCachePolicy.attachRelayEnvelope(
+                                    CachedMessageState(
+                                        body = "",
+                                        hidden = true,
+                                        status = "ok",
+                                    ),
+                                    message,
+                                )
+                            ),
+                        )
+                        message.messageKind != null && message.wireMessage != null -> {
+                            try {
+                                val opened = StandardsSignalClient.decrypt(
+                                    state = signalState,
+                                    localUserId = identity.id,
+                                    messageKind = message.messageKind,
+                                    remoteUserId = message.senderId,
+                                    wireMessage = message.wireMessage,
+                                )
+                                val payload = decodeStandardsPayload(opened.plaintext)
+                                signalState = opened.state
+                                record.copy(
+                                    messageCache = record.messageCache +
+                                        (
+                                            message.editOf to MessageCachePolicy.mergeCachedStates(
+                                                record.messageCache[message.editOf],
+                                                CachedMessageState(
+                                                    attachments = payload.attachments,
+                                                    body = payload.text,
+                                                    editedAt = message.createdAt,
+                                                    hidden = record.messageCache[message.editOf]?.hidden ?: false,
+                                                    status = "ok",
+                                                ),
+                                            )
+                                        ) +
+                                        (
+                                            message.id to MessageCachePolicy.attachRelayEnvelope(
+                                                CachedMessageState(
+                                                    body = "",
+                                                    hidden = true,
+                                                    status = "ok",
+                                                ),
+                                                message,
+                                            )
+                                        ),
+                                )
+                            } catch (error: Exception) {
+                                record.copy(
+                                    messageCache = record.messageCache + (
+                                        message.id to MessageCachePolicy.attachRelayEnvelope(
+                                            CachedMessageState(
+                                                body = normalizeSignalDecryptionFailure(error),
+                                                hidden = true,
+                                                status = "invalid",
+                                            ),
+                                            message,
+                                        )
+                                    ),
+                                )
+                            }
+                        }
+                        else -> record.copy(
+                            messageCache = record.messageCache + (
+                                message.id to MessageCachePolicy.attachRelayEnvelope(
+                                    CachedMessageState(
+                                        body = "The Notrus edit event was incomplete.",
+                                        hidden = true,
+                                        status = "invalid",
+                                    ),
+                                    message,
+                                )
+                            ),
+                        )
+                    }
+                }
+
                 MessageCachePolicy.canSkipLocalDecrypt(record.messageCache[message.id]) -> record.copy(
                     messageCache = record.messageCache + (
                         message.id to MessageCachePolicy.attachRelayEnvelope(
@@ -2608,18 +3080,30 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             standardsSignalState = signalState,
         )
         val decryptedMessages = thread.messages.mapNotNull { message ->
+            if (message.editOf != null) {
+                return@mapNotNull null
+            }
             val cached = record.messageCache[message.id]
             if (!shouldDisplayMessageAfterLocalPurge(record, message, cached)) {
                 null
             } else {
+                val deleted = message.deletedForEveryoneAt != null
+                val messageStatus = if (deleted) "deleted-everyone" else cached?.status ?: "missing-local-state"
                 DecryptedMessage(
-                    attachments = cached?.attachments ?: emptyList(),
-                    body = cached?.body?.takeIf(String::isNotBlank) ?: "Local plaintext is unavailable on this Android device for that Notrus message.",
+                    attachments = if (deleted) emptyList() else cached?.attachments ?: emptyList(),
+                    body = if (deleted) {
+                        "Message deleted"
+                    } else {
+                        cached?.body?.takeIf(String::isNotBlank) ?: "Local plaintext is unavailable on this Android device for that Notrus message."
+                    },
                     createdAt = message.createdAt,
+                    editedAt = if (deleted) null else cached?.editedAt,
                     id = message.id,
                     senderId = message.senderId,
                     senderName = participants.firstOrNull { it.id == message.senderId }?.displayName ?: "Unknown user",
-                    status = cached?.status ?: "missing-local-state",
+                    status = messageStatus,
+                    deliveryReceiptSummary = deliveryReceiptSummaryFor(message, thread, participants, identity.id),
+                    messageInfoText = messageInfoTextFor(message, thread, participants, identity.id, messageStatus),
                     readReceiptSummary = readReceiptSummaryFor(message, thread, participants, identity.id),
                 )
             }
@@ -2692,6 +3176,140 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         var decodeFailures = 0
         for (message in thread.messages.drop(record.processedMessageCount)) {
             record = when {
+                message.deletedForEveryoneAt != null -> record.copy(
+                    messageCache = record.messageCache + (
+                        message.id to MessageCachePolicy.attachRelayEnvelope(
+                            CachedMessageState(
+                                attachments = emptyList(),
+                                body = "Message deleted",
+                                hidden = record.messageCache[message.id]?.hidden ?: false,
+                                status = "deleted-everyone",
+                            ),
+                            message,
+                        )
+                    ),
+                )
+
+                message.editOf != null -> {
+                    val existingEditCache = record.messageCache[message.id]
+                    when {
+                        existingEditCache?.hidden == true -> record
+                        message.senderId == identity.id -> record.copy(
+                            messageCache = record.messageCache + (
+                                message.id to MessageCachePolicy.attachRelayEnvelope(
+                                    CachedMessageState(
+                                        body = "",
+                                        hidden = true,
+                                        status = "ok",
+                                    ),
+                                    message,
+                                )
+                            ),
+                        )
+                        message.messageKind == "mls-application" && !message.wireMessage.isNullOrBlank() -> {
+                            val envelope = decodeMlsFanoutEnvelope(message.wireMessage)
+                            if (envelope == null || envelope.senderId != message.senderId) {
+                                decodeFailures += 1
+                                record.copy(
+                                    messageCache = record.messageCache + (
+                                        message.id to MessageCachePolicy.attachRelayEnvelope(
+                                            CachedMessageState(
+                                                body = normalizeLegacyDisplayBody("The group edit envelope could not be parsed on Android."),
+                                                hidden = true,
+                                                status = "invalid",
+                                            ),
+                                            message,
+                                        )
+                                    ),
+                                )
+                            } else {
+                                val recipient = envelope.recipients.firstOrNull { it.toUserId == identity.id }
+                                if (recipient == null) {
+                                    decodeFailures += 1
+                                    record.copy(
+                                        messageCache = record.messageCache + (
+                                            message.id to MessageCachePolicy.attachRelayEnvelope(
+                                                CachedMessageState(
+                                                    body = normalizeLegacyDisplayBody("This Android device did not receive a recipient envelope for that group edit."),
+                                                    hidden = true,
+                                                    status = "invalid",
+                                                ),
+                                                message,
+                                            )
+                                        ),
+                                    )
+                                } else {
+                                    try {
+                                        val opened = StandardsSignalClient.decrypt(
+                                            state = signalState,
+                                            localUserId = identity.id,
+                                            messageKind = recipient.messageKind,
+                                            remoteUserId = message.senderId,
+                                            wireMessage = recipient.wireMessage,
+                                        )
+                                        val payload = decodeStandardsPayload(opened.plaintext)
+                                        signalState = opened.state
+                                        record.copy(
+                                            messageCache = record.messageCache +
+                                                (
+                                                    message.editOf to MessageCachePolicy.mergeCachedStates(
+                                                        record.messageCache[message.editOf],
+                                                        CachedMessageState(
+                                                            attachments = payload.attachments,
+                                                            body = payload.text,
+                                                            editedAt = message.createdAt,
+                                                            hidden = record.messageCache[message.editOf]?.hidden ?: false,
+                                                            status = "ok",
+                                                        ),
+                                                    )
+                                                ) +
+                                                (
+                                                    message.id to MessageCachePolicy.attachRelayEnvelope(
+                                                        CachedMessageState(
+                                                            body = "",
+                                                            hidden = true,
+                                                            status = "ok",
+                                                        ),
+                                                        message,
+                                                    )
+                                                ),
+                                        )
+                                    } catch (error: Exception) {
+                                        decodeFailures += 1
+                                        record.copy(
+                                            messageCache = record.messageCache + (
+                                                message.id to MessageCachePolicy.attachRelayEnvelope(
+                                                    CachedMessageState(
+                                                        body = normalizeSignalDecryptionFailure(error),
+                                                        hidden = true,
+                                                        status = "invalid",
+                                                    ),
+                                                    message,
+                                                )
+                                            ),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        else -> {
+                            decodeFailures += 1
+                            record.copy(
+                                messageCache = record.messageCache + (
+                                    message.id to MessageCachePolicy.attachRelayEnvelope(
+                                        CachedMessageState(
+                                            body = normalizeLegacyDisplayBody("The group edit event was missing its authenticated envelope payload."),
+                                            hidden = true,
+                                            status = "invalid",
+                                        ),
+                                        message,
+                                    )
+                                ),
+                            )
+                        }
+                    }
+                }
+
                 MessageCachePolicy.canSkipLocalDecrypt(record.messageCache[message.id]) -> record.copy(
                     messageCache = record.messageCache + (
                         message.id to MessageCachePolicy.attachRelayEnvelope(
@@ -2832,18 +3450,30 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         )
 
         val fallbackMessages = thread.messages.mapNotNull { message ->
+            if (message.editOf != null) {
+                return@mapNotNull null
+            }
             val cached = record.messageCache[message.id]
             if (!shouldDisplayMessageAfterLocalPurge(record, message, cached)) {
                 null
             } else {
+                val deleted = message.deletedForEveryoneAt != null
+                val messageStatus = if (deleted) "deleted-everyone" else cached?.status ?: "missing-local-state"
                 DecryptedMessage(
-                    attachments = cached?.attachments ?: emptyList(),
-                    body = cached?.body?.takeIf(String::isNotBlank) ?: "Local plaintext unavailable on this Android device for that group message.",
+                    attachments = if (deleted) emptyList() else cached?.attachments ?: emptyList(),
+                    body = if (deleted) {
+                        "Message deleted"
+                    } else {
+                        cached?.body?.takeIf(String::isNotBlank) ?: "Local plaintext unavailable on this Android device for that group message."
+                    },
                     createdAt = message.createdAt,
+                    editedAt = cached?.editedAt,
                     id = message.id,
                     senderId = message.senderId,
                     senderName = participants.firstOrNull { it.id == message.senderId }?.displayName ?: "Unknown user",
-                    status = cached?.status ?: "missing-local-state",
+                    status = messageStatus,
+                    deliveryReceiptSummary = deliveryReceiptSummaryFor(message, thread, participants, identity.id),
+                    messageInfoText = messageInfoTextFor(message, thread, participants, identity.id, messageStatus),
                     readReceiptSummary = readReceiptSummaryFor(message, thread, participants, identity.id),
                 )
             }
@@ -2903,18 +3533,27 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         warning: String? = null,
     ): ConversationThread {
         val fallbackMessages = thread.messages.mapNotNull { message ->
+            if (message.editOf != null) {
+                return@mapNotNull null
+            }
             val cached = existingRecord?.messageCache?.get(message.id)
             if (!shouldDisplayMessageAfterLocalPurge(existingRecord, message, cached)) {
                 return@mapNotNull null
             }
+            val deleted = message.deletedForEveryoneAt != null
             DecryptedMessage(
-                attachments = cached?.attachments ?: emptyList(),
-                body = normalizeLegacyDisplayBody(cached?.body?.takeIf(String::isNotBlank) ?: "This thread can be viewed on Android, but only standards direct chats are writable right now."),
+                attachments = if (deleted) emptyList() else cached?.attachments ?: emptyList(),
+                body = if (deleted) {
+                    "Message deleted"
+                } else {
+                    normalizeLegacyDisplayBody(cached?.body?.takeIf(String::isNotBlank) ?: "This thread can be viewed on Android, but only standards direct chats are writable right now.")
+                },
                 createdAt = message.createdAt,
+                editedAt = if (deleted) null else cached?.editedAt,
                 id = message.id,
                 senderId = message.senderId,
                 senderName = participants.firstOrNull { it.id == message.senderId }?.displayName ?: "Unknown user",
-                status = cached?.status ?: "unsupported",
+                status = if (deleted) "deleted-everyone" else cached?.status ?: "unsupported",
             )
         }
         val finalWarning = warning ?: when (thread.protocol) {
@@ -3978,6 +4617,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         private const val KEY_COLOR_THEME_PRESET = "color_theme_preset"
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_SEND_READ_RECEIPTS_TO_OTHERS = "send_read_receipts_to_others"
+        private const val KEY_SHOW_READ_RECEIPTS_FROM_OTHERS = "show_read_receipts_from_others"
         private const val KEY_CONTACT_TRUST_PREFIX = "contact_trust_"
         private const val KEY_RELAY_ORIGIN = "relay_origin"
         private const val KEY_TRANSPARENCY_PINS = "transparency_pins"

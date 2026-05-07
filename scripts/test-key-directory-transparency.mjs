@@ -152,6 +152,7 @@ async function main() {
     await waitForHealth(relayOrigin);
 
     process.env.WITNESS_DATA_DIR = path.join(tempDir, "witness-data");
+    process.env.WITNESS_ADMIN_TOKEN = "witness-read-only-test-token";
     process.env.WITNESS_PORT = String(witnessPort);
     process.env.WITNESS_HOST = "127.0.0.1";
     process.env.RELAY_ORIGINS = relayOrigin;
@@ -159,6 +160,16 @@ async function main() {
     const witnessModule = await import("../witness.js");
     witnessServer = witnessModule.startWitnessServer({ host: "127.0.0.1", port: witnessPort });
     await waitForHealth(witnessOrigin, "/api/witness/health");
+
+    const witnessUi = await request(witnessOrigin, "/witness");
+    if (witnessUi.statusCode !== 200 || !String(witnessUi.body.raw ?? "").includes("Notrus Witness Console")) {
+      throw new Error("Witness graphical console did not load.");
+    }
+
+    const witnessUiScript = await request(witnessOrigin, "/witness/app.js");
+    if (witnessUiScript.statusCode !== 200 || !String(witnessUiScript.body.raw ?? "").includes("DEFAULT_RELAY_ORIGIN")) {
+      throw new Error("Witness graphical console script did not load.");
+    }
 
     const suffix = randomBytes(4).toString("hex");
     const alice = identityPayload({
@@ -178,11 +189,25 @@ async function main() {
       throw new Error("Relay registration failed during key-directory proof.");
     }
 
-    const sync = await request(relayOrigin, `/api/sync?userId=${alice.userId}`);
+    const aliceSessionToken = aliceRegister.body.session?.token;
+    if (!aliceSessionToken) {
+      throw new Error("Relay registration did not return a session token for the key-directory proof.");
+    }
+
+    const sync = await request(relayOrigin, `/api/sync?userId=${alice.userId}`, {
+      headers: { Authorization: `Bearer ${aliceSessionToken}` },
+    });
     if (sync.statusCode !== 200) {
       throw new Error(`Sync failed with HTTP ${sync.statusCode}.`);
     }
-    const transparency = sync.body;
+    const transparencyResponse = await request(relayOrigin, "/api/security/transparency", {
+      headers: { Authorization: `Bearer ${aliceSessionToken}` },
+    });
+    if (transparencyResponse.statusCode !== 200) {
+      throw new Error(`Security transparency fetch failed with HTTP ${transparencyResponse.statusCode}.`);
+    }
+
+    const transparency = transparencyResponse.body;
     if (!transparency.transparencySigner?.publicKeySpki || !transparency.transparencySignature) {
       throw new Error("Sync did not include a signed transparency statement.");
     }
@@ -229,6 +254,32 @@ async function main() {
       throw new Error("Witness did not preserve the relay transparency signing identity.");
     }
 
+    await witnessModule.primeWitnesses();
+    const repeatedWitnessHead = await request(
+      witnessOrigin,
+      `/api/witness/head?relayOrigin=${encodeURIComponent(relayOrigin)}`,
+    );
+    if (repeatedWitnessHead.body.latest?.transparencySigner?.keyId !== signer.keyId) {
+      throw new Error("Witness dropped the transparency signer while refreshing an unchanged head.");
+    }
+
+    const publicWitnessLog = await request(
+      witnessOrigin,
+      `/api/witness/log?relayOrigin=${encodeURIComponent(relayOrigin)}`,
+    );
+    if (publicWitnessLog.statusCode !== 401) {
+      throw new Error("Witness history log should require read-only admin authorization when configured.");
+    }
+
+    const adminWitnessLog = await request(
+      witnessOrigin,
+      `/api/witness/admin/log?relayOrigin=${encodeURIComponent(relayOrigin)}`,
+      { headers: { "X-Notrus-Witness-Admin-Token": "witness-read-only-test-token" } },
+    );
+    if (adminWitnessLog.statusCode !== 200 || adminWitnessLog.body.latest?.transparencyHead !== transparency.transparencyHead) {
+      throw new Error("Witness read-only admin log did not return the observed relay head.");
+    }
+
     const transparencyDirect = await request(relayOrigin, "/api/transparency");
     if (transparencyDirect.statusCode !== 200 || transparencyDirect.body.transparencyHead !== transparency.transparencyHead) {
       throw new Error("Direct transparency endpoint diverged from sync.");
@@ -243,6 +294,7 @@ async function main() {
     relay.kill("SIGTERM");
     await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {});
     delete process.env.WITNESS_DATA_DIR;
+    delete process.env.WITNESS_ADMIN_TOKEN;
     delete process.env.WITNESS_PORT;
     delete process.env.WITNESS_HOST;
     delete process.env.RELAY_ORIGINS;

@@ -1,10 +1,12 @@
 import http from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const WITNESS_UI_DIR = path.join(__dirname, "witness");
 const DATA_DIR = process.env.WITNESS_DATA_DIR
   ? path.resolve(process.env.WITNESS_DATA_DIR)
   : path.join(__dirname, "data");
@@ -23,12 +25,21 @@ const ALLOW_ORIGINS = (process.env.WITNESS_ALLOW_ORIGINS ?? "*")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
+const WITNESS_ADMIN_TOKEN = (process.env.WITNESS_ADMIN_TOKEN ?? "").trim();
+const WITNESS_ADMIN_HEADER = "x-notrus-witness-admin-token";
+const STATIC_ROUTES = new Map([
+  ["/", { contentType: "text/html; charset=utf-8", filePath: path.join(WITNESS_UI_DIR, "index.html") }],
+  ["/witness", { contentType: "text/html; charset=utf-8", filePath: path.join(WITNESS_UI_DIR, "index.html") }],
+  ["/witness/", { contentType: "text/html; charset=utf-8", filePath: path.join(WITNESS_UI_DIR, "index.html") }],
+  ["/witness/app.js", { contentType: "text/javascript; charset=utf-8", filePath: path.join(WITNESS_UI_DIR, "app.js") }],
+  ["/witness/styles.css", { contentType: "text/css; charset=utf-8", filePath: path.join(WITNESS_UI_DIR, "styles.css") }],
+]);
 
 let persistQueue = Promise.resolve();
 let store = await loadStore();
 
 function setApiHeaders(request, response) {
-  response.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  response.setHeader("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Notrus-Witness-Admin-Token");
   response.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   response.setHeader("Cache-Control", "no-store");
   response.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -81,6 +92,76 @@ function sendJson(request, response, statusCode, payload) {
   response.end(JSON.stringify(payload));
 }
 
+async function sendStaticAsset(request, response, pathname) {
+  const asset = STATIC_ROUTES.get(pathname);
+  if (!asset || request.method !== "GET") {
+    return false;
+  }
+
+  try {
+    const body = await fs.readFile(asset.filePath);
+    response.writeHead(200, {
+      "Cache-Control": asset.contentType.startsWith("text/html") ? "no-store" : "no-cache",
+      "Content-Security-Policy": "default-src 'self'; connect-src 'self' https://relay.notrus.cloud https://witness.notrus.cloud; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+      "Content-Type": asset.contentType,
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(body);
+    return true;
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.error("Witness static asset failed:", error.message);
+    }
+    return false;
+  }
+}
+
+function safeEqualString(left, right) {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  return timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function readWitnessAdminToken(request) {
+  const headerToken = request.headers[WITNESS_ADMIN_HEADER];
+  if (typeof headerToken === "string" && headerToken.trim()) {
+    return headerToken.trim();
+  }
+
+  const authorization = request.headers.authorization;
+  if (typeof authorization === "string" && authorization.startsWith("Bearer ")) {
+    return authorization.slice("Bearer ".length).trim();
+  }
+
+  return "";
+}
+
+function hasWitnessAdminAccess(request) {
+  if (!WITNESS_ADMIN_TOKEN) {
+    return false;
+  }
+  const provided = readWitnessAdminToken(request);
+  return Boolean(provided) && safeEqualString(provided, WITNESS_ADMIN_TOKEN);
+}
+
+function requireWitnessAdmin(request, response) {
+  if (!WITNESS_ADMIN_TOKEN) {
+    sendJson(request, response, 404, { error: "Witness read-only admin surface is disabled." });
+    return false;
+  }
+
+  if (!hasWitnessAdminAccess(request)) {
+    sendJson(request, response, 401, { error: "A valid witness read-only admin token is required." });
+    return false;
+  }
+
+  return true;
+}
+
 function getRelayRecord(relayOrigin) {
   return store.relays[relayOrigin] ?? null;
 }
@@ -97,6 +178,25 @@ function publicObservation(record) {
     transparencySignature: record.transparencySignature ?? null,
     transparencySigner: record.transparencySigner ?? null,
     transparencyHead: record.transparencyHead,
+  };
+}
+
+function witnessLogPayload(relayOrigin) {
+  const record = getRelayRecord(relayOrigin);
+  return {
+    history: record?.history ?? [],
+    latest: publicObservation(record),
+  };
+}
+
+function witnessAdminSnapshot() {
+  return {
+    maxHistory: MAX_HISTORY,
+    pollIntervalMs: POLL_INTERVAL_MS,
+    relays: Object.fromEntries(
+      Object.entries(store.relays).map(([relayOrigin, record]) => [relayOrigin, publicObservation(record)])
+    ),
+    watching: RELAY_ORIGINS,
   };
 }
 
@@ -125,6 +225,8 @@ function upsertObservation(relayOrigin, payload) {
       history,
       observedAt: previous.observedAt,
       relayOrigin,
+      transparencySignature: previous.transparencySignature ?? null,
+      transparencySigner: previous.transparencySigner ?? null,
       transparencyHead: previous.transparencyHead,
     };
     return false;
@@ -178,6 +280,10 @@ export function createWitnessServer() {
     try {
       const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
 
+      if (await sendStaticAsset(request, response, url.pathname)) {
+        return;
+      }
+
       if (request.method === "OPTIONS") {
         setApiHeaders(request, response);
         response.writeHead(204);
@@ -187,6 +293,10 @@ export function createWitnessServer() {
 
       if (request.method === "GET" && url.pathname === "/api/witness/health") {
         sendJson(request, response, 200, {
+          admin: {
+            enabled: Boolean(WITNESS_ADMIN_TOKEN),
+            mode: WITNESS_ADMIN_TOKEN ? "read-only-token" : "disabled",
+          },
           ok: true,
           relays: Object.keys(store.relays).length,
           watching: RELAY_ORIGINS,
@@ -209,17 +319,40 @@ export function createWitnessServer() {
       }
 
       if (request.method === "GET" && url.pathname === "/api/witness/log") {
+        if (WITNESS_ADMIN_TOKEN && !requireWitnessAdmin(request, response)) {
+          return;
+        }
+
         const requestedRelayOrigin = url.searchParams.get("relayOrigin") || RELAY_ORIGINS[0] || "";
         if (!requestedRelayOrigin) {
           sendJson(request, response, 400, { error: "relayOrigin is required." });
           return;
         }
 
-        const record = getRelayRecord(requestedRelayOrigin);
-        sendJson(request, response, 200, {
-          history: record?.history ?? [],
-          latest: publicObservation(record),
-        });
+        sendJson(request, response, 200, witnessLogPayload(requestedRelayOrigin));
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/witness/admin/summary") {
+        if (!requireWitnessAdmin(request, response)) {
+          return;
+        }
+        sendJson(request, response, 200, witnessAdminSnapshot());
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/witness/admin/log") {
+        if (!requireWitnessAdmin(request, response)) {
+          return;
+        }
+
+        const requestedRelayOrigin = url.searchParams.get("relayOrigin") || RELAY_ORIGINS[0] || "";
+        if (!requestedRelayOrigin) {
+          sendJson(request, response, 400, { error: "relayOrigin is required." });
+          return;
+        }
+
+        sendJson(request, response, 200, witnessLogPayload(requestedRelayOrigin));
         return;
       }
 

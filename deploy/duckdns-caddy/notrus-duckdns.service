@@ -1,0 +1,9 @@
+[Unit]
+Description=Update DuckDNS for Notrus relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/notrus/duckdns.env
+ExecStart=/usr/local/bin/notrus-duckdns-update

@@ -3,6 +3,12 @@ package com.notrus.android.model
 object MessageCachePolicy {
     const val STATUS_CIPHERTEXT_STORED = "ciphertext-stored"
 
+    fun isLocallyDeleted(record: ConversationThreadRecord?): Boolean =
+        record?.purgedAt != null
+
+    fun isArchived(record: ConversationThreadRecord?): Boolean =
+        record?.hiddenAt != null && record.purgedAt == null
+
     fun canSkipLocalDecrypt(cached: CachedMessageState?): Boolean =
         localStateQuality(cached) >= 2
 
@@ -48,6 +54,7 @@ object MessageCachePolicy {
             relaySenderId = incoming.relaySenderId ?: existing.relaySenderId,
             relayThreadId = incoming.relayThreadId ?: existing.relayThreadId,
             relayWireMessage = incoming.relayWireMessage ?: existing.relayWireMessage,
+            editedAt = incoming.editedAt ?: existing.editedAt,
         )
     }
 

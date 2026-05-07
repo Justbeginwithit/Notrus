@@ -2,7 +2,30 @@
 
 ## Unreleased
 
-- No changes yet.
+- Moved the default hosted relay from the old ngrok URL to the stable Cloudflare-backed `https://relay.notrus.cloud` endpoint across Android, macOS, docs, and operator tooling.
+- Added the public witness endpoint `https://witness.notrus.cloud` and a graphical witness console at `https://witness.notrus.cloud/witness`.
+- Added a read-only witness operator model: the client-safe witness head endpoint stays public, while witness history and summary endpoints require `X-Notrus-Witness-Admin-Token` when configured.
+- Added a relay operator console naming refresh with the stable hosted console link `https://relay.notrus.cloud/admin`.
+- Added an endpoint provider guide covering Cloudflare Named Tunnel, Cloudflare Quick Tunnel, ngrok, DuckDNS + Caddy, and VPS/dedicated-host options, including current practical limits and recommended use cases.
+- Added Cloudflare Tunnel routing for separate relay and witness hostnames through the same named tunnel.
+- Documented current relay/witness origins, health endpoints, witness GUI usage, healthy witness output, warning signs, provider caveats, and the current Mac-backed infrastructure boundary.
+- Fixed witness repeated-observation behavior so refreshing an unchanged transparency head preserves the observed signer and signature in the latest witness record.
+- Added regression coverage for witness UI serving, witness read-only history token enforcement, and repeated signed-head observation preservation.
+- Removed stale active ngrok wording from client defaults and macOS TLS error messaging.
+- Added an emergency-trust gate that keeps Notrus at beta wording while clearly blocking stable or emergency-readiness claims unless independent audit and sustained reliability evidence exist.
+- Added canonical security docs for emergency readiness, metadata exposure, relay operator powers, admin API limits, recovery/backup, notification privacy, Android/macOS local security, self-hosting, known limitations, audit status, and release verification.
+- Added scanner-closure tracking for Semgrep, SonarCloud, CodeQL, dependency scanning, and secret scanning.
+- Added regression coverage for old auth/IDOR classes across legacy routes, event streams, revoked devices, expired sessions, expired mailbox capabilities, and caller-supplied identity spoofing.
+- Hardened event streaming so `/api/events` is session-bound and emits a generic sync-required signal instead of detailed thread or sender metadata.
+- Tightened legacy compatibility routes so they require explicit relay opt-in instead of being silently available outside production.
+- Added relay delivery receipts: when a recipient syncs ciphertext, the relay records a minimal delivered marker and broadcasts a generic sync-required event to the sender.
+- Added Android/macOS delivered/read message summaries and message-info views with delivered, read, and not-delivered member detail for direct and group chats.
+- Added exact sent, delivered, and read timestamps to message info where receipt data is available.
+- Added separate Android/macOS settings for sending read confirmations to others and showing read confirmations received from others.
+- Added macOS live sync parity and local notification support with hidden content by default, sender-only/full-preview settings, group preview control, and tap-to-thread routing.
+- Hardened macOS live sync with a silent periodic fallback, kept the app running after the last window closes, requested notification permission earlier, suppresses foreground duplicate banners, and auto-scrolls conversations to the newest message after sync.
+- Documented local-only search and authenticated edit/delete/tombstone requirements as stable-track work rather than claiming those features are finished.
+- Fixed local archive/delete merge behavior so locally purged conversations are not recreated as archived by routine sync.
 
 ## v0.3.4-beta5 (draft security and reliability beta)
 

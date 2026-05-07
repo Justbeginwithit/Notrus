@@ -146,6 +146,7 @@ async function main() {
     await runCommand("npm", ["run", "test:metadata-boundary"], routingEnv);
     await runCommand("npm", ["run", "test:content-boundary"], routingEnv);
     await runCommand("npm", ["run", "test:production-api-boundary"]);
+    await runCommand("npm", ["run", "test:auth-idor-regression"]);
     await runCommand("npm", ["run", "test:privacy-routing"], routingEnv);
     await runCommand("npm", ["run", "test:standards-e2e"]);
     await runCommand("npm", ["run", "test:mls-fanout-compat"]);

@@ -1,0 +1,22 @@
+[Unit]
+Description=Notrus Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=notrus
+Group=notrus
+WorkingDirectory=/opt/notrus
+EnvironmentFile=/etc/notrus/notrus-relay.env
+ExecStart=/usr/bin/env node /opt/notrus/server.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/notrus
+
+[Install]
+WantedBy=multi-user.target

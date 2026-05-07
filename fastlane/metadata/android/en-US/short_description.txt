@@ -1,1 +1,1 @@
-Self-hostable encrypted messenger client
+Self-hostable E2EE messenger client

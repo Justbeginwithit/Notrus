@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
+import UserNotifications
 
 private struct PreparedThreadCreation {
     let request: ThreadCreateRequest
@@ -30,6 +31,22 @@ private enum PrivacyDelayKind {
     case delivery
 }
 
+enum MacNotificationContentVisibility: String, CaseIterable, Identifiable {
+    case hidden
+    case senderOnly
+    case fullPreview
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .hidden: return "Hidden"
+        case .senderOnly: return "Show sender"
+        case .fullPreview: return "Show sender and preview"
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     private static let defaultLocalRelayOrigin = "http://127.0.0.1:3000"
@@ -39,7 +56,7 @@ final class AppModel: ObservableObject {
         if let configured, !configured.isEmpty {
             return configured
         }
-        return "https://ramal-paola-yolky.ngrok-free.dev"
+        return "https://relay.notrus.cloud"
     }()
     private static let resettableTransparencyWarnings: Set<String> = [
         "This relay presented a transparency history that does not include the head previously pinned on this Mac.",
@@ -48,11 +65,16 @@ final class AppModel: ObservableObject {
     private static let mlsFanoutCiphersuite = "MLS-compat-signal-fanout-v1"
     private static let mlsFanoutEnvelopeFormat = "notrus-mls-signal-fanout-v1"
     private static let mlsFanoutGroupPrefix = "fanout-signal:"
+    private static let maxGroupMembers = 32
 
     @Published var relayOrigin: String
     @Published var witnessOriginsText: String
     @Published var privacyModeEnabled: Bool
     @Published var sendReadReceiptsToOthers: Bool
+    @Published var showReadReceiptsFromOthers: Bool
+    @Published var macNotificationsEnabled: Bool
+    @Published var macNotificationContentVisibility: MacNotificationContentVisibility
+    @Published var macNotificationGroupPreviewEnabled: Bool
     @Published var contactSecurityState = ContactSecurityState(version: 1, contacts: [:], events: [])
     @Published var localProfiles: [LocalIdentity] = []
     @Published var localDeviceInventory = LocalDeviceInventory.empty
@@ -90,6 +112,8 @@ final class AppModel: ObservableObject {
     @Published var relayHealthStatus: RelayHealth?
     @Published var transparency = TransparencyVerificationResult.empty
     @Published var integrityReport: ClientIntegrityReport?
+    @Published var liveSyncStatus = "Live sync not connected."
+    @Published var lastSuccessfulSyncAt: String?
 
     private let deviceSecretStore: DeviceSecretStore
     private let identityStore: IdentityStore
@@ -99,6 +123,10 @@ final class AppModel: ObservableObject {
     private let witnessOriginsKey = "NotrusMac.witnessOrigins"
     private let privacyModeKey = "NotrusMac.privacyModeEnabled"
     private let readReceiptsKey = "NotrusMac.sendReadReceiptsToOthers"
+    private let showReadReceiptsKey = "NotrusMac.showReadReceiptsFromOthers"
+    private let macNotificationsEnabledKey = "NotrusMac.notificationsEnabled"
+    private let macNotificationContentVisibilityKey = "NotrusMac.notificationContentVisibility"
+    private let macNotificationGroupPreviewEnabledKey = "NotrusMac.notificationGroupPreviewEnabled"
     private let selectedThreadKey = "NotrusMac.selectedThreadID"
     private let groupEpochRotationInterval = 12
     private let configuredProtocolPolicy = ProtocolPolicyMode(
@@ -115,6 +143,17 @@ final class AppModel: ObservableObject {
     private var cachedRelayHealth: RelayHealth?
     private var cachedRelayHealthOrigin: String?
     private var bootstrapStarted = false
+    private var liveEventsTask: Task<Void, Never>?
+    private var liveEventsSessionToken: String?
+    private var liveEventsOrigin: String?
+    private var liveSyncDebounceTask: Task<Void, Never>?
+    private var livePollingTask: Task<Void, Never>?
+    private var livePollingSessionToken: String?
+    private var livePollingOrigin: String?
+    private var liveSyncInFlight = false
+    private var macAppActive = true
+    private var notificationKnownMessageIdsByThread: [String: Set<String>] = [:]
+    private var notificationStatePrimed = false
 
     init(
         deviceSecretStore: DeviceSecretStore = DeviceSecretStore(),
@@ -130,6 +169,12 @@ final class AppModel: ObservableObject {
         self.witnessOriginsText = UserDefaults.standard.string(forKey: witnessOriginsKey) ?? ""
         self.privacyModeEnabled = UserDefaults.standard.bool(forKey: privacyModeKey)
         self.sendReadReceiptsToOthers = UserDefaults.standard.object(forKey: readReceiptsKey) as? Bool ?? true
+        self.showReadReceiptsFromOthers = UserDefaults.standard.object(forKey: showReadReceiptsKey) as? Bool ?? true
+        self.macNotificationsEnabled = UserDefaults.standard.object(forKey: macNotificationsEnabledKey) as? Bool ?? true
+        self.macNotificationContentVisibility = MacNotificationContentVisibility(
+            rawValue: UserDefaults.standard.string(forKey: macNotificationContentVisibilityKey) ?? ""
+        ) ?? .hidden
+        self.macNotificationGroupPreviewEnabled = UserDefaults.standard.bool(forKey: macNotificationGroupPreviewEnabledKey)
         self.selectedThreadID = UserDefaults.standard.string(forKey: selectedThreadKey)
         self.transparencyPins = Self.loadPinnedHeads()
         self.transparencySignerPins = Self.loadPinnedSignerKeys()
@@ -174,14 +219,25 @@ final class AppModel: ObservableObject {
     }
 
     func isThreadArchived(_ threadId: String) -> Bool {
-        threadRecords[threadId]?.hiddenAt != nil
+        isArchived(threadRecords[threadId])
     }
 
     func isThreadMuted(_ threadId: String) -> Bool {
         threadRecords[threadId]?.mutedAt != nil
     }
 
+    private func isLocallyDeleted(_ record: ThreadStoreRecord?) -> Bool {
+        record?.purgedAt != nil
+    }
+
+    private func isArchived(_ record: ThreadStoreRecord?) -> Bool {
+        record?.hiddenAt != nil && record?.purgedAt == nil
+    }
+
     func readReceiptSummary(for message: DecryptedMessage, in thread: ConversationThread) -> String? {
+        guard showReadReceiptsFromOthers else {
+            return nil
+        }
         guard message.senderId == currentIdentity?.id else {
             return nil
         }
@@ -211,6 +267,97 @@ final class AppModel: ObservableObject {
             return "Read by \(reader)"
         }
         return "Read by \(readers.count) people"
+    }
+
+    func deliveryReceiptSummary(for message: DecryptedMessage, in thread: ConversationThread) -> String? {
+        guard message.senderId == currentIdentity?.id else {
+            return nil
+        }
+        let orderedMessageIds = thread.rawThread.messages.map(\.id)
+        guard let messageIndex = orderedMessageIds.firstIndex(of: message.id) else {
+            return nil
+        }
+        let indexByMessageId = orderedMessageIds.enumerated().reduce(into: [String: Int]()) { partial, entry in
+            partial[entry.element] = entry.offset
+        }
+        let deliveredTo = (thread.rawThread.deliveryReceipts ?? [])
+            .filter { $0.userId != currentIdentity?.id }
+            .filter { receipt in
+                guard let deliveredIndex = indexByMessageId[receipt.lastDeliveredMessageId] else {
+                    return false
+                }
+                return deliveredIndex >= messageIndex
+            }
+            .compactMap { receipt in
+                thread.participants.first(where: { $0.id == receipt.userId })?.displayName
+            }
+            .sorted()
+        guard !deliveredTo.isEmpty else {
+            return nil
+        }
+        if deliveredTo.count == 1, let recipient = deliveredTo.first {
+            return "Delivered to \(recipient)"
+        }
+        return "Delivered to \(deliveredTo.count) people"
+    }
+
+    func messageInfoText(for message: DecryptedMessage, in thread: ConversationThread) -> String {
+        var lines = ["Sent: \(message.createdAt)"]
+        if message.senderId == currentIdentity?.id {
+            let orderedMessageIds = thread.rawThread.messages.map(\.id)
+            let messageIndex = orderedMessageIds.firstIndex(of: message.id) ?? -1
+            let indexByMessageId = orderedMessageIds.enumerated().reduce(into: [String: Int]()) { partial, entry in
+                partial[entry.element] = entry.offset
+            }
+            let recipients = thread.participants
+                .filter { $0.id != currentIdentity?.id }
+                .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+            let deliveredByUserId = (thread.rawThread.deliveryReceipts ?? [])
+                .filter { receipt in
+                    (indexByMessageId[receipt.lastDeliveredMessageId] ?? -1) >= messageIndex
+                }
+                .reduce(into: [String: RelayDeliveryReceipt]()) { partial, receipt in
+                    partial[receipt.userId] = receipt
+                }
+            let readByUserId = (thread.rawThread.readReceipts ?? [])
+                .filter { receipt in
+                    (indexByMessageId[receipt.lastReadMessageId] ?? -1) >= messageIndex
+                }
+                .reduce(into: [String: RelayReadReceipt]()) { partial, receipt in
+                    partial[receipt.userId] = receipt
+                }
+            func deliveredLabels() -> String {
+                let labels = recipients.compactMap { recipient in
+                    deliveredByUserId[recipient.id].map { "\(recipient.displayName) — \($0.deliveredAt)" }
+                }
+                return labels.isEmpty ? "None yet" : labels.joined(separator: ", ")
+            }
+            func readLabels() -> String {
+                let labels = recipients.compactMap { recipient in
+                    readByUserId[recipient.id].map { "\(recipient.displayName) — \($0.readAt)" }
+                }
+                return labels.isEmpty ? "None yet" : labels.joined(separator: ", ")
+            }
+            func missingNames(for ids: Set<String>) -> String {
+                let names = recipients.filter { !ids.contains($0.id) }.map(\.displayName)
+                return names.isEmpty ? "None" : names.joined(separator: ", ")
+            }
+            lines.append("Delivered to: \(deliveredLabels())")
+            if showReadReceiptsFromOthers {
+                lines.append("Read by: \(readLabels())")
+            } else {
+                lines.append("Read by: hidden on this Mac")
+            }
+            lines.append("Not delivered yet: \(missingNames(for: Set(deliveredByUserId.keys)))")
+            lines.append("Failed: None reported")
+        } else {
+            lines.append("Delivered: stored on this Mac after sync")
+            lines.append(showReadReceiptsFromOthers ? "Read: local to this Mac" : "Read: hidden on this Mac")
+        }
+        if message.status != "ok" {
+            lines.append("State: \(message.status)")
+        }
+        return lines.joined(separator: "\n")
     }
 
     var canSendMessage: Bool {
@@ -275,6 +422,9 @@ final class AppModel: ObservableObject {
         if composeSelection.isEmpty {
             return protocolProgramSummary.note
         }
+        if participantCount > Self.maxGroupMembers {
+            return "Groups currently support up to \(Self.maxGroupMembers) members. Larger groups are not supported yet because encryption, receipt, and sync state become heavier."
+        }
 
         let protocolName = NotrusProtocolCatalog.chooseProtocol(participantCount: participantCount)
         let spec = NotrusProtocolCatalog.spec(for: protocolName)
@@ -289,6 +439,9 @@ final class AppModel: ObservableObject {
         let participantCount = composeSelection.count + 1
         guard participantCount >= 2 else {
             return false
+        }
+        if participantCount > Self.maxGroupMembers {
+            return true
         }
         return isProtocolBlocked(NotrusProtocolCatalog.chooseProtocol(participantCount: participantCount))
     }
@@ -308,6 +461,9 @@ final class AppModel: ObservableObject {
         if composeSelection.isEmpty {
             return nil
         }
+        if composeSelection.count + 1 > Self.maxGroupMembers {
+            return "Groups currently support up to \(Self.maxGroupMembers) members. Remove some contacts before creating this group."
+        }
         if !composeMlsIneligibleContacts.isEmpty {
             let names = composeMlsIneligibleContacts.map(\.displayName).joined(separator: ", ")
             return "Some selected contacts (\(names)) have no native MLS key package, so this Mac will use compatible Signal fanout transport inside the standards group thread."
@@ -316,7 +472,9 @@ final class AppModel: ObservableObject {
     }
 
     var canCreateComposedThread: Bool {
-        !composeSelection.isEmpty && !composeProtocolBlocked
+        !composeSelection.isEmpty &&
+            composeSelection.count + 1 <= Self.maxGroupMembers &&
+            !composeProtocolBlocked
     }
 
     var protocolBannerTone: StatusStrip.Tone {
@@ -527,6 +685,7 @@ final class AppModel: ObservableObject {
     }
 
     private func clearRemoteWorkspace(preserveRelaySession: Bool = false) {
+        stopLiveEvents()
         if !preserveRelaySession {
             relaySession = nil
             currentUser = nil
@@ -539,6 +698,9 @@ final class AppModel: ObservableObject {
         selectedThreadID = nil
         draftText = ""
         transparency = .empty
+        liveSyncStatus = "Live sync not connected."
+        notificationKnownMessageIdsByThread = [:]
+        notificationStatePrimed = false
     }
 
     func bootstrap() async {
@@ -562,6 +724,7 @@ final class AppModel: ObservableObject {
             try reloadLocalProfiles()
             if currentIdentity != nil {
                 try await registerAndSync()
+                await prepareMacNotificationsIfEnabled()
             } else {
                 localVaultLocked = false
                 statusMessage = "Create or import a device-protected Notrus profile to begin."
@@ -598,6 +761,7 @@ final class AppModel: ObservableObject {
             try reloadLocalProfiles()
             if currentIdentity != nil {
                 try await registerAndSync()
+                await prepareMacNotificationsIfEnabled()
             } else {
                 statusMessage = "Unlocked the local vault with \(method). Create or import a profile to continue."
             }
@@ -634,6 +798,7 @@ final class AppModel: ObservableObject {
             if previous != relayOrigin {
                 relaySession = nil
                 clearRelayHealthCache()
+                stopLiveEvents()
             }
         }
     }
@@ -648,9 +813,116 @@ final class AppModel: ObservableObject {
 
     func persistReadReceiptsPreference() {
         UserDefaults.standard.set(sendReadReceiptsToOthers, forKey: readReceiptsKey)
+        UserDefaults.standard.set(showReadReceiptsFromOthers, forKey: showReadReceiptsKey)
         if !sendReadReceiptsToOthers {
             lastSentReadReceiptByThread.removeAll()
         }
+    }
+
+    func setMacAppActive(_ active: Bool) {
+        macAppActive = active
+    }
+
+    func persistMacNotificationPreferences() {
+        UserDefaults.standard.set(macNotificationsEnabled, forKey: macNotificationsEnabledKey)
+        UserDefaults.standard.set(macNotificationContentVisibility.rawValue, forKey: macNotificationContentVisibilityKey)
+        UserDefaults.standard.set(macNotificationGroupPreviewEnabled, forKey: macNotificationGroupPreviewEnabledKey)
+        if macNotificationsEnabled {
+            Task { @MainActor [weak self] in
+                await self?.prepareMacNotificationsIfEnabled()
+            }
+        }
+    }
+
+    private func prepareMacNotificationsIfEnabled() async {
+        guard macNotificationsEnabled else {
+            return
+        }
+        _ = await ensureMacNotificationPermission()
+    }
+
+    private func postMacNotificationsIfNeeded(for syncedThreads: [ConversationThread], identityId: String) async {
+        let nextKnown = syncedThreads.reduce(into: [String: Set<String>]()) { partial, thread in
+            partial[thread.id] = Set(thread.messages.map(\.id))
+        }
+
+        guard notificationStatePrimed else {
+            notificationKnownMessageIdsByThread = nextKnown
+            notificationStatePrimed = true
+            return
+        }
+
+        guard macNotificationsEnabled else {
+            notificationKnownMessageIdsByThread = nextKnown
+            return
+        }
+
+        guard !macAppActive else {
+            notificationKnownMessageIdsByThread = nextKnown
+            return
+        }
+
+        guard await ensureMacNotificationPermission() else {
+            notificationKnownMessageIdsByThread = nextKnown
+            return
+        }
+
+        for thread in syncedThreads where !isThreadMuted(thread.id) {
+            let knownIds = notificationKnownMessageIdsByThread[thread.id] ?? []
+            let newRemoteMessages = thread.messages.filter { message in
+                message.senderId != identityId && !knownIds.contains(message.id) && message.status == "ok"
+            }
+            for message in newRemoteMessages {
+                await postMacNotification(for: message, in: thread)
+            }
+        }
+
+        notificationKnownMessageIdsByThread = nextKnown
+    }
+
+    private func ensureMacNotificationPermission() async -> Bool {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            return true
+        case .notDetermined:
+            return (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
+        case .denied:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+
+    private func postMacNotification(for message: DecryptedMessage, in thread: ConversationThread) async {
+        let content = UNMutableNotificationContent()
+        let effectiveVisibility: MacNotificationContentVisibility = privacyModeEnabled ? .hidden : macNotificationContentVisibility
+        let isGroup = thread.rawThread.participantIds.count > 2
+        switch effectiveVisibility {
+        case .hidden:
+            content.title = "New secure message"
+            content.body = "Open Notrus to read."
+        case .senderOnly:
+            content.title = message.senderName
+            content.body = isGroup ? "New group message" : "New message"
+        case .fullPreview:
+            content.title = message.senderName
+            if isGroup && !macNotificationGroupPreviewEnabled {
+                content.body = "New group message"
+            } else {
+                content.body = String(message.body.prefix(180))
+            }
+        }
+        content.sound = .default
+        content.userInfo = ["threadId": thread.id]
+
+        let request = UNNotificationRequest(
+            identifier: "notrus-\(thread.id)-\(message.id)",
+            content: content,
+            trigger: nil
+        )
+        try? await UNUserNotificationCenter.current().add(request)
     }
 
     private func applyPrivacyDelayIfEnabled(_ kind: PrivacyDelayKind) async {
@@ -846,7 +1118,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func sync() async throws {
+    func sync(automatic: Bool = false) async throws {
         guard var identity = currentIdentity else {
             return
         }
@@ -872,12 +1144,17 @@ final class AppModel: ObservableObject {
         contactSecurityState = reconcileContactSecurityState(users: directory, identity: identity)
 
         let decryptedThreads = try payload.threads
-            .map { thread in
+            .compactMap { thread -> ConversationThread? in
+                if isLocallyDeleted(threadRecords[thread.id]) {
+                    return nil
+                }
                 return try materialize(thread: thread, usersById: lookup, identity: &identity)
             }
             .sorted(by: sortConversationThreads)
-        let visibleThreads = decryptedThreads.filter { threadRecords[$0.id]?.hiddenAt == nil }
-        let archived = decryptedThreads.filter { threadRecords[$0.id]?.hiddenAt != nil }
+        let visibleThreads = decryptedThreads.filter { !isArchived(threadRecords[$0.id]) }
+        let archived = decryptedThreads.filter { isArchived(threadRecords[$0.id]) }
+
+        await postMacNotificationsIfNeeded(for: decryptedThreads, identityId: identity.id)
 
         if identity != currentIdentity {
             try persistCurrentIdentity(identity)
@@ -891,6 +1168,7 @@ final class AppModel: ObservableObject {
         linkedDeviceEvents = deviceSnapshot.deviceEvents.sorted { $0.createdAt > $1.createdAt }
         threads = visibleThreads
         archivedThreads = archived
+        lastSuccessfulSyncAt = NotrusCrypto.isoNow()
 
         if selectedThreadID == nil {
             selectedThreadID = visibleThreads.first?.id
@@ -898,15 +1176,138 @@ final class AppModel: ObservableObject {
             selectedThreadID = visibleThreads.first?.id
         }
 
-        if !transparency.chainValid {
-            statusMessage = "Synced \(directory.count) identities and \(visibleThreads.count) threads. Transparency verification needs attention."
-        } else if hasPendingSecurityActions {
-            statusMessage = "Synced \(directory.count) identities and \(visibleThreads.count) threads. Contact security review needs attention."
-        } else {
-            statusMessage = "Synced \(directory.count) identities and \(visibleThreads.count) threads from the relay."
+        if !automatic {
+            if !transparency.chainValid {
+                statusMessage = "Synced \(directory.count) identities and \(visibleThreads.count) threads. Transparency verification needs attention."
+            } else if hasPendingSecurityActions {
+                statusMessage = "Synced \(directory.count) identities and \(visibleThreads.count) threads. Contact security review needs attention."
+            } else {
+                statusMessage = "Synced \(directory.count) identities and \(visibleThreads.count) threads from the relay."
+            }
         }
 
         await sendReadReceiptForSelectedThread()
+        startLiveEventsIfPossible()
+    }
+
+    private func startLiveEventsIfPossible() {
+        guard
+            currentIdentity != nil,
+            !localVaultLocked,
+            let sessionToken = relaySession?.token,
+            !sessionToken.isEmpty
+        else {
+            stopLiveEvents()
+            return
+        }
+
+        if liveEventsTask != nil,
+           liveEventsOrigin == relayOrigin,
+           liveEventsSessionToken == sessionToken {
+            startLivePollingIfPossible(origin: relayOrigin, sessionToken: sessionToken)
+            return
+        }
+
+        stopLiveEvents()
+        let origin = relayOrigin
+        let client = currentRelayClient
+        liveEventsOrigin = origin
+        liveEventsSessionToken = sessionToken
+        liveSyncStatus = "Live sync connecting..."
+        startLivePollingIfPossible(origin: origin, sessionToken: sessionToken)
+
+        liveEventsTask = Task.detached { [weak self] in
+            var reconnectDelayNs: UInt64 = 1_200_000_000
+            while !Task.isCancelled {
+                do {
+                    let stream = try client.liveEvents()
+                    await self?.noteLiveEventsConnected()
+                    for try await _ in stream {
+                        if Task.isCancelled {
+                            break
+                        }
+                        await self?.scheduleLiveSyncFromEvent()
+                    }
+                    reconnectDelayNs = 1_200_000_000
+                } catch {
+                    if Task.isCancelled {
+                        break
+                    }
+                    await self?.noteLiveEventsDisconnected(error)
+                }
+
+                try? await Task.sleep(nanoseconds: reconnectDelayNs)
+                reconnectDelayNs = min(reconnectDelayNs * 2, 15_000_000_000)
+            }
+        }
+    }
+
+    private func stopLiveEvents() {
+        liveEventsTask?.cancel()
+        liveEventsTask = nil
+        liveEventsSessionToken = nil
+        liveEventsOrigin = nil
+        liveSyncDebounceTask?.cancel()
+        liveSyncDebounceTask = nil
+        livePollingTask?.cancel()
+        livePollingTask = nil
+        livePollingSessionToken = nil
+        livePollingOrigin = nil
+    }
+
+    private func startLivePollingIfPossible(origin: String, sessionToken: String) {
+        if livePollingTask != nil,
+           livePollingOrigin == origin,
+           livePollingSessionToken == sessionToken {
+            return
+        }
+
+        livePollingTask?.cancel()
+        livePollingOrigin = origin
+        livePollingSessionToken = sessionToken
+        livePollingTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            while !Task.isCancelled {
+                guard let self, self.currentIdentity != nil, !self.localVaultLocked else {
+                    break
+                }
+                await self.performLiveSync()
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+            }
+        }
+    }
+
+    private func noteLiveEventsConnected() {
+        liveSyncStatus = "Live sync connected."
+    }
+
+    private func noteLiveEventsDisconnected(_ error: Error) {
+        liveSyncStatus = "Live sync reconnecting..."
+        if errorMessage == nil {
+            errorMessage = nil
+        }
+    }
+
+    private func scheduleLiveSyncFromEvent() {
+        liveSyncDebounceTask?.cancel()
+        liveSyncDebounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 360_000_000)
+            await self?.performLiveSync()
+        }
+    }
+
+    private func performLiveSync() async {
+        guard !liveSyncInFlight, currentIdentity != nil, !localVaultLocked else {
+            return
+        }
+        liveSyncInFlight = true
+        defer { liveSyncInFlight = false }
+        do {
+            try await sync(automatic: true)
+            liveSyncStatus = "Live sync updated."
+        } catch {
+            liveSyncStatus = "Live sync failed; reconnecting..."
+        }
     }
 
     func presentComposer() {
@@ -1460,6 +1861,10 @@ final class AppModel: ObservableObject {
             errorMessage = "Choose at least one contact."
             return
         }
+        guard selected.count + 1 <= Self.maxGroupMembers else {
+            errorMessage = "Groups currently support up to \(Self.maxGroupMembers) members. Larger groups are not supported yet."
+            return
+        }
 
         if let blockedContact = selected.first(where: { isContactBlocked($0) }) {
             let name = users.first(where: { $0.id == blockedContact })?.displayName ?? "That contact"
@@ -1477,7 +1882,7 @@ final class AppModel: ObservableObject {
             if let archivedDirectThreadId = threadRecords.first(where: { _, record in
                 record.protocolField == "signal-pqxdh-double-ratchet-v1" &&
                     record.standardsSignalPeerUserId == remoteUserId &&
-                    record.hiddenAt != nil
+                    isArchived(record)
             })?.key {
                 await restoreConversation(archivedDirectThreadId)
                 composePresented = false
@@ -2161,7 +2566,7 @@ final class AppModel: ObservableObject {
         let purgeAt = NotrusCrypto.isoNow()
         let existingThread = (threads + archivedThreads).first(where: { $0.id == threadId })
         let currentMessageCount = existingThread?.rawThread.messages.count ?? 0
-        record.hiddenAt = purgeAt
+        record.hiddenAt = nil
         record.purgedAt = purgeAt
         record.messageCache.removeAll()
         record.processedMessageCount = max(record.processedMessageCount, currentMessageCount)
@@ -2169,11 +2574,7 @@ final class AppModel: ObservableObject {
         threadRecords[threadId] = record
         lastSentReadReceiptByThread.removeValue(forKey: threadId)
         threads.removeAll { $0.id == threadId }
-        if let existingThread {
-            archivedThreads.removeAll { $0.id == threadId }
-            archivedThreads.append(existingThread)
-            archivedThreads.sort(by: sortConversationThreads)
-        }
+        archivedThreads.removeAll { $0.id == threadId }
         if selectedThreadID == threadId {
             selectedThreadID = nil
             draftText = ""
@@ -2182,7 +2583,7 @@ final class AppModel: ObservableObject {
 
         do {
             try persistThreadStore()
-            statusMessage = "Deleted local message history and moved the conversation to Archived. Secure-session state was kept for future messages."
+            statusMessage = "Deleted local message history. Sync will keep this conversation out of the list; start a new chat to create a fresh secure session."
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -2190,6 +2591,10 @@ final class AppModel: ObservableObject {
 
     func archiveConversation(_ threadId: String) async {
         guard var record = threadRecords[threadId] else {
+            return
+        }
+        guard !isLocallyDeleted(record) else {
+            errorMessage = "This conversation was locally deleted. Start a new chat instead of archiving the deleted thread."
             return
         }
         record.hiddenAt = record.hiddenAt ?? NotrusCrypto.isoNow()
@@ -2215,6 +2620,10 @@ final class AppModel: ObservableObject {
 
     func restoreConversation(_ threadId: String) async {
         guard var record = threadRecords[threadId] else {
+            return
+        }
+        guard !isLocallyDeleted(record) else {
+            errorMessage = "This conversation was locally deleted. Start a new chat to create a fresh secure session."
             return
         }
         record.hiddenAt = nil
@@ -2277,6 +2686,7 @@ final class AppModel: ObservableObject {
         record.messageCache[messageId] = CachedMessageState(
             attachments: cached?.attachments ?? [],
             body: cached?.body ?? "",
+            editedAt: cached?.editedAt,
             hidden: true,
             status: cached?.status ?? "deleted-local"
         )
@@ -2298,6 +2708,88 @@ final class AppModel: ObservableObject {
         do {
             try persistThreadStore()
             statusMessage = "Deleted one local message from this Mac."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func editMessage(threadId: String, messageId: String, newBody: String) async {
+        guard
+            let identity = currentIdentity,
+            let thread = (threads + archivedThreads).first(where: { $0.id == threadId }),
+            let message = thread.messages.first(where: { $0.id == messageId })
+        else {
+            return
+        }
+
+        let trimmed = newBody.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard message.senderId == identity.id, !trimmed.isEmpty else {
+            errorMessage = "Only your own non-empty Notrus messages can be edited."
+            return
+        }
+
+        beginBlockingBusy("Encrypting message edit...")
+        defer { endBlockingBusy() }
+
+        do {
+            let payload = MessagePayload(
+                attachments: [],
+                cover: nil,
+                epochCommit: nil,
+                padding: nil,
+                text: trimmed
+            )
+            switch thread.rawThread.protocolField ?? "static-room-v1" {
+            case "signal-pqxdh-double-ratchet-v1":
+                try await editStandardsSignalMessage(thread: thread, identity: identity, targetMessageId: messageId, payload: payload)
+            case "mls-rfc9420-v1":
+                try await editStandardsMlsMessage(thread: thread, identity: identity, targetMessageId: messageId, payload: payload)
+            default:
+                throw RelayClientError.requestFailed("This protocol does not support message edits on this Mac yet.")
+            }
+            try await sync()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func deleteMessageForEveryone(threadId: String, messageId: String) async {
+        guard
+            let identity = currentIdentity,
+            let thread = (threads + archivedThreads).first(where: { $0.id == threadId }),
+            let message = thread.messages.first(where: { $0.id == messageId })
+        else {
+            return
+        }
+
+        guard message.senderId == identity.id else {
+            errorMessage = "Only your own messages can be deleted for everyone."
+            return
+        }
+
+        beginBlockingBusy("Deleting message for everyone...")
+        defer { endBlockingBusy() }
+
+        do {
+            let route = try routingState(for: thread)
+            _ = try await currentRelayClient.deleteMessageForEveryone(
+                mailboxHandle: route.mailboxHandle,
+                deliveryCapability: route.deliveryCapability,
+                messageId: messageId,
+                deletedAt: NotrusCrypto.isoNow()
+            )
+            var record = threadRecords[thread.id] ?? ThreadStoreRecord(protocolField: thread.rawThread.protocolField ?? "static-room-v1")
+            let existing = record.messageCache[messageId]
+            record.messageCache[messageId] = CachedMessageState(
+                attachments: [],
+                body: "Message deleted",
+                hidden: existing?.hidden ?? false,
+                status: "deleted-everyone"
+            )
+            threadRecords[thread.id] = record
+            try persistThreadStore()
+            statusMessage = "Deleted message for everyone."
+            try await sync()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -2702,6 +3194,169 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func editStandardsSignalMessage(
+        thread: ConversationThread,
+        identity: LocalIdentity,
+        targetMessageId: String,
+        payload: MessagePayload
+    ) async throws {
+        guard let signalState = identity.standardsSignalState else {
+            throw RelayClientError.requestFailed("This macOS profile is missing its Signal standards state.")
+        }
+        guard var record = threadRecords[thread.id] else {
+            throw RelayClientError.requestFailed("This direct thread is missing local Signal session metadata on this Mac.")
+        }
+        let remoteUserId =
+            record.standardsSignalPeerUserId ??
+            thread.participants.first(where: { $0.id != identity.id })?.id
+        guard let remoteUserId else {
+            throw RelayClientError.requestFailed("This direct thread is missing its remote participant.")
+        }
+        guard let remoteUser = users.first(where: { $0.id == remoteUserId }), let remoteBundle = remoteUser.signalBundle else {
+            throw RelayClientError.requestFailed("The remote participant is not currently advertising a Signal pre-key bundle on the relay.")
+        }
+
+        let plaintext = try encodeStandardsPayload(payload)
+        let encrypted = try await NativeExecution.run {
+            try StandardsCoreBridge.signalEncrypt(
+                localSignalState: signalState,
+                localUserId: identity.id,
+                plaintext: plaintext,
+                remoteBundle: remoteBundle,
+                remoteUserId: remoteUserId
+            )
+        }
+        let updatedIdentity = identity.updatingStandards(signalState: encrypted.localSignalState)
+        let outbound = OutboundMessage(
+            createdAt: NotrusCrypto.isoNow(),
+            id: UUID().uuidString.lowercased(),
+            messageKind: encrypted.messageKind,
+            protocolField: "signal-pqxdh-double-ratchet-v1",
+            senderId: identity.id,
+            threadId: thread.id,
+            wireMessage: encrypted.wireMessage
+        )
+
+        let editedAt = NotrusCrypto.isoNow()
+        record.messageCache[targetMessageId] = CachedMessageState(
+            attachments: payload.attachments,
+            body: payload.text,
+            editedAt: editedAt,
+            hidden: record.messageCache[targetMessageId]?.hidden ?? false,
+            status: "ok"
+        )
+        record.messageCache[outbound.id] = CachedMessageState(body: "", hidden: true, status: "ok")
+        threadRecords[thread.id] = record
+        try persistThreadStore()
+        try persistCurrentIdentity(updatedIdentity)
+
+        do {
+            let route = try routingState(for: thread)
+            _ = try await currentRelayClient.postMessageEdit(
+                mailboxHandle: route.mailboxHandle,
+                deliveryCapability: route.deliveryCapability,
+                targetMessageId: targetMessageId,
+                message: outbound.relayTransportForm()
+            )
+            statusMessage = "Edited message."
+        } catch {
+            record.messageCache.removeValue(forKey: outbound.id)
+            threadRecords[thread.id] = record
+            try persistThreadStore()
+            throw error
+        }
+    }
+
+    private func editStandardsMlsMessage(
+        thread: ConversationThread,
+        identity: LocalIdentity,
+        targetMessageId: String,
+        payload: MessagePayload
+    ) async throws {
+        guard var record = threadRecords[thread.id] else {
+            throw RelayClientError.requestFailed("This MLS thread is missing local thread state on this Mac.")
+        }
+        guard isMlsFanoutCompatibleThread(thread.rawThread) else {
+            throw RelayClientError.requestFailed("Native MLS message edits are not enabled in this macOS build yet.")
+        }
+        guard var signalState = identity.standardsSignalState else {
+            throw RelayClientError.requestFailed("This macOS profile is missing the local Signal standards state required for group fanout.")
+        }
+
+        let plaintext = try encodeStandardsPayload(payload)
+        let recipients = try thread.participants
+            .filter { $0.id != identity.id }
+            .sorted { $0.id < $1.id }
+            .map { recipient -> StandardsMlsFanoutRecipient in
+                guard let bundle = recipient.signalBundle else {
+                    throw RelayClientError.requestFailed("\(recipient.displayName) is missing a Signal bundle required for group fanout.")
+                }
+                let encrypted = try StandardsCoreBridge.signalEncrypt(
+                    localSignalState: signalState,
+                    localUserId: identity.id,
+                    plaintext: plaintext,
+                    remoteBundle: bundle,
+                    remoteUserId: recipient.id
+                )
+                signalState = encrypted.localSignalState
+                return StandardsMlsFanoutRecipient(
+                    messageKind: encrypted.messageKind,
+                    toUserId: recipient.id,
+                    wireMessage: encrypted.wireMessage
+                )
+            }
+        let envelope = StandardsMlsFanoutEnvelope(
+            format: Self.mlsFanoutEnvelopeFormat,
+            senderId: identity.id,
+            version: 1,
+            recipients: recipients
+        )
+        let encodedEnvelope = try JSONEncoder().encode(envelope)
+        guard let wireMessage = String(data: encodedEnvelope, encoding: .utf8) else {
+            throw RelayClientError.requestFailed("Unable to encode the compatibility group edit envelope.")
+        }
+
+        let updatedIdentity = identity.updatingStandards(signalState: signalState)
+        let outbound = OutboundMessage(
+            createdAt: NotrusCrypto.isoNow(),
+            id: UUID().uuidString.lowercased(),
+            messageKind: "mls-application",
+            protocolField: "mls-rfc9420-v1",
+            senderId: identity.id,
+            threadId: thread.id,
+            wireMessage: wireMessage
+        )
+
+        let editedAt = NotrusCrypto.isoNow()
+        record.messageCache[targetMessageId] = CachedMessageState(
+            attachments: payload.attachments,
+            body: payload.text,
+            editedAt: editedAt,
+            hidden: record.messageCache[targetMessageId]?.hidden ?? false,
+            status: "ok"
+        )
+        record.messageCache[outbound.id] = CachedMessageState(body: "", hidden: true, status: "ok")
+        threadRecords[thread.id] = record
+        try persistThreadStore()
+        try persistCurrentIdentity(updatedIdentity)
+
+        do {
+            let route = try routingState(for: thread)
+            _ = try await currentRelayClient.postMessageEdit(
+                mailboxHandle: route.mailboxHandle,
+                deliveryCapability: route.deliveryCapability,
+                targetMessageId: targetMessageId,
+                message: outbound.relayTransportForm()
+            )
+            statusMessage = "Edited group message."
+        } catch {
+            record.messageCache.removeValue(forKey: outbound.id)
+            threadRecords[thread.id] = record
+            try persistThreadStore()
+            throw error
+        }
+    }
+
     private func sendPairwiseMessage(thread: ConversationThread, identity: LocalIdentity, payload: MessagePayload) async throws {
         guard var record = threadRecords[thread.id] else {
             throw NativeProtocolError.missingLocalBootstrap
@@ -3069,6 +3724,9 @@ final class AppModel: ObservableObject {
         cached: CachedMessageState?,
         record: ThreadStoreRecord?
     ) -> Bool {
+        if message.editOf != nil {
+            return false
+        }
         if cached?.hidden == true {
             return false
         }
@@ -3265,6 +3923,71 @@ final class AppModel: ObservableObject {
         }
 
         for message in thread.messages {
+            if message.deletedForEveryoneAt != nil {
+                record.messageCache[message.id] = CachedMessageState(
+                    attachments: [],
+                    body: "Message deleted",
+                    hidden: record.messageCache[message.id]?.hidden ?? false,
+                    status: "deleted-everyone"
+                )
+                continue
+            }
+
+            if let editOf = message.editOf {
+                if record.messageCache[message.id]?.hidden == true {
+                    continue
+                }
+                if message.senderId == identity.id {
+                    record.messageCache[message.id] = CachedMessageState(body: "", hidden: true, status: "ok")
+                    continue
+                }
+                guard let sender = usersById[message.senderId] else {
+                    record.messageCache[message.id] = CachedMessageState(
+                        body: "Sender record missing from directory.",
+                        hidden: true,
+                        status: "missing-sender"
+                    )
+                    continue
+                }
+                if let messageKind = message.messageKind, let wireMessage = message.wireMessage {
+                    do {
+                        let opened = try StandardsCoreBridge.signalDecrypt(
+                            localSignalState: signalState,
+                            localUserId: identity.id,
+                            messageKind: messageKind,
+                            remoteUserId: sender.id,
+                            wireMessage: wireMessage
+                        )
+                        let decodedPayload = decodeStandardsPayload(opened.plaintext)
+                        signalState = opened.localSignalState
+                        identity = identity.updatingStandards(signalState: signalState)
+                        record.messageCache[editOf] = CachedMessageState(
+                            attachments: decodedPayload.attachments,
+                            body: decodedPayload.text,
+                            editedAt: message.createdAt,
+                            hidden: record.messageCache[editOf]?.hidden ?? false,
+                            status: "ok"
+                        )
+                        record.messageCache[message.id] = CachedMessageState(body: "", hidden: true, status: "ok")
+                    } catch {
+                        threadWarnings.append("A Notrus message edit from \(sender.displayName) failed decryption or authentication.")
+                        record.messageCache[message.id] = CachedMessageState(
+                            body: error.localizedDescription,
+                            hidden: true,
+                            status: "invalid"
+                        )
+                    }
+                } else {
+                    threadWarnings.append("A Notrus message edit was missing its authenticated wire payload.")
+                    record.messageCache[message.id] = CachedMessageState(
+                        body: "The Notrus edit event was incomplete.",
+                        hidden: true,
+                        status: "invalid"
+                    )
+                }
+                continue
+            }
+
             if canSkipLocalDecrypt(record.messageCache[message.id]) {
                 continue
             }
@@ -3328,19 +4051,24 @@ final class AppModel: ObservableObject {
         threadRecords[thread.id] = record
 
         let messages = thread.messages.compactMap { message -> DecryptedMessage? in
+            if message.editOf != nil {
+                return nil
+            }
             let cached = record.messageCache[message.id]
             if !shouldDisplayMessage(message, cached: cached, record: record) {
                 return nil
             }
 
+            let deleted = message.deletedForEveryoneAt != nil
             return DecryptedMessage(
-                attachments: cached?.attachments ?? [],
+                attachments: deleted ? [] : cached?.attachments ?? [],
                 id: message.id,
                 senderId: message.senderId,
                 senderName: usersById[message.senderId]?.displayName ?? "Unknown user",
                 createdAt: message.createdAt,
-                body: cached?.body ?? "Local plaintext unavailable for this Notrus message.",
-                status: cached?.status ?? "missing-local-state"
+                body: deleted ? "Message deleted" : cached?.body ?? "Local plaintext unavailable for this Notrus message.",
+                editedAt: deleted ? nil : cached?.editedAt,
+                status: deleted ? "deleted-everyone" : cached?.status ?? "missing-local-state"
             )
         }
 
@@ -3398,6 +4126,69 @@ final class AppModel: ObservableObject {
             }
 
             for message in thread.messages {
+                if message.deletedForEveryoneAt != nil {
+                    record.messageCache[message.id] = CachedMessageState(
+                        attachments: [],
+                        body: "Message deleted",
+                        hidden: record.messageCache[message.id]?.hidden ?? false,
+                        status: "deleted-everyone"
+                    )
+                    continue
+                }
+
+                if let editOf = message.editOf {
+                    if record.messageCache[message.id]?.hidden == true {
+                        continue
+                    }
+                    if message.senderId == identity.id {
+                        record.messageCache[message.id] = CachedMessageState(body: "", hidden: true, status: "ok")
+                        continue
+                    }
+                    if let wireMessage = message.wireMessage {
+                        do {
+                            guard let envelope = try decodeMlsFanoutEnvelope(wireMessage), envelope.senderId == message.senderId else {
+                                throw RelayClientError.requestFailed("The compatible group edit envelope was malformed.")
+                            }
+                            guard let recipient = envelope.recipients.first(where: { $0.toUserId == identity.id }) else {
+                                throw RelayClientError.requestFailed("This Mac did not receive a recipient envelope for that group edit.")
+                            }
+                            let opened = try StandardsCoreBridge.signalDecrypt(
+                                localSignalState: signalState,
+                                localUserId: identity.id,
+                                messageKind: recipient.messageKind,
+                                remoteUserId: message.senderId,
+                                wireMessage: recipient.wireMessage
+                            )
+                            let decodedPayload = decodeStandardsPayload(opened.plaintext)
+                            signalState = opened.localSignalState
+                            identity = identity.updatingStandards(signalState: signalState)
+                            record.messageCache[editOf] = CachedMessageState(
+                                attachments: decodedPayload.attachments,
+                                body: decodedPayload.text,
+                                editedAt: message.createdAt,
+                                hidden: record.messageCache[editOf]?.hidden ?? false,
+                                status: "ok"
+                            )
+                            record.messageCache[message.id] = CachedMessageState(body: "", hidden: true, status: "ok")
+                        } catch {
+                            threadWarnings.append("A compatible group edit from \(usersById[message.senderId]?.displayName ?? "Unknown user") failed decryption.")
+                            record.messageCache[message.id] = CachedMessageState(
+                                body: error.localizedDescription,
+                                hidden: true,
+                                status: "invalid"
+                            )
+                        }
+                    } else {
+                        threadWarnings.append("A compatible group edit was missing its envelope payload.")
+                        record.messageCache[message.id] = CachedMessageState(
+                            body: "The compatible group edit envelope payload was incomplete.",
+                            hidden: true,
+                            status: "invalid"
+                        )
+                    }
+                    continue
+                }
+
                 if canSkipLocalDecrypt(record.messageCache[message.id]) {
                     continue
                 }
@@ -3455,18 +4246,23 @@ final class AppModel: ObservableObject {
             record.lastProcessedMessageId = thread.messages.last?.id
             threadRecords[thread.id] = record
             let messages = thread.messages.compactMap { message -> DecryptedMessage? in
+                if message.editOf != nil {
+                    return nil
+                }
                 let cached = record.messageCache[message.id]
                 if !shouldDisplayMessage(message, cached: cached, record: record) {
                     return nil
                 }
+                let deleted = message.deletedForEveryoneAt != nil
                 return DecryptedMessage(
-                    attachments: cached?.attachments ?? [],
+                    attachments: deleted ? [] : cached?.attachments ?? [],
                     id: message.id,
                     senderId: message.senderId,
                     senderName: usersById[message.senderId]?.displayName ?? "Unknown user",
                     createdAt: message.createdAt,
-                    body: cached?.body ?? "Local plaintext unavailable for this compatible group message.",
-                    status: cached?.status ?? "missing-local-state"
+                    body: deleted ? "Message deleted" : cached?.body ?? "Local plaintext unavailable for this compatible group message.",
+                    editedAt: deleted ? nil : cached?.editedAt,
+                    status: deleted ? "deleted-everyone" : cached?.status ?? "missing-local-state"
                 )
             }
 

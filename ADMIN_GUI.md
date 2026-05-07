@@ -1,10 +1,16 @@
-# Notrus Admin GUI
+# Notrus Relay Operator Console
 
-This document describes the built-in relay operator GUI at `/admin`.
+This document describes the built-in relay operator console at `/admin`.
+
+Current hosted operator console:
+
+```text
+https://relay.notrus.cloud/admin
+```
 
 ## Purpose
 
-The Admin GUI is an optional operator surface for self-hosted relays to inspect and manage relay-side accounts.
+The operator console is an optional operator surface for self-hosted relays to inspect and manage relay-side accounts.
 
 It is disabled by default and only available when:
 
@@ -17,7 +23,7 @@ node server.js
 ## Authentication
 
 - Every admin API request requires `X-Notrus-Admin-Token`.
-- The GUI stores the token only in local browser storage on the operator machine.
+- The console stores the token only in local browser storage on the operator machine.
 - Do not expose the token publicly.
 
 ## Current actions
@@ -30,13 +36,13 @@ node server.js
 
 ## Boundaries
 
-The Admin GUI can:
+The operator console can:
 
 - inspect relay account metadata
 - deactivate and reactivate accounts
 - remove relay accounts and associated relay-side thread/report records
 
-The Admin GUI cannot:
+The operator console cannot:
 
 - create users
 - read message plaintext

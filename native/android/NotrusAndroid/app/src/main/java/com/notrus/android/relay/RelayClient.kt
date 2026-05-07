@@ -22,6 +22,7 @@ import com.notrus.android.model.RelayLinkedDevice
 import com.notrus.android.model.RelayMessage
 import com.notrus.android.model.RelayAttachment
 import com.notrus.android.model.RelayReadReceipt
+import com.notrus.android.model.RelayDeliveryReceipt
 import com.notrus.android.model.RelaySecurityDevicesResponse
 import com.notrus.android.model.RelaySession
 import com.notrus.android.model.RelaySyncPayload
@@ -33,6 +34,7 @@ import com.notrus.android.model.TransparencyEntry
 import com.notrus.android.model.TransparencySignerInfo
 import com.notrus.android.model.WitnessObservation
 import java.io.BufferedReader
+import java.io.IOException
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URI
@@ -214,6 +216,30 @@ class RelayClient(
         response.optString("messageId", messageId)
     }
 
+    suspend fun postSignalMessageEdit(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        targetMessageId: String,
+        messageKind: String,
+        wireMessage: String,
+    ): String = withContext(Dispatchers.IO) {
+        val messageId = UUID.randomUUID().toString().lowercase()
+        val response = request(
+            "/api/mailboxes/$mailboxHandle/messages/$targetMessageId/edit",
+            method = "POST",
+            authorizationToken = deliveryCapability,
+            body = JSONObject()
+                .put("createdAt", Instant.now().toString())
+                .put("id", messageId)
+                .put("messageKind", messageKind)
+                .put("paddingBucket", nextTransportBucket(wireMessage.length))
+                .put("protocol", "signal-pqxdh-double-ratchet-v1")
+                .put("transportPadding", transportPadding(wireMessage.length))
+                .put("wireMessage", wireMessage),
+        )
+        response.optString("messageId", messageId)
+    }
+
     suspend fun postMlsMessage(
         mailboxHandle: String,
         deliveryCapability: String,
@@ -234,6 +260,44 @@ class RelayClient(
                 .put("wireMessage", wireMessage)
         )
         response.optString("messageId", messageId)
+    }
+
+    suspend fun postMlsMessageEdit(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        targetMessageId: String,
+        wireMessage: String,
+    ): String = withContext(Dispatchers.IO) {
+        val messageId = UUID.randomUUID().toString().lowercase()
+        val response = request(
+            "/api/mailboxes/$mailboxHandle/messages/$targetMessageId/edit",
+            method = "POST",
+            authorizationToken = deliveryCapability,
+            body = JSONObject()
+                .put("createdAt", Instant.now().toString())
+                .put("id", messageId)
+                .put("messageKind", "mls-application")
+                .put("paddingBucket", nextTransportBucket(wireMessage.length))
+                .put("protocol", "mls-rfc9420-v1")
+                .put("transportPadding", transportPadding(wireMessage.length))
+                .put("wireMessage", wireMessage),
+        )
+        response.optString("messageId", messageId)
+    }
+
+    suspend fun deleteMessageForEveryone(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        messageId: String,
+        deletedAt: String,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val response = request(
+            "/api/mailboxes/$mailboxHandle/messages/$messageId/delete",
+            method = "POST",
+            authorizationToken = deliveryCapability,
+            body = JSONObject().put("deletedAt", deletedAt),
+        )
+        response.optBoolean("ok", false)
     }
 
     suspend fun postReadReceipt(
@@ -511,7 +575,22 @@ class RelayClient(
                         protocol = nullableString(messageJson, "protocol"),
                         wireMessage = nullableString(messageJson, "wireMessage"),
                         counter = messageJson.takeIf { it.has("counter") }?.optInt("counter"),
+                        deletedBy = nullableString(messageJson, "deletedBy"),
+                        deletedForEveryoneAt = nullableString(messageJson, "deletedForEveryoneAt"),
+                        editOf = nullableString(messageJson, "editOf"),
                         epoch = messageJson.takeIf { it.has("epoch") }?.optInt("epoch"),
+                    )
+                }
+            }
+            val deliveryReceipts = mutableListOf<RelayDeliveryReceipt>()
+            val deliveryReceiptArray = json.optJSONArray("deliveryReceipts") ?: JSONArray()
+            for (receiptIndex in 0 until deliveryReceiptArray.length()) {
+                deliveryReceiptArray.optJSONObject(receiptIndex)?.let { receiptJson ->
+                    deliveryReceipts += RelayDeliveryReceipt(
+                        userId = receiptJson.optString("userId"),
+                        threadId = receiptJson.optString("threadId"),
+                        lastDeliveredMessageId = receiptJson.optString("lastDeliveredMessageId"),
+                        deliveredAt = receiptJson.optString("deliveredAt"),
                     )
                 }
             }
@@ -547,6 +626,7 @@ class RelayClient(
                 participantIds = participants,
                 attachmentCount = (json.optJSONArray("attachments") ?: JSONArray()).length(),
                 messages = messages.sortedBy { it.createdAt },
+                deliveryReceipts = deliveryReceipts,
                 readReceipts = readReceipts,
             )
         }
@@ -827,6 +907,33 @@ class RelayClient(
             )
 
     private fun request(
+        path: String,
+        method: String = "GET",
+        body: JSONObject? = null,
+        authorizationToken: String? = null,
+        includeBootstrapHeaders: Boolean = false,
+    ): JSONObject {
+        var attempt = 0
+        while (true) {
+            try {
+                return requestOnce(
+                    path = path,
+                    method = method,
+                    body = body,
+                    authorizationToken = authorizationToken,
+                    includeBootstrapHeaders = includeBootstrapHeaders,
+                )
+            } catch (error: IOException) {
+                if (attempt >= 3) {
+                    throw IllegalStateException("Could not connect to the relay at $origin after retrying. Check that the HTTPS tunnel is online and try again.", error)
+                }
+                Thread.sleep(listOf(350L, 900L, 1_800L)[attempt])
+                attempt += 1
+            }
+        }
+    }
+
+    private fun requestOnce(
         path: String,
         method: String = "GET",
         body: JSONObject? = null,

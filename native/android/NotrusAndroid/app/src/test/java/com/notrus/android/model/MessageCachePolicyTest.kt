@@ -1,7 +1,9 @@
 package com.notrus.android.model
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MessageCachePolicyTest {
@@ -29,5 +31,40 @@ class MessageCachePolicyTest {
         assertNull(merged.hiddenAt)
         assertNull(merged.mutedAt)
         assertEquals(setOf("old", "new"), merged.messageCache.keys)
+    }
+
+    @Test
+    fun archivedThreadIsNotLocallyDeleted() {
+        val record = ConversationThreadRecord(
+            hiddenAt = "2026-05-05T10:00:00Z",
+            protocol = "signal-pqxdh-double-ratchet-v1",
+        )
+
+        assertTrue(MessageCachePolicy.isArchived(record))
+        assertFalse(MessageCachePolicy.isLocallyDeleted(record))
+    }
+
+    @Test
+    fun purgedThreadIsDeletedNotArchived() {
+        val record = ConversationThreadRecord(
+            hiddenAt = "2026-05-05T10:00:00Z",
+            purgedAt = "2026-05-05T10:01:00Z",
+            protocol = "signal-pqxdh-double-ratchet-v1",
+        )
+
+        assertFalse(MessageCachePolicy.isArchived(record))
+        assertTrue(MessageCachePolicy.isLocallyDeleted(record))
+    }
+
+    @Test
+    fun unarchivedThreadStaysActive() {
+        val record = ConversationThreadRecord(
+            hiddenAt = null,
+            purgedAt = null,
+            protocol = "signal-pqxdh-double-ratchet-v1",
+        )
+
+        assertFalse(MessageCachePolicy.isArchived(record))
+        assertFalse(MessageCachePolicy.isLocallyDeleted(record))
     }
 }

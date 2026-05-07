@@ -1,18 +1,57 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import UserNotifications
 
 private extension Notification.Name {
     static let notrusFocusSearch = Notification.Name("NotrusMac.FocusSearch")
+    static let notrusOpenThreadFromNotification = Notification.Name("NotrusMac.OpenThreadFromNotification")
+}
+
+final class NotrusMacNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = NotrusMacNotificationDelegate()
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        if let threadId = response.notification.request.content.userInfo["threadId"] as? String {
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .notrusOpenThreadFromNotification, object: threadId)
+            }
+        }
+        completionHandler()
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([])
+    }
+}
+
+final class NotrusMacAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        UNUserNotificationCenter.current().delegate = NotrusMacNotificationDelegate.shared
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
 }
 
 @main
 struct NotrusMacApp: App {
+    @NSApplicationDelegateAdaptor(NotrusMacAppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
     @AppStorage("NotrusMac.appearanceMode") private var appearanceModeRaw = AppAppearanceMode.system.rawValue
 
     init() {
         NSApplication.shared.applicationIconImage = NotrusBrandAssets.applicationIcon()
+        UNUserNotificationCenter.current().delegate = NotrusMacNotificationDelegate.shared
     }
 
     var body: some Scene {
@@ -624,6 +663,20 @@ struct WorkspaceView: View {
         .onReceive(NotificationCenter.default.publisher(for: .notrusFocusSearch)) { _ in
             threadSearchFocused = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .notrusOpenThreadFromNotification)) { notification in
+            if let threadId = notification.object as? String {
+                model.selectedThreadID = threadId
+            }
+        }
+        .onAppear {
+            model.setMacAppActive(NSApplication.shared.isActive)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.setMacAppActive(true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            model.setMacAppActive(false)
+        }
         .toolbar {
             ToolbarItemGroup {
                 Button("Sync") {
@@ -662,6 +715,13 @@ struct WorkspaceView: View {
             }) {
                 return true
             }
+            if thread.messages.contains(where: {
+                $0.body.lowercased().contains(normalized) ||
+                    $0.senderName.lowercased().contains(normalized) ||
+                    $0.createdAt.lowercased().contains(normalized)
+            }) {
+                return true
+            }
             return false
         }
     }
@@ -678,6 +738,13 @@ struct WorkspaceView: View {
             }
             if thread.participants.contains(where: {
                 $0.displayName.lowercased().contains(normalized) || $0.username.lowercased().contains(normalized)
+            }) {
+                return true
+            }
+            if thread.messages.contains(where: {
+                $0.body.lowercased().contains(normalized) ||
+                    $0.senderName.lowercased().contains(normalized) ||
+                    $0.createdAt.lowercased().contains(normalized)
             }) {
                 return true
             }
@@ -1290,6 +1357,22 @@ struct ProtocolBadge: View {
 struct ConversationView: View {
     @EnvironmentObject private var model: AppModel
     let thread: ConversationThread
+    @State private var messageSearchText = ""
+    @State private var activeSearchMatchIndex = 0
+
+    private var messageSearchMatches: [String] {
+        let query = messageSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            return []
+        }
+        return thread.messages
+            .filter { message in
+                message.body.localizedCaseInsensitiveContains(query) ||
+                    message.senderName.localizedCaseInsensitiveContains(query) ||
+                    message.createdAt.localizedCaseInsensitiveContains(query)
+            }
+            .map(\.id)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -1313,25 +1396,81 @@ struct ConversationView: View {
                 )
             }
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(thread.messages) { message in
-                        MessageBubble(
-                            message: message,
-                            isCurrentUser: message.senderId == model.currentIdentity?.id,
-                            readReceiptSummary: model.readReceiptSummary(for: message, in: thread),
-                            saveAttachment: { reference in
-                                Task {
-                                    await model.saveAttachment(reference, in: thread)
-                                }
-                            },
-                            deleteMessage: {
-                                model.deleteMessageLocally(threadId: thread.id, messageId: message.id)
+            ScrollViewReader { scrollProxy in
+                VStack(spacing: 10) {
+                    ConversationMessageSearchBar(
+                        query: $messageSearchText,
+                        currentMatch: messageSearchMatches.isEmpty ? 0 : activeSearchMatchIndex + 1,
+                        matchCount: messageSearchMatches.count,
+                        previous: {
+                            moveSearchSelection(delta: -1, using: scrollProxy)
+                        },
+                        next: {
+                            moveSearchSelection(delta: 1, using: scrollProxy)
+                        },
+                        clear: {
+                            messageSearchText = ""
+                            activeSearchMatchIndex = 0
+                            scrollToLatestMessage(using: scrollProxy, animated: true)
+                        }
+                    )
+
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(thread.messages) { message in
+                                let activeMatchId = messageSearchMatches[safe: activeSearchMatchIndex]
+                                MessageBubble(
+                                    message: message,
+                                    isCurrentUser: message.senderId == model.currentIdentity?.id,
+                                    deliveryReceiptSummary: model.deliveryReceiptSummary(for: message, in: thread),
+                                    readReceiptSummary: model.readReceiptSummary(for: message, in: thread),
+                                    messageInfoText: model.messageInfoText(for: message, in: thread),
+                                    searchQuery: messageSearchText,
+                                    searchMatchActive: activeMatchId == message.id,
+                                    searchMatchVisible: messageSearchMatches.contains(message.id),
+                                    saveAttachment: { reference in
+                                        Task {
+                                            await model.saveAttachment(reference, in: thread)
+                                        }
+                                    },
+                                    deleteMessage: {
+                                        model.deleteMessageLocally(threadId: thread.id, messageId: message.id)
+                                    },
+                                    deleteMessageForEveryone: {
+                                        Task {
+                                            await model.deleteMessageForEveryone(threadId: thread.id, messageId: message.id)
+                                        }
+                                    },
+                                    editMessage: { updatedText in
+                                        Task {
+                                            await model.editMessage(threadId: thread.id, messageId: message.id, newBody: updatedText)
+                                        }
+                                    }
+                                )
+                                .id(message.id)
                             }
-                        )
+                            Color.clear
+                                .frame(height: 1)
+                                .id(bottomAnchorId)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .onAppear {
+                    scrollToLatestMessage(using: scrollProxy, animated: false)
+                }
+                .onChange(of: thread.id) { _ in
+                    scrollToLatestMessage(using: scrollProxy, animated: false)
+                }
+                .onChange(of: thread.messages.last?.id) { _ in
+                    if messageSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        scrollToLatestMessage(using: scrollProxy, animated: true)
+                    }
+                }
+                .onChange(of: messageSearchText) { _ in
+                    activeSearchMatchIndex = 0
+                    scrollToActiveSearchMatch(using: scrollProxy)
+                }
             }
 
             ComposerBar(
@@ -1355,6 +1494,122 @@ struct ConversationView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func scrollToLatestMessage(using proxy: ScrollViewProxy, animated: Bool) {
+        guard !thread.messages.isEmpty else {
+            return
+        }
+        DispatchQueue.main.async {
+            if animated {
+                withAnimation(.easeOut(duration: 0.22)) {
+                    proxy.scrollTo(bottomAnchorId, anchor: .bottom)
+                }
+            } else {
+                proxy.scrollTo(bottomAnchorId, anchor: .bottom)
+            }
+        }
+    }
+
+    private var bottomAnchorId: String {
+        "conversation-bottom-\(thread.id)"
+    }
+
+    private func moveSearchSelection(delta: Int, using proxy: ScrollViewProxy) {
+        guard !messageSearchMatches.isEmpty else {
+            return
+        }
+        let next = activeSearchMatchIndex + delta
+        if next < 0 {
+            activeSearchMatchIndex = messageSearchMatches.count - 1
+        } else if next >= messageSearchMatches.count {
+            activeSearchMatchIndex = 0
+        } else {
+            activeSearchMatchIndex = next
+        }
+        scrollToActiveSearchMatch(using: proxy)
+    }
+
+    private func scrollToActiveSearchMatch(using proxy: ScrollViewProxy) {
+        guard let messageId = messageSearchMatches[safe: activeSearchMatchIndex] else {
+            return
+        }
+        withAnimation(.easeInOut(duration: 0.22)) {
+            proxy.scrollTo(messageId, anchor: .center)
+        }
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+struct ConversationMessageSearchBar: View {
+    @Binding var query: String
+    let currentMatch: Int
+    let matchCount: Int
+    let previous: () -> Void
+    let next: () -> Void
+    let clear: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "text.magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Search messages in this chat", text: $query)
+                .textFieldStyle(.plain)
+            if !query.isEmpty {
+                Button {
+                    clear()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Clear message search")
+            }
+            Divider()
+                .frame(height: 18)
+            Text(statusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 86, alignment: .trailing)
+            Button {
+                previous()
+            } label: {
+                Image(systemName: "chevron.up")
+            }
+            .buttonStyle(.plain)
+            .disabled(matchCount == 0)
+            .help("Previous match")
+            Button {
+                next()
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .buttonStyle(.plain)
+            .disabled(matchCount == 0)
+            .help("Next match")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.secondary.opacity(0.12), lineWidth: 1)
+        )
+    }
+
+    private var statusText: String {
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Local only"
+        }
+        if matchCount == 0 {
+            return "No matches"
+        }
+        return "\(currentMatch) of \(matchCount)"
     }
 }
 
@@ -1466,9 +1721,19 @@ struct MetadataChip: View {
 struct MessageBubble: View {
     let message: DecryptedMessage
     let isCurrentUser: Bool
+    let deliveryReceiptSummary: String?
     let readReceiptSummary: String?
+    let messageInfoText: String
+    let searchQuery: String
+    let searchMatchActive: Bool
+    let searchMatchVisible: Bool
     let saveAttachment: (SecureAttachmentReference) -> Void
     let deleteMessage: () -> Void
+    let deleteMessageForEveryone: () -> Void
+    let editMessage: (String) -> Void
+    @State private var messageInfoPresented = false
+    @State private var editPresented = false
+    @State private var editText = ""
 
     var body: some View {
         HStack {
@@ -1477,6 +1742,16 @@ struct MessageBubble: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
+                if searchMatchActive {
+                    Label("Selected search match", systemImage: "scope")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(NotrusPalette.accent)
+                } else if searchMatchVisible {
+                    Label("Search match", systemImage: "magnifyingglass")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+
                 HStack {
                     Text(message.senderName)
                         .font(.subheadline.weight(.semibold))
@@ -1490,6 +1765,12 @@ struct MessageBubble: View {
                     .font(.body)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
+
+                if let editedAt = message.editedAt, message.status != "deleted-everyone" {
+                    Text("Edited \(shortTimestamp(editedAt))")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
 
                 if !message.attachments.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
@@ -1530,6 +1811,10 @@ struct MessageBubble: View {
                     Text(readReceiptSummary)
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.secondary)
+                } else if let deliveryReceiptSummary {
+                    Text(deliveryReceiptSummary)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
                 }
             }
             .foregroundStyle(bubbleForeground)
@@ -1537,13 +1822,68 @@ struct MessageBubble: View {
             .background(bubbleBackground, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+                    .strokeBorder(searchBorderColor, lineWidth: searchMatchVisible ? 2 : 1)
             )
             .frame(maxWidth: 680, alignment: .leading)
             .contextMenu {
+                Button("Message Info") {
+                    messageInfoPresented = true
+                }
+                if isCurrentUser && message.status != "deleted-everyone" {
+                    Button("Edit Message") {
+                        editText = message.body
+                        editPresented = true
+                    }
+                    Button("Delete For Everyone", role: .destructive) {
+                        deleteMessageForEveryone()
+                    }
+                }
                 Button("Delete Locally", role: .destructive) {
                     deleteMessage()
                 }
+            }
+            .popover(isPresented: $messageInfoPresented) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Message info")
+                        .font(.headline)
+                    Text(messageInfoText)
+                        .font(.callout)
+                        .textSelection(.enabled)
+                    Button("Close") {
+                        messageInfoPresented = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+                .padding(16)
+                .frame(width: 320, alignment: .leading)
+            }
+            .popover(isPresented: $editPresented) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Edit message")
+                        .font(.headline)
+                    TextEditor(text: $editText)
+                        .frame(width: 360, height: 120)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 1)
+                        )
+                    HStack {
+                        Spacer()
+                        Button("Cancel") {
+                            editPresented = false
+                        }
+                        Button("Save") {
+                            let trimmed = editText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !trimmed.isEmpty else {
+                                return
+                            }
+                            editPresented = false
+                            editMessage(trimmed)
+                        }
+                        .keyboardShortcut(.defaultAction)
+                    }
+                }
+                .padding(16)
             }
 
             if !isCurrentUser {
@@ -1561,6 +1901,16 @@ struct MessageBubble: View {
             return NotrusPalette.amber.opacity(0.22)
         }
         return isCurrentUser ? NotrusPalette.accentSoft.opacity(0.72) : NotrusPalette.panelStrong.opacity(0.92)
+    }
+
+    private var searchBorderColor: Color {
+        if searchMatchActive {
+            return NotrusPalette.accent.opacity(0.85)
+        }
+        if searchMatchVisible {
+            return NotrusPalette.accent.opacity(0.32)
+        }
+        return Color.white.opacity(0.06)
     }
 }
 
@@ -2181,6 +2531,75 @@ struct AccountCenterSheet: View {
                             }
                             .toggleStyle(.switch)
 
+                            Toggle(isOn: Binding(
+                                get: { model.showReadReceiptsFromOthers },
+                                set: { enabled in
+                                    model.showReadReceiptsFromOthers = enabled
+                                    model.persistReadReceiptsPreference()
+                                }
+                            )) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Show read confirmations")
+                                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(NotrusPalette.ink)
+                                    Text("When off, Notrus hides read status and exact read times that other devices send to this Mac.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .toggleStyle(.switch)
+
+                            Toggle(isOn: Binding(
+                                get: { model.macNotificationsEnabled },
+                                set: { enabled in
+                                    model.macNotificationsEnabled = enabled
+                                    model.persistMacNotificationPreferences()
+                                }
+                            )) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Mac notifications")
+                                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(NotrusPalette.ink)
+                                    Text("Shows local macOS notifications after this Mac syncs and decrypts new messages. Hidden content is the default.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .toggleStyle(.switch)
+
+                            Picker("Notification content", selection: Binding(
+                                get: { model.macNotificationContentVisibility },
+                                set: { visibility in
+                                    model.macNotificationContentVisibility = visibility
+                                    model.persistMacNotificationPreferences()
+                                }
+                            )) {
+                                ForEach(MacNotificationContentVisibility.allCases) { visibility in
+                                    Text(visibility.title).tag(visibility)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .disabled(!model.macNotificationsEnabled)
+
+                            Toggle(isOn: Binding(
+                                get: { model.macNotificationGroupPreviewEnabled },
+                                set: { enabled in
+                                    model.macNotificationGroupPreviewEnabled = enabled
+                                    model.persistMacNotificationPreferences()
+                                }
+                            )) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Allow group message previews")
+                                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(NotrusPalette.ink)
+                                    Text("When off, group notifications stay generic even if full preview is selected.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .toggleStyle(.switch)
+                            .disabled(!model.macNotificationsEnabled)
+
                             Toggle("Lock vault when app moves to background", isOn: $lockOnBackground)
                                 .toggleStyle(.switch)
                                 .font(.subheadline)
@@ -2311,7 +2730,7 @@ struct AccountCenterSheet: View {
                         VStack(alignment: .leading, spacing: 14) {
                             Text("About Notrus")
                                 .font(.title3.weight(.semibold))
-                            Text("Notrus is an independent, self-hostable encrypted messenger project. It is not affiliated with Apple, Android, Signal, MLS, ngrok, or any third-party protocol or platform provider.")
+                            Text("Notrus is an independent, self-hostable encrypted messenger project. It is not affiliated with Apple, Android, Signal, MLS, Cloudflare, or any third-party protocol or platform provider.")
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
                             VStack(alignment: .leading, spacing: 8) {
@@ -2476,6 +2895,7 @@ struct AccountCenterSheet: View {
                             }
 
                             inventoryRow(label: "Relay origin", value: model.relayOrigin, trailing: nil)
+                            inventoryRow(label: "Live sync", value: model.liveSyncStatus, trailing: model.lastSuccessfulSyncAt.map { "Last sync \($0)" })
                             inventoryRow(label: "Discovery", value: model.relayHealthStatus?.directoryDiscoveryMode?.replacingOccurrences(of: "-", with: " ") ?? "Pending sync", trailing: nil)
                             inventoryRow(label: "Protocol policy", value: model.relayHealthStatus?.protocolPolicy?.note ?? model.protocolProgramSummary.note, trailing: model.protocolProgramSummary.mode.rawValue)
                             inventoryRow(label: "Transparency entries", value: "\(model.relayHealthStatus?.transparency?.entryCount ?? model.transparency.entries.count)", trailing: model.relayHealthStatus?.transparency?.signer?.keyId)

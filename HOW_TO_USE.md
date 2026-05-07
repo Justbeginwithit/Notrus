@@ -15,6 +15,12 @@ For local development, use:
 
 For remote device usage, use HTTPS.
 
+Current hosted relay:
+
+```text
+https://relay.notrus.cloud
+```
+
 ## 2. Optional witness
 
 If you want an independent transparency observer:
@@ -22,6 +28,20 @@ If you want an independent transparency observer:
 ```bash
 RELAY_ORIGIN=http://127.0.0.1:3000 npm run start:witness
 ```
+
+Current hosted witness:
+
+```text
+https://witness.notrus.cloud
+```
+
+Witness graphical console:
+
+```text
+https://witness.notrus.cloud/witness
+```
+
+Endpoint provider choices, limits, and recommended use cases are documented in [docs/security/endpoint-provider-guide.md](docs/security/endpoint-provider-guide.md).
 
 ## 3. Recommended: configure attestation verification
 
@@ -67,14 +87,14 @@ Call routes with header `X-Notrus-Admin-Token: <token>`:
 - `POST /api/admin/users/:userId/block` to deactivate/tombstone an account
 - `POST /api/admin/users/:userId/delete` to hard-delete a relay account plus its threads
 
-Or open the built-in GUI:
+Or open the built-in relay operator console:
 
 - `http://127.0.0.1:3000/admin`
-- `https://<your-ngrok-or-domain>/admin`
+- `https://relay.notrus.cloud/admin`
 
 Note: local profile lists in Android/macOS only show identities stored on that device, not all relay accounts.
 
-Admin GUI capability boundary:
+Relay operator console capability boundary:
 
 - can inspect/block/unblock/delete relay accounts
 - cannot create users

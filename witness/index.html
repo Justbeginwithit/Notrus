@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Notrus Witness Console</title>
+    <link rel="stylesheet" href="/witness/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Read-only transparency observer</p>
+          <h1>Notrus Witness Console</h1>
+          <p class="subtitle">
+            Monitor relay transparency heads, signer stability, and witness history without exposing message plaintext.
+          </p>
+        </div>
+        <div class="status-stack">
+          <span id="healthBadge" class="badge muted">Witness: unknown</span>
+          <span id="headBadge" class="badge muted">Relay head: unknown</span>
+          <span id="tokenBadge" class="badge muted">History: token required</span>
+        </div>
+      </header>
+
+      <section class="panel">
+        <div class="panel-title">
+          <div>
+            <h2>Connection</h2>
+            <p class="muted">Public health and latest head are available without a token. History and summary use the read-only witness token.</p>
+          </div>
+          <button id="refreshAll" class="button" type="button">Refresh</button>
+        </div>
+        <div class="grid three">
+          <label class="field">
+            <span>Witness origin</span>
+            <input id="witnessOriginInput" type="url" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Relay origin</span>
+            <input id="relayOriginInput" type="url" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Read-only witness token</span>
+            <input id="tokenInput" type="password" autocomplete="off" placeholder="X-Notrus-Witness-Admin-Token" />
+          </label>
+        </div>
+        <div class="row">
+          <button id="saveSession" class="button subtle" type="button">Save For Session</button>
+          <button id="clearSession" class="button subtle" type="button">Clear Session Token</button>
+          <button id="loadPublicHead" class="button subtle" type="button">Load Public Head</button>
+          <button id="loadHistory" class="button subtle" type="button">Load History</button>
+          <button id="loadSummary" class="button subtle" type="button">Load Summary</button>
+        </div>
+      </section>
+
+      <section class="grid two">
+        <article class="panel">
+          <h2>Latest Observation</h2>
+          <dl class="facts">
+            <div>
+              <dt>Relay</dt>
+              <dd id="latestRelay" class="mono muted">-</dd>
+            </div>
+            <div>
+              <dt>Entry count</dt>
+              <dd id="latestEntryCount" class="mono muted">-</dd>
+            </div>
+            <div>
+              <dt>Observed at</dt>
+              <dd id="latestObservedAt" class="mono muted">-</dd>
+            </div>
+            <div>
+              <dt>Signer</dt>
+              <dd id="latestSigner" class="mono muted">-</dd>
+            </div>
+            <div>
+              <dt>Head</dt>
+              <dd id="latestHead" class="mono muted break">-</dd>
+            </div>
+            <div>
+              <dt>Signature</dt>
+              <dd id="latestSignature" class="mono muted">-</dd>
+            </div>
+          </dl>
+        </article>
+
+        <article class="panel">
+          <h2>Interpretation</h2>
+          <ul class="checks" id="checksList">
+            <li class="muted">No observation loaded yet.</li>
+          </ul>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <div>
+            <h2>Witness History</h2>
+            <p class="muted">Detailed history is read-only and token-gated when witness admin mode is configured.</p>
+          </div>
+          <span id="historyCount" class="muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Entry</th>
+                <th>Observed</th>
+                <th>Signer</th>
+                <th>Head</th>
+                <th>Signature</th>
+              </tr>
+            </thead>
+            <tbody id="historyBody">
+              <tr>
+                <td colspan="5" class="muted">No history loaded.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Event Log</h2>
+        <pre id="logBox" class="log-box"></pre>
+      </section>
+    </main>
+
+    <script src="/witness/app.js"></script>
+  </body>
+</html>

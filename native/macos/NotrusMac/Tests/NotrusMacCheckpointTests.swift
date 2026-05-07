@@ -1107,7 +1107,7 @@ final class NotrusMacCheckpointTests: XCTestCase {
     func testResetTransparencyTrustClearsPinnedStateForCurrentRelay() async {
         let pinnedHeadsKey = "NotrusMac.transparencyPins"
         let pinnedSignerKeysKey = "NotrusMac.transparencySignerPins"
-        let relayOrigin = "https://ramal-paola-yolky.ngrok-free.dev"
+        let relayOrigin = "https://relay.notrus.cloud"
         let encoder = JSONEncoder()
 
         defer {

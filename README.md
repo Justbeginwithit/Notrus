@@ -25,7 +25,7 @@ That means:
 - major trust-model controls are in place
 - remaining work is focused on stable-release maturity, operations, and external confidence signals
 
-Do not treat this as a finished, externally audited, warranty-backed messenger.
+Notrus is designed for private end-to-end encrypted messaging and includes modern cryptographic protections, including post-quantum hybrid direct-message session setup. The relay still sees some metadata, the project is not independently audited, and it is not recommended as the only emergency channel.
 
 Read before use:
 
@@ -33,6 +33,13 @@ Read before use:
 - [DISCLAIMER.md](DISCLAIMER.md)
 - [LEGAL.md](LEGAL.md)
 - [SECURITY.md](SECURITY.md)
+- [docs/security/emergency-readiness.md](docs/security/emergency-readiness.md)
+- [docs/security/metadata-exposure.md](docs/security/metadata-exposure.md)
+- [docs/security/group-behavior.md](docs/security/group-behavior.md)
+- [docs/security/local-message-search.md](docs/security/local-message-search.md)
+- [docs/security/message-edit-delete.md](docs/security/message-edit-delete.md)
+- [docs/security/known-limitations.md](docs/security/known-limitations.md)
+- [SECURITY_SCANNER_STATUS.md](SECURITY_SCANNER_STATUS.md)
 - [BETA_RELEASE_CHECKLIST.md](BETA_RELEASE_CHECKLIST.md)
 - [RELEASE_NOTES.md](RELEASE_NOTES.md)
 - [ROADMAP.md](ROADMAP.md)
@@ -62,6 +69,8 @@ Notrus is not affiliated with or endorsed by any of those projects or vendors. S
 - Android app: [`native/android/NotrusAndroid/README.md`](native/android/NotrusAndroid/README.md)
 - Standards core: [`native/protocol-core/README.md`](native/protocol-core/README.md)
 - Security release notes: [`SECURITY_RELEASE.md`](SECURITY_RELEASE.md)
+- Witness transparency: [`docs/security/witness-transparency.md`](docs/security/witness-transparency.md)
+- Endpoint provider guide: [`docs/security/endpoint-provider-guide.md`](docs/security/endpoint-provider-guide.md)
 - Release notes: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 - Roadmap: [`ROADMAP.md`](ROADMAP.md)
 
@@ -88,13 +97,14 @@ When enabled, the relay exposes token-protected operator routes:
 - `POST /api/admin/users/:userId/block`
 - `POST /api/admin/users/:userId/delete`
 
-Relay also serves a built-in admin GUI at:
+Relay also serves a built-in relay operator console at:
 
 - `/admin`
+- `https://relay.notrus.cloud/admin` for the current hosted relay
 
 Use header `X-Notrus-Admin-Token: <token>`.
 
-Admin GUI capabilities and limits are documented in [ADMIN_GUI.md](ADMIN_GUI.md).
+Relay operator console capabilities and limits are documented in [ADMIN_GUI.md](ADMIN_GUI.md).
 
 Local development relay origins:
 
@@ -108,6 +118,21 @@ Optional witness:
 ```bash
 RELAY_ORIGIN=http://127.0.0.1:3000 npm run start:witness
 ```
+
+Current hosted witness origin:
+
+```text
+https://witness.notrus.cloud
+```
+
+Witness graphical console:
+
+```text
+https://witness.notrus.cloud/witness
+```
+
+Public witness setup, read-only operator checks, health checks, and expected output are documented in [`docs/security/witness-transparency.md`](docs/security/witness-transparency.md).
+Provider choices, limits, tradeoffs, and recommendations are documented in [`docs/security/endpoint-provider-guide.md`](docs/security/endpoint-provider-guide.md).
 
 Optional attestation service (recommended for production-like trust posture):
 
@@ -151,6 +176,17 @@ The relay still sees:
 - thread membership
 - timestamps and traffic patterns
 
+Emergency/high-risk boundary:
+
+- Notrus is still under active development.
+- Notrus has not completed a full independent security audit.
+- Do not rely on Notrus as your only communication channel in emergencies.
+- Keep at least one backup communication method.
+- Relay availability depends on the selected or self-hosted relay.
+- A compromised device can expose plaintext while the app is being used.
+- Notification previews can expose message content if enabled.
+- Account recovery and chat backup have different security properties.
+
 Routine delivery traffic is intentionally narrower than the old model:
 
 - bootstrap and registration carry richer device/integrity material
@@ -177,7 +213,12 @@ Current native-client boundary:
 - encrypted mailbox attachments on the standards direct path work on both native clients
 - standards-group messaging works across macOS and Android through native MLS or compatible fanout transport, depending on client state
 - both clients can read and send compatible standards-group traffic on the current relay policy path
+- groups currently support up to 32 members by default; 3 to 12 members is the recommended beta test range
 - Android background notifications use local sync/decrypt before rendering previews. Hidden content remains the default, and the optional reliable background delivery mode keeps an authenticated foreground service listener active instead of putting plaintext in any relay wake-up payload.
+- macOS live sync subscribes to authenticated relay events, reconnects with a silent periodic fallback, and can post local hidden-by-default notifications after local sync/decrypt while Notrus is still running.
+- Android and macOS now distinguish delivered/read state through relay delivery receipts, optional read receipts, and message info views for group receipt detail.
+- Message info includes exact sent, delivered, and read timestamps where available. Read receipts are separately controlled for sending read confirmations to others and for showing read confirmations received from others.
+- Local message search and cross-device message edit/delete remain stable-track features. Search must stay local-only, and edit/delete must use authenticated tombstone/edited events rather than silently rewriting history.
 
 ## Recovery And Chat Backup
 
@@ -206,7 +247,10 @@ Boundary:
 ## Known Beta Limitations
 
 - Android notifications now have notification channels, WorkManager fallback sync, boot/package rescheduling, tap-to-thread routing, dedupe by message id, and an optional reliable foreground background listener. Real devices can still delay or stop delivery under OEM battery policy, denied notification permission, data saver, or force-stop conditions, so this area still needs broader device burn-in before stable.
+- macOS notifications are local app notifications only; APNs/third-party push is not used. Delivery can still depend on app sync, macOS notification permission, sleep, and relay availability. Notrus keeps running after the last Mac window is closed, but notifications are not expected after a full Quit/Command-Q.
 - Account recovery and chat backup are now separate features. Full cross-platform restored-history behavior should still be tested carefully before relying on it for irreplaceable archives.
+- Local message search is not advertised as complete in this beta. When implemented, it must search only local decrypted history and must not contact the relay.
+- Delete-for-everyone and message edit are not advertised as complete in this beta. Local single-message deletion is local-only; cross-device history mutation needs authenticated protocol events and tombstones.
 
 ## Verification Commands
 
@@ -258,7 +302,7 @@ cd native/android/NotrusAndroid && ./gradlew testDebugUnitTest connectedDebugAnd
 
 ## Non-Affiliation And Legal
 
-Notrus is an independent software project. It is not affiliated with Signal, OpenAI, Apple, Google, Android, ngrok, or the editors and maintainers of MLS or libsignal.
+Notrus is an independent software project. It is not affiliated with Signal, OpenAI, Apple, Google, Android, Cloudflare, or the editors and maintainers of MLS or libsignal.
 
 Read:
 

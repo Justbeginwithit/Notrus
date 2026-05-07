@@ -4,6 +4,7 @@ const storage = {
   limit: "notrus_admin_limit",
   includeDeactivated: "notrus_admin_include_deactivated",
 };
+const DEFAULT_RELAY_ORIGIN = "https://relay.notrus.cloud";
 
 const els = {
   originInput: document.getElementById("originInput"),
@@ -34,7 +35,7 @@ function log(line) {
 }
 
 function normalizeOrigin(value) {
-  const fallback = globalThis.location.origin;
+  const fallback = defaultOrigin();
   const trimmed = (value || "").trim();
   if (!trimmed) {
     return fallback;
@@ -53,6 +54,14 @@ function normalizeOrigin(value) {
   } catch {
     return fallback;
   }
+}
+
+function defaultOrigin() {
+  const current = globalThis.location?.origin || "";
+  if (current.startsWith("http://") || current.startsWith("https://")) {
+    return current;
+  }
+  return DEFAULT_RELAY_ORIGIN;
 }
 
 function getConfig() {
@@ -75,8 +84,7 @@ function saveConfig() {
 }
 
 function hydrateConfig() {
-  const fallbackOrigin = globalThis.location.origin;
-  els.originInput.value = localStorage.getItem(storage.origin) || fallbackOrigin;
+  els.originInput.value = localStorage.getItem(storage.origin) || defaultOrigin();
   els.tokenInput.value = localStorage.getItem(storage.token) || "";
   els.limitInput.value = localStorage.getItem(storage.limit) || "200";
   els.includeDeactivatedInput.checked = localStorage.getItem(storage.includeDeactivated) === "true";
@@ -86,10 +94,10 @@ function adminApiUrl(origin, path) {
   const normalizedOrigin = normalizeOrigin(origin);
   const url = new URL(path, normalizedOrigin);
   if (!["https:", "http:"].includes(url.protocol)) {
-    throw new Error("Admin API URL must use HTTP or HTTPS.");
+    throw new Error("Relay operator API URL must use HTTP or HTTPS.");
   }
   if (!url.pathname.startsWith("/api/")) {
-    throw new Error("Admin API requests must target relay API routes.");
+    throw new Error("Relay operator API requests must target relay API routes.");
   }
   return url;
 }
@@ -113,14 +121,14 @@ async function loadHealth() {
     const adminEnabled = Boolean(health.adminApi && health.adminApi.enabled);
     els.healthBadge.textContent = `Health: ${ok ? "ok" : "not ok"}`;
     els.healthBadge.className = `badge ${ok ? "ok" : "warn"}`;
-    els.adminBadge.textContent = `Admin API: ${adminEnabled ? "enabled" : "disabled"}`;
+    els.adminBadge.textContent = `Operator API: ${adminEnabled ? "enabled" : "disabled"}`;
     els.adminBadge.className = `badge ${adminEnabled ? "ok" : "warn"}`;
-    log(`Health loaded from ${origin}. Admin API ${adminEnabled ? "enabled" : "disabled"}.`);
+    log(`Health loaded from ${origin}. Operator API ${adminEnabled ? "enabled" : "disabled"}.`);
     return health;
   } catch (error) {
     els.healthBadge.textContent = "Health: error";
     els.healthBadge.className = "badge warn";
-    els.adminBadge.textContent = "Admin API: unknown";
+    els.adminBadge.textContent = "Operator API: unknown";
     els.adminBadge.className = "badge muted";
     log(`Health request failed: ${error.message}`);
     throw error;
@@ -214,8 +222,8 @@ async function loadUsers({ all = false } = {}) {
   }
 
   if (!cfg.token) {
-    log("Admin token is missing.");
-    throw new Error("Admin token is required.");
+    log("Relay operator token is missing.");
+    throw new Error("Relay operator token is required.");
   }
 
   const data = await requestJson(adminApiUrl(cfg.origin, `/api/admin/users?${params.toString()}`), {

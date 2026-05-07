@@ -544,6 +544,9 @@ struct RelayMessage: Codable, Identifiable, Hashable {
     let protocolField: String?
     let wireMessage: String?
     let counter: Int?
+    let deletedBy: String?
+    let deletedForEveryoneAt: String?
+    let editOf: String?
     let epoch: Int?
     let groupCommit: RelayGroupCommit?
     let paddingBucket: Int?
@@ -561,6 +564,9 @@ struct RelayMessage: Codable, Identifiable, Hashable {
         case protocolField = "protocol"
         case wireMessage
         case counter
+        case deletedBy
+        case deletedForEveryoneAt
+        case editOf
         case epoch
         case groupCommit
         case paddingBucket
@@ -573,6 +579,13 @@ struct RelayReadReceipt: Codable, Hashable {
     let threadId: String
     let lastReadMessageId: String
     let readAt: String
+}
+
+struct RelayDeliveryReceipt: Codable, Hashable {
+    let userId: String
+    let threadId: String
+    let lastDeliveredMessageId: String
+    let deliveredAt: String
 }
 
 struct RelayThread: Codable, Identifiable, Hashable {
@@ -590,6 +603,7 @@ struct RelayThread: Codable, Identifiable, Hashable {
     let createdBy: String
     let participantIds: [String]
     let envelopes: [RelayEnvelope]
+    let deliveryReceipts: [RelayDeliveryReceipt]?
     let readReceipts: [RelayReadReceipt]?
     let messages: [RelayMessage]
 
@@ -608,6 +622,7 @@ struct RelayThread: Codable, Identifiable, Hashable {
         case createdBy
         case participantIds
         case envelopes
+        case deliveryReceipts
         case readReceipts
         case messages
     }
@@ -1011,12 +1026,14 @@ struct AbuseReportResponse: Codable, Hashable {
 struct CachedMessageState: Codable, Hashable {
     let attachments: [SecureAttachmentReference]
     let body: String
+    let editedAt: String?
     let hidden: Bool
     let status: String
 
     enum CodingKeys: String, CodingKey {
         case attachments
         case body
+        case editedAt
         case hidden
         case status
     }
@@ -1024,11 +1041,13 @@ struct CachedMessageState: Codable, Hashable {
     init(
         attachments: [SecureAttachmentReference] = [],
         body: String,
+        editedAt: String? = nil,
         hidden: Bool,
         status: String
     ) {
         self.attachments = attachments
         self.body = body
+        self.editedAt = editedAt
         self.hidden = hidden
         self.status = status
     }
@@ -1037,6 +1056,7 @@ struct CachedMessageState: Codable, Hashable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         attachments = try container.decodeIfPresent([SecureAttachmentReference].self, forKey: .attachments) ?? []
         body = try container.decode(String.self, forKey: .body)
+        editedAt = try container.decodeIfPresent(String.self, forKey: .editedAt)
         hidden = try container.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
         status = try container.decodeIfPresent(String.self, forKey: .status) ?? "ok"
     }
@@ -1432,6 +1452,7 @@ struct DecryptedMessage: Identifiable, Hashable {
     let senderName: String
     let createdAt: String
     let body: String
+    let editedAt: String?
     let status: String
 
     init(
@@ -1441,6 +1462,7 @@ struct DecryptedMessage: Identifiable, Hashable {
         senderName: String,
         createdAt: String,
         body: String,
+        editedAt: String? = nil,
         status: String
     ) {
         self.attachments = attachments
@@ -1449,6 +1471,7 @@ struct DecryptedMessage: Identifiable, Hashable {
         self.senderName = senderName
         self.createdAt = createdAt
         self.body = body
+        self.editedAt = editedAt
         self.status = status
     }
 }

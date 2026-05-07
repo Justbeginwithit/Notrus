@@ -11,7 +11,7 @@ Notrus is not affiliated with, endorsed by, sponsored by, or approved by:
 - Apple
 - Google
 - Android
-- ngrok
+- Cloudflare
 - the IETF or the editors and maintainers of RFC 9420 MLS
 - the maintainers of libsignal or OpenMLS
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,10 @@ function reorderJwk(jwk) {
     kty: jwk.kty,
     crv: jwk.crv,
   };
+}
+
+function shortHash(value) {
+  return createHash("sha256").update(String(value ?? "")).digest("hex").slice(0, 12);
 }
 
 const relayOrigin = process.argv[2] ?? "http://127.0.0.1:3001";
@@ -60,9 +65,8 @@ console.log(JSON.stringify({
   ok: response.ok,
   status: response.status,
   bodyLength: text.length,
-  bodyPreview: text.slice(0, 160),
-  testedUserId: user.id,
-  testedUsername: user.username,
+  testedUserIdHash: shortHash(user.id),
+  testedUsernameHash: shortHash(user.username),
 }, null, 2));
 
 if (!response.ok) {

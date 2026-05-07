@@ -159,7 +159,7 @@ object RecoveryKeyManager {
 
         val lambda = if (left == right) {
             val numerator = x1.multiply(x1).multiply(java.math.BigInteger.valueOf(3)).add(a).mod(p)
-            val denominator = y1.multiply(java.math.BigInteger.TWO).modInverse(p)
+            val denominator = y1.multiply(java.math.BigInteger.valueOf(2L)).modInverse(p)
             numerator.multiply(denominator).mod(p)
         } else {
             val numerator = y2.subtract(y1).mod(p)

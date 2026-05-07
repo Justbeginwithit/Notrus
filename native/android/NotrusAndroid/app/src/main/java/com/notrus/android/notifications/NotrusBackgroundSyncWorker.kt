@@ -149,6 +149,9 @@ class NotrusBackgroundSyncWorker(
 
                     sync.threads.forEach { thread ->
                         val localThreadRecord = updatedRecord.threadRecords[thread.id]
+                        if (MessageCachePolicy.isLocallyDeleted(localThreadRecord)) {
+                            return@forEach
+                        }
                         if (localThreadRecord?.mutedAt != null) {
                             return@forEach
                         }
@@ -303,6 +306,9 @@ class NotrusBackgroundSyncWorker(
                 return@forEach
             }
             val existing = updatedThreadRecords[thread.id]
+            if (MessageCachePolicy.isLocallyDeleted(existing)) {
+                return@forEach
+            }
             var nextRecord = existing ?: ConversationThreadRecord(
                 protocol = thread.protocol,
                 signalPeerUserId = if (thread.protocol == DIRECT_PROTOCOL) {

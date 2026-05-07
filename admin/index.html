@@ -3,15 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Notrus Admin</title>
+    <title>Notrus Relay Operator Console</title>
     <link rel="stylesheet" href="/admin/styles.css" />
   </head>
   <body>
     <main class="app-shell">
       <header class="topbar">
         <div>
-          <h1>Notrus Relay Admin</h1>
-          <p class="subtitle">Inspect all relay users and run unblock, block, or delete actions on self-hosted relay instances.</p>
+          <h1>Notrus Relay Operator Console</h1>
+          <p class="subtitle">Inspect relay users and run operator-controlled unblock, block, or delete actions on self-hosted relay instances.</p>
         </div>
         <button id="refreshHealth" class="button subtle" type="button">Refresh Health</button>
       </header>
@@ -24,7 +24,7 @@
             <input id="originInput" type="url" />
           </label>
           <label class="field">
-            <span>Admin token</span>
+            <span>Relay operator token</span>
             <input id="tokenInput" type="password" placeholder="X-Notrus-Admin-Token" />
           </label>
         </div>
@@ -33,8 +33,12 @@
           <button id="loadUsers" class="button" type="button">Load Users</button>
           <button id="listAllUsers" class="button subtle" type="button">List All Users</button>
           <span id="healthBadge" class="badge muted">Health: unknown</span>
-          <span id="adminBadge" class="badge muted">Admin API: unknown</span>
+          <span id="adminBadge" class="badge muted">Operator API: unknown</span>
         </div>
+        <p class="muted">
+          Current hosted relay console: <span class="mono">https://relay.notrus.cloud/admin</span>.
+          Public witness status: <span class="mono">https://witness.notrus.cloud/api/witness/health</span>.
+        </p>
       </section>
 
       <section class="card">

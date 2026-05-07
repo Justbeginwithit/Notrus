@@ -2,7 +2,7 @@
 
 This roadmap tracks next work after the `v0.3.4-beta5` security/reliability beta release.
 
-## Current state (Beta 4 security update)
+## Current state (v0.3.4-beta5 beta)
 
 - Native clients: macOS + Android
 - Relay + witness + attestation service in one repository
@@ -14,6 +14,33 @@ This roadmap tracks next work after the `v0.3.4-beta5` security/reliability beta
 - Release labels aligned for current artifacts:
   - macOS: `Notrus-0.3.4-beta5.zip`
   - Android: `Notrus-0.3.4-beta5-release.apk`
+
+## Immediate polish track
+
+1. Notifications:
+   - keep hidden content as the default
+   - keep sender-only and full-preview as explicit settings
+   - keep group previews separately controlled
+   - keep muted chats quiet
+   - define archived chats as notifying unless muted
+   - keep notification taps opening the correct conversation
+   - keep duplicate suppression by stable message/thread identity
+2. Delivery/read receipts:
+   - show sent, delivered, read, and failed/local-unreadable state
+   - show exact sent/delivered/read timestamps in message info
+   - keep read receipt sending optional
+   - keep read receipt display optional
+   - keep group receipt detail in message info instead of message bubbles
+3. Local encrypted message search:
+   - search local decrypted history only
+   - never send plaintext search queries to the relay
+   - respect deleted/hidden chats
+   - include archived chats only through an explicit filter
+4. Message delete/edit:
+   - keep local delete-for-me separate from cross-device delete-for-everyone
+   - require authenticated edit/delete protocol events before shipping cross-device mutation
+   - show edited markers and deleted-message tombstones
+   - do not silently rewrite history
 
 ## Near-term release-candidate track
 

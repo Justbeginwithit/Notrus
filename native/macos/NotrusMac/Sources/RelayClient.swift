@@ -15,6 +15,11 @@ enum RelayClientError: LocalizedError {
     }
 }
 
+struct RelayLiveEvent: Decodable {
+    let event: String?
+    let timestamp: String?
+}
+
 struct RelayClient {
     var origin: String
     var integrityReport: ClientIntegrityReport? = nil
@@ -75,19 +80,20 @@ struct RelayClient {
     private func perform(
         _ request: URLRequest,
         retriedForPow: Bool = false,
-        retriedForTransport: Bool = false
+        transportAttempt: Int = 0
     ) async throws -> (Data, URLResponse) {
         let data: Data
         let response: URLResponse
         do {
             (data, response) = try await TransportSecurityPolicy.session().data(for: request)
         } catch let error as URLError {
-            if !retriedForTransport, isTransientTransportError(error) {
-                try? await Task.sleep(nanoseconds: 350_000_000)
+            if transportAttempt < 3, isTransientTransportError(error) {
+                let delays: [UInt64] = [350_000_000, 900_000_000, 1_800_000_000]
+                try? await Task.sleep(nanoseconds: delays[min(transportAttempt, delays.count - 1)])
                 return try await perform(
                     request,
                     retriedForPow: retriedForPow,
-                    retriedForTransport: true
+                    transportAttempt: transportAttempt + 1
                 )
             }
             throw RelayClientError.requestFailed(describeTransportError(error))
@@ -110,7 +116,7 @@ struct RelayClient {
             return try await perform(
                 retried,
                 retriedForPow: true,
-                retriedForTransport: retriedForTransport
+                transportAttempt: transportAttempt
             )
         }
 
@@ -133,7 +139,7 @@ struct RelayClient {
         case .appTransportSecurityRequiresSecureConnection:
             return "macOS rejected the relay connection because it is not using HTTPS."
         case .secureConnectionFailed:
-            return "Could not connect to the relay at \(origin). The TLS handshake failed after retrying; verify the HTTPS tunnel is the current ngrok endpoint and try again."
+            return "Could not connect to the relay at \(origin). The TLS handshake failed after retrying; verify the HTTPS tunnel is online and that the relay origin is current."
         default:
             return "Could not connect to the relay at \(origin). \(error.localizedDescription)"
         }
@@ -348,6 +354,39 @@ struct RelayClient {
         )
     }
 
+    func postMessageEdit(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        targetMessageId: String,
+        message: OutboundMessage
+    ) async throws -> MessagePostResponse {
+        try await send(
+            "/api/mailboxes/\(mailboxHandle)/messages/\(targetMessageId)/edit",
+            method: "POST",
+            body: message,
+            authorizationToken: deliveryCapability,
+            decode: MessagePostResponse.self
+        )
+    }
+
+    func deleteMessageForEveryone(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        messageId: String,
+        deletedAt: String
+    ) async throws -> ReadReceiptResponse {
+        struct DeleteRequest: Codable {
+            let deletedAt: String
+        }
+        return try await send(
+            "/api/mailboxes/\(mailboxHandle)/messages/\(messageId)/delete",
+            method: "POST",
+            body: DeleteRequest(deletedAt: deletedAt),
+            authorizationToken: deliveryCapability,
+            decode: ReadReceiptResponse.self
+        )
+    }
+
     func postReadReceipt(
         mailboxHandle: String,
         deliveryCapability: String,
@@ -428,6 +467,79 @@ struct RelayClient {
             authorizationToken: try currentSessionToken(),
             decode: AccountDeleteResponse.self
         )
+    }
+
+    func liveEvents() throws -> AsyncThrowingStream<RelayLiveEvent, Error> {
+        var request = URLRequest(url: try url(for: "/api/events"))
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 0
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        applyHeaders(
+            to: &request,
+            authorizationToken: try currentSessionToken(),
+            includeBootstrapHeaders: false
+        )
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = true
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 0
+        let session = URLSession(configuration: configuration)
+
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let (bytes, response) = try await session.bytes(for: request)
+                    guard let http = response as? HTTPURLResponse else {
+                        throw RelayClientError.requestFailed("The relay event stream returned an invalid response.")
+                    }
+                    guard (200...299).contains(http.statusCode) else {
+                        throw RelayClientError.requestFailed("The relay event stream returned HTTP \(http.statusCode).")
+                    }
+
+                    var currentEvent: String?
+                    var dataLines: [String] = []
+                    for try await line in bytes.lines {
+                        if Task.isCancelled {
+                            break
+                        }
+                        if line.isEmpty {
+                            if currentEvent == "sync", !dataLines.isEmpty {
+                                let payload = dataLines.joined(separator: "\n")
+                                if let data = payload.data(using: .utf8),
+                                   let event = try? JSONDecoder().decode(RelayLiveEvent.self, from: data) {
+                                    continuation.yield(event)
+                                } else {
+                                    continuation.yield(RelayLiveEvent(event: "sync-required", timestamp: nil))
+                                }
+                            }
+                            currentEvent = nil
+                            dataLines.removeAll(keepingCapacity: true)
+                        } else if line.hasPrefix("event:") {
+                            currentEvent = String(line.dropFirst("event:".count)).trimmingCharacters(in: .whitespaces)
+                        } else if line.hasPrefix("data:") {
+                            dataLines.append(String(line.dropFirst("data:".count)).trimmingCharacters(in: .whitespaces))
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    if Task.isCancelled {
+                        continuation.finish()
+                    } else {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+
+            continuation.onTermination = { _ in
+                task.cancel()
+                session.invalidateAndCancel()
+            }
+        }
     }
 }
 

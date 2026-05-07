@@ -30,7 +30,7 @@ The relay is not trusted for:
 
 Production-target protocol choices:
 
-- direct chats: Signal PQXDH plus Double Ratchet
+- direct chats: Signal PQXDH plus Double Ratchet, described publicly as post-quantum hybrid direct-message session setup
 - groups: RFC 9420 MLS
 
 Transport security remains separate from message security. TLS protects the client-to-relay hop. Message secrecy and authenticity come from the message layer.
@@ -66,10 +66,13 @@ Android:
 - clients pin transparency state locally and surface trust reset/recovery actions
 - contact verification remains an explicit user action
 - first contact is unverified by default
+- witness endpoints, healthy output, and warning signs are documented in [docs/security/witness-transparency.md](docs/security/witness-transparency.md)
 
 ## Metadata Boundary
 
 Notrus minimizes, but does not eliminate, metadata exposure.
+
+The short public version is: Notrus is designed for private end-to-end encrypted messaging, but the relay still sees some metadata.
 
 Current relay routing shape is intentionally close to:
 
@@ -112,6 +115,8 @@ The remaining high-value work before stable is:
 - stronger external confidence signals (independent review, reproducibility maturity)
 - continued operator-side hardening for release and infrastructure management
 
+Notrus is not independently audited and is not recommended as the only emergency channel. Users in emergency or high-risk situations should keep a separate backup communication method and review the documented limitations first.
+
 Related docs:
 
 - [THREAT_MODEL.md](THREAT_MODEL.md)
@@ -121,6 +126,19 @@ Related docs:
 - [CRYPTO_SPEC.md](CRYPTO_SPEC.md)
 - [PROTOCOL_MIGRATION.md](PROTOCOL_MIGRATION.md)
 - [SECURITY_RELEASE.md](SECURITY_RELEASE.md)
+- [SECURITY_SCANNER_STATUS.md](SECURITY_SCANNER_STATUS.md)
+- [docs/security/emergency-readiness.md](docs/security/emergency-readiness.md)
+- [docs/security/metadata-exposure.md](docs/security/metadata-exposure.md)
+- [docs/security/relay-operator-powers.md](docs/security/relay-operator-powers.md)
+- [docs/security/admin-api.md](docs/security/admin-api.md)
+- [docs/security/recovery-backup.md](docs/security/recovery-backup.md)
+- [docs/security/notification-privacy.md](docs/security/notification-privacy.md)
+- [docs/security/android-local-security.md](docs/security/android-local-security.md)
+- [docs/security/macos-local-security.md](docs/security/macos-local-security.md)
+- [docs/security/self-hosting-security.md](docs/security/self-hosting-security.md)
+- [docs/security/known-limitations.md](docs/security/known-limitations.md)
+- [docs/security/audit-status.md](docs/security/audit-status.md)
+- [docs/security/release-verification.md](docs/security/release-verification.md)
 - [ATTESTATION_SETUP.md](ATTESTATION_SETUP.md)
 - [DISCLAIMER.md](DISCLAIMER.md)
 - [LEGAL.md](LEGAL.md)

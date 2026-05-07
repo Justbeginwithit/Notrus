@@ -20,6 +20,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,6 +30,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -43,6 +45,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -58,6 +61,8 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PersonAdd
@@ -67,6 +72,7 @@ import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Upload
 import androidx.compose.material.icons.rounded.WarningAmber
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -103,12 +109,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import com.notrus.android.BuildConfig
@@ -495,6 +506,41 @@ private fun WorkspaceScaffold(
 ) {
     val selectedThread = state.selectedThread
     val showConversationDetail = destination == WorkspaceDestination.Chats && !wideLayout && selectedThread != null
+    var messageSearchActive by rememberSaveable { mutableStateOf(false) }
+    var messageSearchQuery by rememberSaveable(selectedThread?.id) { mutableStateOf("") }
+    var activeMessageSearchMatchIndex by rememberSaveable(selectedThread?.id) { mutableStateOf(0) }
+    val messageSearchMatches = remember(selectedThread?.messages, messageSearchQuery) {
+        val query = messageSearchQuery.trim()
+        val messages = selectedThread?.messages.orEmpty()
+        if (query.isBlank()) {
+            emptyList()
+        } else {
+            messages.mapIndexedNotNull { index, message ->
+                index.takeIf { messageMatchesSearch(message, query) }
+            }
+        }
+    }
+    val activeSearchMessageId = messageSearchMatches
+        .getOrNull(activeMessageSearchMatchIndex.coerceIn(0, (messageSearchMatches.size - 1).coerceAtLeast(0)))
+        ?.let { selectedThread?.messages?.getOrNull(it)?.id }
+    val messageSearchEnabled = destination == WorkspaceDestination.Chats &&
+        selectedThread != null &&
+        selectedThread.messages.isNotEmpty()
+
+    LaunchedEffect(destination, selectedThread?.id) {
+        if (destination != WorkspaceDestination.Chats || selectedThread == null) {
+            messageSearchActive = false
+            messageSearchQuery = ""
+            activeMessageSearchMatchIndex = 0
+        }
+    }
+
+    LaunchedEffect(messageSearchQuery, messageSearchMatches.size) {
+        activeMessageSearchMatchIndex = activeMessageSearchMatchIndex.coerceIn(
+            0,
+            (messageSearchMatches.size - 1).coerceAtLeast(0),
+        )
+    }
 
     Scaffold(
         containerColor = Color.Transparent,
@@ -510,6 +556,33 @@ private fun WorkspaceScaffold(
                 onDeleteConversationHistory = viewModel::deleteConversationHistory,
                 onResetConversationSession = viewModel::resetConversationSession,
                 onToggleConversationMuted = viewModel::toggleConversationMuted,
+                messageSearchEnabled = messageSearchEnabled,
+                messageSearchActive = messageSearchActive,
+                messageSearchQuery = messageSearchQuery,
+                currentMessageSearchMatch = if (messageSearchMatches.isEmpty()) 0 else activeMessageSearchMatchIndex + 1,
+                messageSearchMatchCount = messageSearchMatches.size,
+                onOpenMessageSearch = { messageSearchActive = true },
+                onMessageSearchQueryChange = {
+                    messageSearchQuery = it
+                    activeMessageSearchMatchIndex = 0
+                },
+                onPreviousMessageSearchMatch = {
+                    if (messageSearchMatches.isNotEmpty()) {
+                        activeMessageSearchMatchIndex =
+                            if (activeMessageSearchMatchIndex <= 0) messageSearchMatches.lastIndex else activeMessageSearchMatchIndex - 1
+                    }
+                },
+                onNextMessageSearchMatch = {
+                    if (messageSearchMatches.isNotEmpty()) {
+                        activeMessageSearchMatchIndex =
+                            if (activeMessageSearchMatchIndex >= messageSearchMatches.lastIndex) 0 else activeMessageSearchMatchIndex + 1
+                    }
+                },
+                onCloseMessageSearch = {
+                    messageSearchActive = false
+                    messageSearchQuery = ""
+                    activeMessageSearchMatchIndex = 0
+                },
                 enhancedVisuals = enhancedVisuals,
             )
         },
@@ -628,6 +701,8 @@ private fun WorkspaceScaffold(
                                 onAttachFiles = onAttachFiles,
                                 onSaveAttachment = onSaveAttachment,
                                 wideLayout = wideLayout,
+                                messageSearchQuery = messageSearchQuery,
+                                activeSearchMessageId = activeSearchMessageId,
                             )
 
                             WorkspaceDestination.Contacts -> ContactsScreen(
@@ -685,6 +760,16 @@ private fun WorkspaceTopBar(
     onDeleteConversationHistory: (String) -> Unit,
     onResetConversationSession: (String) -> Unit,
     onToggleConversationMuted: (String) -> Unit,
+    messageSearchEnabled: Boolean,
+    messageSearchActive: Boolean,
+    messageSearchQuery: String,
+    currentMessageSearchMatch: Int,
+    messageSearchMatchCount: Int,
+    onOpenMessageSearch: () -> Unit,
+    onMessageSearchQueryChange: (String) -> Unit,
+    onPreviousMessageSearchMatch: () -> Unit,
+    onNextMessageSearchMatch: () -> Unit,
+    onCloseMessageSearch: () -> Unit,
     enhancedVisuals: Boolean,
 ) {
     val title = if (showConversationDetail && selectedThread != null) {
@@ -717,6 +802,19 @@ private fun WorkspaceTopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        if (messageSearchActive && messageSearchEnabled) {
+            MessageSearchTopBarContent(
+                query = messageSearchQuery,
+                currentMatch = currentMessageSearchMatch,
+                matchCount = messageSearchMatchCount,
+                onQueryChange = onMessageSearchQueryChange,
+                onPrevious = onPreviousMessageSearchMatch,
+                onNext = onNextMessageSearchMatch,
+                onClose = onCloseMessageSearch,
+            )
+            return@Row
+        }
+
         if (showConversationDetail && selectedThread != null) {
             IconButton(onClick = onBack) {
                 Icon(
@@ -745,9 +843,28 @@ private fun WorkspaceTopBar(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        if (messageSearchEnabled && !(showConversationDetail && selectedThread != null)) {
+            IconButton(onClick = onOpenMessageSearch) {
+                Icon(
+                    Icons.Rounded.Search,
+                    contentDescription = "Search messages",
+                    tint = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
         if (state.currentIdentity != null) {
             if (showConversationDetail && selectedThread != null) {
                 var actionsExpanded by remember { mutableStateOf(false) }
+                IconButton(
+                    onClick = onOpenMessageSearch,
+                    enabled = messageSearchEnabled,
+                ) {
+                    Icon(
+                        Icons.Rounded.Search,
+                        contentDescription = "Search messages",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
                 Box {
                     IconButton(onClick = { actionsExpanded = true }) {
                         Icon(
@@ -772,6 +889,15 @@ private fun WorkspaceTopBar(
                             onClick = {
                                 actionsExpanded = false
                                 onToggleConversationMuted(selectedThread.id)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Search messages") },
+                            leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                            enabled = messageSearchEnabled,
+                            onClick = {
+                                actionsExpanded = false
+                                onOpenMessageSearch()
                             },
                         )
                         DropdownMenuItem(
@@ -800,6 +926,110 @@ private fun WorkspaceTopBar(
                     tint = MaterialTheme.colorScheme.onSurface,
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun RowScope.MessageSearchTopBarContent(
+    query: String,
+    currentMatch: Int,
+    matchCount: Int,
+    onQueryChange: (String) -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onClose: () -> Unit,
+) {
+    IconButton(
+        onClick = onClose,
+        modifier = Modifier.size(40.dp),
+    ) {
+        Icon(
+            Icons.Rounded.Close,
+            contentDescription = "Close message search",
+            tint = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+    Surface(
+        modifier = Modifier.weight(1f),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+        tonalElevation = 0.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                Icons.Rounded.Search,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            BasicTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                modifier = Modifier.weight(1f),
+                singleLine = true,
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                textStyle = MaterialTheme.typography.bodyMedium.copy(
+                    color = MaterialTheme.colorScheme.onSurface,
+                ),
+                decorationBox = { innerTextField ->
+                    Box(contentAlignment = Alignment.CenterStart) {
+                        if (query.isBlank()) {
+                            Text(
+                                text = "Search messages",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        innerTextField()
+                    }
+                },
+            )
+        }
+    }
+    if (query.isNotBlank()) {
+        Text(
+            text = "$currentMatch/$matchCount",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.widthIn(min = 38.dp),
+            textAlign = TextAlign.Center,
+        )
+        IconButton(
+            onClick = onPrevious,
+            enabled = matchCount > 0,
+            modifier = Modifier.size(38.dp),
+        ) {
+            Icon(
+                Icons.Rounded.KeyboardArrowUp,
+                contentDescription = "Previous match",
+                tint = if (matchCount > 0) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                },
+            )
+        }
+        IconButton(
+            onClick = onNext,
+            enabled = matchCount > 0,
+            modifier = Modifier.size(38.dp),
+        ) {
+            Icon(
+                Icons.Rounded.KeyboardArrowDown,
+                contentDescription = "Next match",
+                tint = if (matchCount > 0) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                },
+            )
         }
     }
 }
@@ -873,6 +1103,8 @@ private fun ChatsScreen(
     onAttachFiles: () -> Unit,
     onSaveAttachment: (String, SecureAttachmentReference) -> Unit,
     wideLayout: Boolean,
+    messageSearchQuery: String,
+    activeSearchMessageId: String?,
 ) {
     val filteredThreads = remember(state.threads, chatQuery, state.currentIdentity?.id) {
         val query = chatQuery.trim().lowercase()
@@ -882,7 +1114,11 @@ private fun ChatsScreen(
             state.threads.filter { thread ->
                 thread.title.lowercase().contains(query) ||
                     participantsSummary(thread, state.currentIdentity?.id).lowercase().contains(query) ||
-                    thread.messages.lastOrNull()?.body?.lowercase()?.contains(query) == true
+                    thread.messages.any { message ->
+                        message.body.lowercase().contains(query) ||
+                            message.senderName.lowercase().contains(query) ||
+                            message.createdAt.lowercase().contains(query)
+                    }
             }
         }
     }
@@ -943,6 +1179,8 @@ private fun ChatsScreen(
                             onAttachFiles = onAttachFiles,
                             onSaveAttachment = onSaveAttachment,
                             wideLayout = true,
+                            messageSearchQuery = messageSearchQuery,
+                            activeSearchMessageId = activeSearchMessageId,
                         )
                     }
                 }
@@ -970,6 +1208,8 @@ private fun ChatsScreen(
                     onAttachFiles = onAttachFiles,
                     onSaveAttachment = onSaveAttachment,
                     wideLayout = false,
+                    messageSearchQuery = messageSearchQuery,
+                    activeSearchMessageId = activeSearchMessageId,
                 )
             } else {
                 ChatListPane(
@@ -1135,13 +1375,22 @@ private fun ConversationPane(
     onAttachFiles: () -> Unit,
     onSaveAttachment: (String, SecureAttachmentReference) -> Unit,
     wideLayout: Boolean,
+    messageSearchQuery: String,
+    activeSearchMessageId: String?,
 ) {
     val messageListState = rememberLazyListState()
     val canSend = thread.supported && (state.draftText.isNotBlank() || state.pendingAttachments.isNotEmpty()) && !state.isBusy
 
     LaunchedEffect(thread.id, thread.messages.size) {
-        if (thread.messages.isNotEmpty()) {
+        if (thread.messages.isNotEmpty() && messageSearchQuery.isBlank()) {
             messageListState.scrollToItem(thread.messages.lastIndex)
+        }
+    }
+
+    LaunchedEffect(activeSearchMessageId) {
+        val index = thread.messages.indexOfFirst { it.id == activeSearchMessageId }
+        if (index >= 0) {
+            messageListState.animateScrollToItem(index)
         }
     }
 
@@ -1189,16 +1438,25 @@ private fun ConversationPane(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                items(thread.messages, key = { it.id }) { message ->
+                itemsIndexed(thread.messages, key = { _, message -> message.id }) { _, message ->
                     MessageBubble(
                         message = message,
                         enhancedVisuals = enhancedVisuals,
                         isLocal = message.senderId == state.currentIdentity?.id,
+                        searchQuery = messageSearchQuery,
+                        searchMatchActive = message.id == activeSearchMessageId,
+                        showReadReceipts = state.showReadReceiptsFromOthers,
                         onSaveAttachment = { reference ->
                             onSaveAttachment(thread.id, reference)
                         },
                         onDeleteMessage = {
                             viewModel.deleteMessageLocally(thread.id, message.id)
+                        },
+                        onDeleteForEveryone = {
+                            viewModel.deleteMessageForEveryone(activity, thread.id, message.id)
+                        },
+                        onEditMessage = { updatedBody ->
+                            viewModel.editMessage(activity, thread.id, message.id, updatedBody)
                         },
                     )
                 }
@@ -1938,6 +2196,34 @@ private fun SettingsScreen(
                     onCheckedChange = viewModel::updateSendReadReceiptsToOthers,
                 )
             }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = "Show read confirmations",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "When off, Notrus hides read status and exact read times that other devices send to this Android device.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = state.showReadReceiptsFromOthers,
+                    onCheckedChange = viewModel::updateShowReadReceiptsFromOthers,
+                )
+            }
         }
 
         SectionCard(
@@ -2452,7 +2738,7 @@ private fun SettingsScreen(
             accent = MaterialTheme.colorScheme.tertiary,
         ) {
             Text(
-                text = "Notrus is an independent, self-hostable encrypted messenger project. It is not affiliated with Android, Google, Signal, MLS, ngrok, or any third-party protocol or platform provider.",
+                text = "Notrus is an independent, self-hostable encrypted messenger project. It is not affiliated with Android, Google, Signal, MLS, Cloudflare, or any third-party protocol or platform provider.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -3204,13 +3490,77 @@ private fun DeviceInventoryAliasRow(alias: DeviceInventoryAlias) {
     }
 }
 
+private fun messageMatchesSearch(message: DecryptedMessage, query: String): Boolean {
+    val normalized = query.trim()
+    if (normalized.isBlank()) {
+        return false
+    }
+    return message.body.contains(normalized, ignoreCase = true) ||
+        message.senderName.contains(normalized, ignoreCase = true) ||
+        message.createdAt.contains(normalized, ignoreCase = true)
+}
+
+@Composable
+private fun HighlightedMessageText(
+    text: String,
+    query: String,
+    color: Color,
+) {
+    val trimmedQuery = query.trim()
+    if (trimmedQuery.isBlank()) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyLarge,
+            color = color,
+        )
+        return
+    }
+
+    val highlightBackground = MaterialTheme.colorScheme.tertiaryContainer
+    val highlightForeground = MaterialTheme.colorScheme.onTertiaryContainer
+    val highlighted = buildAnnotatedString {
+        val sourceLower = text.lowercase(Locale.getDefault())
+        val queryLower = trimmedQuery.lowercase(Locale.getDefault())
+        var cursor = 0
+        while (cursor < text.length) {
+            val next = sourceLower.indexOf(queryLower, startIndex = cursor)
+            if (next < 0) {
+                append(text.substring(cursor))
+                break
+            }
+            append(text.substring(cursor, next))
+            withStyle(
+                SpanStyle(
+                    background = highlightBackground,
+                    color = highlightForeground,
+                    fontWeight = FontWeight.Bold,
+                ),
+            ) {
+                append(text.substring(next, next + trimmedQuery.length))
+            }
+            cursor = next + trimmedQuery.length
+        }
+    }
+
+    Text(
+        text = highlighted,
+        style = MaterialTheme.typography.bodyLarge,
+        color = color,
+    )
+}
+
 @Composable
 private fun MessageBubble(
     message: DecryptedMessage,
     enhancedVisuals: Boolean,
     isLocal: Boolean,
+    searchQuery: String,
+    searchMatchActive: Boolean,
+    showReadReceipts: Boolean,
     onSaveAttachment: (SecureAttachmentReference) -> Unit,
     onDeleteMessage: () -> Unit,
+    onDeleteForEveryone: () -> Unit,
+    onEditMessage: (String) -> Unit,
 ) {
     val bubbleColor by animateColorAsState(
         targetValue = when {
@@ -3221,6 +3571,74 @@ private fun MessageBubble(
         animationSpec = tween(durationMillis = 180),
         label = "message-bubble-color",
     )
+    var infoDialogVisible by rememberSaveable(message.id) { mutableStateOf(false) }
+    var editDialogVisible by rememberSaveable(message.id) { mutableStateOf(false) }
+    var editText by rememberSaveable(message.id) { mutableStateOf(message.body) }
+    val deletedForEveryone = message.status == "deleted-everyone"
+    if (infoDialogVisible) {
+        AlertDialog(
+            onDismissRequest = { infoDialogVisible = false },
+            confirmButton = {
+                TextButton(onClick = { infoDialogVisible = false }) {
+                    Text("Close")
+                }
+            },
+            title = { Text("Message info") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val infoLines = (message.messageInfoText ?: "Sent: ${message.createdAt}")
+                        .lines()
+                        .filter { it.isNotBlank() }
+                        .map { line ->
+                            if (!showReadReceipts && line.startsWith("Read by:")) {
+                                "Read by: hidden on this device"
+                            } else {
+                                line
+                            }
+                        }
+                    infoLines.forEach { line ->
+                        val parts = line.split(": ", limit = 2)
+                        MessageInfoRow(
+                            label = parts.firstOrNull().orEmpty(),
+                            value = parts.getOrNull(1) ?: line,
+                        )
+                    }
+                }
+            },
+        )
+    }
+    if (editDialogVisible) {
+        AlertDialog(
+            onDismissRequest = { editDialogVisible = false },
+            confirmButton = {
+                TextButton(
+                    enabled = editText.trim().isNotBlank(),
+                    onClick = {
+                        val trimmed = editText.trim()
+                        editDialogVisible = false
+                        onEditMessage(trimmed)
+                    },
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { editDialogVisible = false }) {
+                    Text("Cancel")
+                }
+            },
+            title = { Text("Edit message") },
+            text = {
+                OutlinedTextField(
+                    value = editText,
+                    onValueChange = { editText = it },
+                    minLines = 3,
+                    label = { Text("Message text") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+        )
+    }
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = if (isLocal) Alignment.End else Alignment.Start,
@@ -3235,6 +3653,12 @@ private fun MessageBubble(
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+                if (searchMatchActive) {
+                    InlineStatusBadge(
+                        label = "Selected search match",
+                        tone = MaterialTheme.colorScheme.primary,
+                    )
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -3259,16 +3683,24 @@ private fun MessageBubble(
                 }
 
                 if (message.body.isNotBlank()) {
-                    Text(
+                    val bodyColor = if (message.status != "ok") {
+                        MaterialTheme.colorScheme.onErrorContainer
+                    } else if (isLocal) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    }
+                    HighlightedMessageText(
                         text = message.body,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = if (message.status != "ok") {
-                            MaterialTheme.colorScheme.onErrorContainer
-                        } else if (isLocal) {
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
+                        query = searchQuery,
+                        color = bodyColor,
+                    )
+                }
+                message.editedAt?.takeIf { !deletedForEveryone }?.let {
+                    Text(
+                        text = "Edited ${formatConversationTimestamp(it)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
 
@@ -3316,13 +3748,24 @@ private fun MessageBubble(
                         tone = MaterialTheme.colorScheme.tertiary,
                     )
                 }
-                message.readReceiptSummary?.let { summary ->
+                val visibleReadReceiptSummary = message.readReceiptSummary.takeIf { showReadReceipts }
+                visibleReadReceiptSummary?.let { summary ->
                     Text(
                         text = summary,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.align(Alignment.End),
                     )
+                }
+                if (visibleReadReceiptSummary == null) {
+                    message.deliveryReceiptSummary?.let { summary ->
+                        Text(
+                            text = summary,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.align(Alignment.End),
+                        )
+                    }
                 }
                 var actionsExpanded by remember { mutableStateOf(false) }
                 Box(modifier = Modifier.align(if (isLocal) Alignment.End else Alignment.Start)) {
@@ -3334,6 +3777,32 @@ private fun MessageBubble(
                         onDismissRequest = { actionsExpanded = false },
                     ) {
                         DropdownMenuItem(
+                            text = { Text("Message info") },
+                            leadingIcon = { Icon(Icons.Rounded.Info, contentDescription = null) },
+                            onClick = {
+                                actionsExpanded = false
+                                infoDialogVisible = true
+                            },
+                        )
+                        if (isLocal && !deletedForEveryone) {
+                            DropdownMenuItem(
+                                text = { Text("Edit") },
+                                onClick = {
+                                    actionsExpanded = false
+                                    editText = message.body
+                                    editDialogVisible = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Delete for everyone") },
+                                leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
+                                onClick = {
+                                    actionsExpanded = false
+                                    onDeleteForEveryone()
+                                },
+                            )
+                        }
+                        DropdownMenuItem(
                             text = { Text("Delete locally") },
                             leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
                             onClick = {
@@ -3344,6 +3813,25 @@ private fun MessageBubble(
                     }
                 }
         }
+    }
+}
+
+@Composable
+private fun MessageInfoRow(
+    label: String,
+    value: String,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
     }
 }
 

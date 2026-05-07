@@ -6,6 +6,7 @@ import path from "node:path";
 export async function withManagedRelay({
   compatibilityRoutes = false,
   envOriginName,
+  extraEnv = {},
   port,
   protocolPolicy = "require-standards",
 }, callback) {
@@ -32,6 +33,7 @@ export async function withManagedRelay({
       NOTRUS_PROTOCOL_POLICY: protocolPolicy,
       NOTRUS_SECRET_DIR: path.join(tempDir, "secrets"),
       PORT: String(port),
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

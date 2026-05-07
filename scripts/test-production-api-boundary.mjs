@@ -241,9 +241,31 @@ async function main() {
       throw new Error(`Legacy /api/threads must be disabled in production, got HTTP ${legacyThread.statusCode}.`);
     }
 
+    const legacyEvents = await request(origin, "/events");
+    if (legacyEvents.statusCode !== 410) {
+      throw new Error(`Legacy /events must be disabled in production, got HTTP ${legacyEvents.statusCode}.`);
+    }
+
     const sessionToken = aliceRegistration.body?.session?.token;
     if (!sessionToken) {
       throw new Error("Relay did not return a bootstrap session token for routing API verification.");
+    }
+
+    const legacyMessagePost = await request(origin, "/api/threads/legacy/messages", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      body: {
+        createdAt: isoNow(),
+        id: `legacy-message-${suffix}`,
+        messageKind: "signal-prekey",
+        protocol: "signal-pqxdh-double-ratchet-v1",
+        wireMessage: randomB64(48),
+      },
+    });
+    if (legacyMessagePost.statusCode !== 410) {
+      throw new Error(`Legacy message post must be disabled in production, got HTTP ${legacyMessagePost.statusCode}.`);
     }
 
     const search = await request(origin, `/api/directory/search?q=${encodeURIComponent(bob.username)}`, {
@@ -276,6 +298,156 @@ async function main() {
     });
     if (thread.statusCode !== 201) {
       throw new Error(`Opaque routing thread creation failed with HTTP ${thread.statusCode}.`);
+    }
+
+    const aliceInitialSync = await request(origin, "/api/sync/state", {
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      method: "GET",
+    });
+    if (aliceInitialSync.statusCode !== 200) {
+      throw new Error(`Initial opaque sync failed with HTTP ${aliceInitialSync.statusCode}.`);
+    }
+    const createdThread = aliceInitialSync.body?.threads?.find?.((entry) => entry?.id === thread.body?.threadId);
+    if (!createdThread?.mailboxHandle || !createdThread?.deliveryCapability) {
+      throw new Error("Opaque sync did not return mailbox routing material for the created thread.");
+    }
+
+    const deliveredMessageId = `delivery-message-${suffix}`;
+    const messagePost = await request(origin, `/api/mailboxes/${encodeURIComponent(createdThread.mailboxHandle)}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${createdThread.deliveryCapability}`,
+      },
+      body: {
+        createdAt: isoNow(),
+        id: deliveredMessageId,
+        messageKind: "signal-prekey",
+        protocol: "signal-pqxdh-double-ratchet-v1",
+        wireMessage: randomB64(64),
+      },
+    });
+    if (messagePost.statusCode !== 201) {
+      throw new Error(`Opaque mailbox message post failed with HTTP ${messagePost.statusCode}.`);
+    }
+
+    const bobSessionToken = bobRegistration.body?.session?.token;
+    if (!bobSessionToken) {
+      throw new Error("Relay did not return a bootstrap session token for Bob.");
+    }
+    const bobSync = await request(origin, "/api/sync/state", {
+      headers: {
+        Authorization: `Bearer ${bobSessionToken}`,
+      },
+      method: "GET",
+    });
+    if (bobSync.statusCode !== 200) {
+      throw new Error(`Bob opaque sync failed with HTTP ${bobSync.statusCode}.`);
+    }
+    const bobThread = bobSync.body?.threads?.find?.((entry) => entry?.id === thread.body?.threadId);
+    if (!bobThread?.mailboxHandle || !bobThread?.deliveryCapability) {
+      throw new Error("Bob sync did not return mailbox routing material for the created thread.");
+    }
+
+    const forgedEdit = await request(
+      origin,
+      `/api/mailboxes/${encodeURIComponent(bobThread.mailboxHandle)}/messages/${encodeURIComponent(deliveredMessageId)}/edit`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${bobThread.deliveryCapability}`,
+        },
+        body: {
+          createdAt: isoNow(),
+          id: `forged-edit-${suffix}`,
+          messageKind: "signal-prekey",
+          protocol: "signal-pqxdh-double-ratchet-v1",
+          wireMessage: randomB64(64),
+        },
+      }
+    );
+    if (forgedEdit.statusCode !== 403) {
+      throw new Error(`Recipient must not be able to edit sender messages, got HTTP ${forgedEdit.statusCode}.`);
+    }
+
+    const forgedDelete = await request(
+      origin,
+      `/api/mailboxes/${encodeURIComponent(bobThread.mailboxHandle)}/messages/${encodeURIComponent(deliveredMessageId)}/delete`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${bobThread.deliveryCapability}`,
+        },
+        body: {
+          deletedAt: isoNow(),
+        },
+      }
+    );
+    if (forgedDelete.statusCode !== 403) {
+      throw new Error(`Recipient must not be able to delete sender messages for everyone, got HTTP ${forgedDelete.statusCode}.`);
+    }
+
+    const editMessageId = `edit-message-${suffix}`;
+    const editPost = await request(
+      origin,
+      `/api/mailboxes/${encodeURIComponent(createdThread.mailboxHandle)}/messages/${encodeURIComponent(deliveredMessageId)}/edit`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${createdThread.deliveryCapability}`,
+        },
+        body: {
+          createdAt: isoNow(),
+          id: editMessageId,
+          messageKind: "signal-whisper",
+          protocol: "signal-pqxdh-double-ratchet-v1",
+          wireMessage: randomB64(64),
+        },
+      }
+    );
+    if (editPost.statusCode !== 201) {
+      throw new Error(`Sender message edit failed with HTTP ${editPost.statusCode}.`);
+    }
+
+    const deletePost = await request(
+      origin,
+      `/api/mailboxes/${encodeURIComponent(createdThread.mailboxHandle)}/messages/${encodeURIComponent(deliveredMessageId)}/delete`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${createdThread.deliveryCapability}`,
+        },
+        body: {
+          deletedAt: isoNow(),
+        },
+      }
+    );
+    if (deletePost.statusCode !== 200) {
+      throw new Error(`Sender delete-for-everyone failed with HTTP ${deletePost.statusCode}.`);
+    }
+
+    const aliceReceiptSync = await request(origin, "/api/sync/state", {
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      method: "GET",
+    });
+    const deliveryReceipt = aliceReceiptSync.body?.threads
+      ?.find?.((entry) => entry?.id === thread.body?.threadId)
+      ?.deliveryReceipts
+      ?.find?.((receipt) => receipt?.userId === bob.userId);
+    if (deliveryReceipt?.lastDeliveredMessageId !== deliveredMessageId) {
+      throw new Error("Recipient sync did not create a durable delivery receipt visible to the sender.");
+    }
+    const editedThread = aliceReceiptSync.body?.threads?.find?.((entry) => entry?.id === thread.body?.threadId);
+    const originalAfterDelete = editedThread?.messages?.find?.((message) => message?.id === deliveredMessageId);
+    const editEvent = editedThread?.messages?.find?.((message) => message?.id === editMessageId);
+    if (originalAfterDelete?.deletedForEveryoneAt == null || originalAfterDelete?.wireMessage !== null) {
+      throw new Error("Delete-for-everyone did not tombstone the original message and remove its relay ciphertext.");
+    }
+    if (editEvent?.editOf !== deliveredMessageId) {
+      throw new Error("Authenticated message edit event did not sync with its target editOf reference.");
     }
 
     const syncState = await request(origin, "/api/sync/state", {
