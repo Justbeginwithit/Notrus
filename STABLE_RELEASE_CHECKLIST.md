@@ -24,6 +24,20 @@
 | 12 | Real-world maturity threshold | `partial` |
 | 13 | Optional confidence boosters | `external` |
 
+## Stable polish gate
+
+Status: `partial`
+
+Stable cannot be declared on security evidence alone. The native clients also need a dedicated performance, animation, UI, UX, and subtle haptics polish pass so normal messaging feels smooth and predictable on realistic histories and non-flagship hardware.
+
+Repository-controlled polish work is tracked in [docs/STABLE_POLISH_GATE.md](docs/STABLE_POLISH_GATE.md).
+
+Re-verify:
+- `npm run test:stable-polish-gate`
+- Android release/profile build profiling for startup, chat list scroll, message list scroll, send, live receive, attachment rows, and notification-triggered sync.
+- macOS Instruments profiling for launch, sidebar scroll, message list scroll, open thread, live sync update, send/receive, and attachment rows.
+- Manual 1000+ message history test on at least one mid-range Android device and one lower-end Mac profile where available.
+
 ## 1) Core architecture is finished
 
 Status: `pass`
@@ -161,11 +175,17 @@ Status: `pass`
 
 Evidence:
 - Core messaging/account/security workflows are present and usable across native clients, including direct messaging, standards-group compatibility flow, and local profile operations.
+- Stable-polish tracking and static regression checks are documented in [docs/STABLE_POLISH_GATE.md](docs/STABLE_POLISH_GATE.md) and enforced by [test-stable-polish-gate.mjs](scripts/test-stable-polish-gate.mjs).
 - Android conversation UX now reflects protocol-specific readiness (direct vs group), auto-dismisses transient status surfaces, and keeps security warnings persistent/actionable in [NotrusAndroidApp.kt](native/android/NotrusAndroid/app/src/main/java/com/notrus/android/ui/NotrusAndroidApp.kt) and [NotrusViewModel.kt](native/android/NotrusAndroid/app/src/main/java/com/notrus/android/ui/NotrusViewModel.kt).
+- Android sync materialization runs away from the UI thread, message rows keep stable lazy-list identity/content types, search highlighting is memoized, and message bubbles avoid full content-size animation in the hot list path.
+- Android now has a Haptic feedback setting and subtle action feedback for sends, long-press/message actions, archive/delete/mute, read/privacy setting changes, export/import completion, and warnings.
 - macOS compose UX no longer hard-blocks group creation when contacts lack native MLS key packages; it transparently uses compatible standards-group fanout mode, covered by [NotrusMacCheckpointTests.swift](native/macos/NotrusMac/Tests/NotrusMacCheckpointTests.swift).
+- macOS message history uses lazy rendering, sync avoids republishing unchanged thread arrays, message search avoids repeated match-set work per row, and auto-scroll respects Reduce Motion while settling layout after live/manual sync.
+- macOS exposes the same Haptic feedback preference and uses hardware-dependent `NSHapticFeedbackManager` calls only as optional confirmation; unsupported Macs continue without behavior changes.
 - Local account/profile cleanup flows remain available on both clients (delete local profile/contact/thread behaviors in current client models and view models).
 
 Re-verify:
+- `npm run test:stable-polish-gate`
 - `npm run test:mac-app`
 - `./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.notrus.android.relay.RelayClientInstrumentedTest` (from `native/android/NotrusAndroid`)
 

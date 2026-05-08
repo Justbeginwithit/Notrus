@@ -1,7 +1,12 @@
-@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@file:OptIn(
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+)
 
 package com.notrus.android.ui
 
+import android.view.HapticFeedbackConstants
+import android.view.View
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,8 +25,9 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -45,7 +51,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -114,6 +119,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -146,6 +152,7 @@ import java.util.Locale
 
 private const val DefaultStatusMessage = "Android native client ready."
 private const val MinimumDirectorySearchLength = 3
+private const val MessageAutoScrollDelayMs = 80L
 private val PanelShape = RoundedCornerShape(26.dp)
 private val RowShape = RoundedCornerShape(24.dp)
 private val BubbleShape = RoundedCornerShape(24.dp)
@@ -167,6 +174,37 @@ private enum class BannerTone {
     Success,
 }
 
+private enum class NotrusHaptic {
+    Light,
+    Medium,
+    Success,
+    Warning,
+}
+
+private fun View.performNotrusHaptic(
+    enabled: Boolean,
+    type: NotrusHaptic,
+) {
+    if (!enabled) return
+    val feedback = when (type) {
+        NotrusHaptic.Light -> HapticFeedbackConstants.VIRTUAL_KEY
+        NotrusHaptic.Medium -> HapticFeedbackConstants.LONG_PRESS
+        NotrusHaptic.Success -> HapticFeedbackConstants.CONFIRM
+        NotrusHaptic.Warning -> HapticFeedbackConstants.REJECT
+    }
+    performHapticFeedback(feedback)
+}
+
+private fun statusMessageNeedsSuccessHaptic(message: String): Boolean {
+    val normalized = message.lowercase(Locale.getDefault())
+    return listOf(
+        "saved ",
+        "imported ",
+        "restored ",
+        "exported ",
+    ).any { normalized.contains(it) }
+}
+
 private data class PendingAttachmentSaveRequest(
     val reference: SecureAttachmentReference,
     val threadId: String,
@@ -180,6 +218,7 @@ fun NotrusAndroidApp(
 ) {
     var pendingAttachmentSave by remember { mutableStateOf<PendingAttachmentSaveRequest?>(null) }
     val focusManager = LocalFocusManager.current
+    val hapticView = LocalView.current
 
     val importArchiveLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
@@ -227,6 +266,9 @@ fun NotrusAndroidApp(
     LaunchedEffect(state.statusMessage, state.isBusy) {
         val message = state.statusMessage
         if (!state.isBusy && message != DefaultStatusMessage) {
+            if (statusMessageNeedsSuccessHaptic(message)) {
+                hapticView.performNotrusHaptic(state.hapticFeedbackEnabled, NotrusHaptic.Success)
+            }
             delay(4200)
             viewModel.dismissStatusMessage(message)
         }
@@ -235,6 +277,7 @@ fun NotrusAndroidApp(
     LaunchedEffect(state.errorMessage) {
         val message = state.errorMessage
         if (!message.isNullOrBlank()) {
+            hapticView.performNotrusHaptic(state.hapticFeedbackEnabled, NotrusHaptic.Warning)
             delay(5200)
             viewModel.dismissErrorMessage(message)
         }
@@ -772,6 +815,11 @@ private fun WorkspaceTopBar(
     onCloseMessageSearch: () -> Unit,
     enhancedVisuals: Boolean,
 ) {
+    val hapticView = LocalView.current
+    fun haptic(type: NotrusHaptic = NotrusHaptic.Light) {
+        hapticView.performNotrusHaptic(state.hapticFeedbackEnabled, type)
+    }
+
     val title = if (showConversationDetail && selectedThread != null) {
         selectedThread.title.ifBlank { "Conversation" }
     } else {
@@ -816,7 +864,10 @@ private fun WorkspaceTopBar(
         }
 
         if (showConversationDetail && selectedThread != null) {
-            IconButton(onClick = onBack) {
+            IconButton(onClick = {
+                haptic()
+                onBack()
+            }) {
                 Icon(
                     Icons.AutoMirrored.Rounded.ArrowBack,
                     contentDescription = "Back",
@@ -844,7 +895,10 @@ private fun WorkspaceTopBar(
             )
         }
         if (messageSearchEnabled && !(showConversationDetail && selectedThread != null)) {
-            IconButton(onClick = onOpenMessageSearch) {
+            IconButton(onClick = {
+                haptic()
+                onOpenMessageSearch()
+            }) {
                 Icon(
                     Icons.Rounded.Search,
                     contentDescription = "Search messages",
@@ -856,7 +910,10 @@ private fun WorkspaceTopBar(
             if (showConversationDetail && selectedThread != null) {
                 var actionsExpanded by remember { mutableStateOf(false) }
                 IconButton(
-                    onClick = onOpenMessageSearch,
+                    onClick = {
+                        haptic()
+                        onOpenMessageSearch()
+                    },
                     enabled = messageSearchEnabled,
                 ) {
                     Icon(
@@ -866,7 +923,10 @@ private fun WorkspaceTopBar(
                     )
                 }
                 Box {
-                    IconButton(onClick = { actionsExpanded = true }) {
+                    IconButton(onClick = {
+                        haptic(NotrusHaptic.Medium)
+                        actionsExpanded = true
+                    }) {
                         Icon(
                             Icons.Rounded.MoreVert,
                             contentDescription = "Conversation actions",
@@ -880,6 +940,7 @@ private fun WorkspaceTopBar(
                         DropdownMenuItem(
                             text = { Text("Archive chat") },
                             onClick = {
+                                haptic(NotrusHaptic.Success)
                                 actionsExpanded = false
                                 onHideConversation(selectedThread.id)
                             },
@@ -887,6 +948,7 @@ private fun WorkspaceTopBar(
                         DropdownMenuItem(
                             text = { Text(if (selectedThread.muted) "Unmute notifications" else "Mute notifications") },
                             onClick = {
+                                haptic()
                                 actionsExpanded = false
                                 onToggleConversationMuted(selectedThread.id)
                             },
@@ -896,6 +958,7 @@ private fun WorkspaceTopBar(
                             leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
                             enabled = messageSearchEnabled,
                             onClick = {
+                                haptic()
                                 actionsExpanded = false
                                 onOpenMessageSearch()
                             },
@@ -904,6 +967,7 @@ private fun WorkspaceTopBar(
                             text = { Text("Delete local history") },
                             leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
                             onClick = {
+                                haptic(NotrusHaptic.Warning)
                                 actionsExpanded = false
                                 onDeleteConversationHistory(selectedThread.id)
                             },
@@ -912,6 +976,7 @@ private fun WorkspaceTopBar(
                             text = { Text("Reset secure session") },
                             leadingIcon = { Icon(Icons.Rounded.Security, contentDescription = null) },
                             onClick = {
+                                haptic(NotrusHaptic.Warning)
                                 actionsExpanded = false
                                 onResetConversationSession(selectedThread.id)
                             },
@@ -919,7 +984,10 @@ private fun WorkspaceTopBar(
                     }
                 }
             }
-            IconButton(onClick = onRefresh) {
+            IconButton(onClick = {
+                haptic()
+                onRefresh()
+            }) {
                 Icon(
                     Icons.Rounded.Refresh,
                     contentDescription = "Refresh",
@@ -1304,6 +1372,11 @@ private fun ArchivedChatsScreen(
     viewModel: NotrusViewModel,
     enhancedVisuals: Boolean,
 ) {
+    val hapticView = LocalView.current
+    fun haptic(type: NotrusHaptic = NotrusHaptic.Light) {
+        hapticView.performNotrusHaptic(state.hapticFeedbackEnabled, type)
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
@@ -1345,16 +1418,25 @@ private fun ArchivedChatsScreen(
                             enhancedVisuals = enhancedVisuals,
                             selected = false,
                             currentUserId = state.currentIdentity?.id,
-                            onClick = { viewModel.restoreConversation(thread.id) },
+                            onClick = {
+                                haptic(NotrusHaptic.Success)
+                                viewModel.restoreConversation(thread.id)
+                            },
                         )
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            FilledTonalButton(onClick = { viewModel.restoreConversation(thread.id) }) {
+                            FilledTonalButton(onClick = {
+                                haptic(NotrusHaptic.Success)
+                                viewModel.restoreConversation(thread.id)
+                            }) {
                                 Text("Restore")
                             }
-                            TextButton(onClick = { viewModel.toggleConversationMuted(thread.id) }) {
+                            TextButton(onClick = {
+                                haptic()
+                                viewModel.toggleConversationMuted(thread.id)
+                            }) {
                                 Text(if (thread.muted) "Unmute" else "Mute")
                             }
                         }
@@ -1379,10 +1461,17 @@ private fun ConversationPane(
     activeSearchMessageId: String?,
 ) {
     val messageListState = rememberLazyListState()
+    val hapticView = LocalView.current
+    fun haptic(type: NotrusHaptic = NotrusHaptic.Light) {
+        hapticView.performNotrusHaptic(state.hapticFeedbackEnabled, type)
+    }
     val canSend = thread.supported && (state.draftText.isNotBlank() || state.pendingAttachments.isNotEmpty()) && !state.isBusy
 
-    LaunchedEffect(thread.id, thread.messages.size) {
+    val latestMessageId = thread.messages.lastOrNull()?.id
+
+    LaunchedEffect(thread.id, latestMessageId, messageSearchQuery) {
         if (thread.messages.isNotEmpty() && messageSearchQuery.isBlank()) {
+            delay(MessageAutoScrollDelayMs)
             messageListState.scrollToItem(thread.messages.lastIndex)
         }
     }
@@ -1403,6 +1492,7 @@ private fun ConversationPane(
             ConversationHeader(
                 thread = thread,
                 currentUserId = state.currentIdentity?.id,
+                hapticsEnabled = state.hapticFeedbackEnabled,
                 onHideConversation = { viewModel.hideConversation(thread.id) },
                 onDeleteConversationHistory = { viewModel.deleteConversationHistory(thread.id) },
                 onResetConversationSession = { viewModel.resetConversationSession(thread.id) },
@@ -1438,7 +1528,11 @@ private fun ConversationPane(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                itemsIndexed(thread.messages, key = { _, message -> message.id }) { _, message ->
+                items(
+                    items = thread.messages,
+                    key = { message -> message.id },
+                    contentType = { message -> message.status },
+                ) { message ->
                     MessageBubble(
                         message = message,
                         enhancedVisuals = enhancedVisuals,
@@ -1446,7 +1540,9 @@ private fun ConversationPane(
                         searchQuery = messageSearchQuery,
                         searchMatchActive = message.id == activeSearchMessageId,
                         showReadReceipts = state.showReadReceiptsFromOthers,
+                        hapticsEnabled = state.hapticFeedbackEnabled,
                         onSaveAttachment = { reference ->
+                            haptic()
                             onSaveAttachment(thread.id, reference)
                         },
                         onDeleteMessage = {
@@ -1528,7 +1624,10 @@ private fun ConversationPane(
                                 state.pendingAttachments.forEach { draft ->
                                     FilterChip(
                                         selected = false,
-                                        onClick = { viewModel.removePendingAttachment(draft.id) },
+                                        onClick = {
+                                            haptic()
+                                            viewModel.removePendingAttachment(draft.id)
+                                        },
                                         label = {
                                             Text(
                                                 text = draft.fileName,
@@ -1564,13 +1663,19 @@ private fun ConversationPane(
                         enabled = thread.supported,
                     )
                     OutlinedIconButton(
-                        onClick = onAttachFiles,
+                        onClick = {
+                            haptic()
+                            onAttachFiles()
+                        },
                         enabled = thread.supported && !state.isBusy,
                     ) {
                         Icon(Icons.Rounded.AttachFile, contentDescription = "Attach files")
                     }
                     FilledIconButton(
-                        onClick = { viewModel.sendSelectedMessage(activity) },
+                        onClick = {
+                            haptic(NotrusHaptic.Success)
+                            viewModel.sendSelectedMessage(activity)
+                        },
                         enabled = canSend,
                     ) {
                         Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "Send")
@@ -1585,11 +1690,17 @@ private fun ConversationPane(
 private fun ConversationHeader(
     thread: ConversationThread,
     currentUserId: String?,
+    hapticsEnabled: Boolean,
     onHideConversation: () -> Unit,
     onDeleteConversationHistory: () -> Unit,
     onResetConversationSession: () -> Unit,
     onToggleConversationMuted: () -> Unit,
 ) {
+    val hapticView = LocalView.current
+    fun haptic(type: NotrusHaptic = NotrusHaptic.Light) {
+        hapticView.performNotrusHaptic(hapticsEnabled, type)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1625,7 +1736,10 @@ private fun ConversationHeader(
             }
             var actionsExpanded by remember { mutableStateOf(false) }
             Box {
-                IconButton(onClick = { actionsExpanded = true }) {
+                IconButton(onClick = {
+                    haptic(NotrusHaptic.Medium)
+                    actionsExpanded = true
+                }) {
                     Icon(Icons.Rounded.MoreVert, contentDescription = "Conversation actions")
                 }
                     DropdownMenu(
@@ -1635,6 +1749,7 @@ private fun ConversationHeader(
                         DropdownMenuItem(
                             text = { Text("Archive chat") },
                             onClick = {
+                                haptic(NotrusHaptic.Success)
                                 actionsExpanded = false
                                 onHideConversation()
                             },
@@ -1642,6 +1757,7 @@ private fun ConversationHeader(
                         DropdownMenuItem(
                             text = { Text(if (thread.muted) "Unmute notifications" else "Mute notifications") },
                             onClick = {
+                                haptic()
                                 actionsExpanded = false
                                 onToggleConversationMuted()
                             },
@@ -1650,6 +1766,7 @@ private fun ConversationHeader(
                             text = { Text("Delete local history") },
                             leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
                             onClick = {
+                                haptic(NotrusHaptic.Warning)
                                 actionsExpanded = false
                                 onDeleteConversationHistory()
                             },
@@ -1658,6 +1775,7 @@ private fun ConversationHeader(
                             text = { Text("Reset secure session") },
                             leadingIcon = { Icon(Icons.Rounded.Security, contentDescription = null) },
                             onClick = {
+                                haptic(NotrusHaptic.Warning)
                                 actionsExpanded = false
                                 onResetConversationSession()
                             },
@@ -2018,6 +2136,11 @@ private fun SettingsScreen(
 ) {
     val scrollState = rememberScrollState()
     val focusManager = LocalFocusManager.current
+    val hapticView = LocalView.current
+    fun haptic(type: NotrusHaptic = NotrusHaptic.Light) {
+        hapticView.performNotrusHaptic(state.hapticFeedbackEnabled, type)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -2075,6 +2198,7 @@ private fun SettingsScreen(
             )
             Button(
                 onClick = {
+                    haptic(NotrusHaptic.Success)
                     focusManager.clearFocus(force = true)
                     viewModel.createProfile()
                 },
@@ -2104,7 +2228,10 @@ private fun SettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             FilledTonalButton(
-                onClick = onOpenSecurity,
+                onClick = {
+                    haptic()
+                    onOpenSecurity()
+                },
                 shape = RoundedCornerShape(16.dp),
             ) {
                 Icon(Icons.Rounded.Security, contentDescription = null)
@@ -2165,7 +2292,10 @@ private fun SettingsScreen(
                 }
                 Switch(
                     checked = state.privacyModeEnabled,
-                    onCheckedChange = viewModel::updatePrivacyMode,
+                    onCheckedChange = { enabled ->
+                        haptic()
+                        viewModel.updatePrivacyMode(enabled)
+                    },
                 )
             }
 
@@ -2193,7 +2323,10 @@ private fun SettingsScreen(
                 }
                 Switch(
                     checked = state.sendReadReceiptsToOthers,
-                    onCheckedChange = viewModel::updateSendReadReceiptsToOthers,
+                    onCheckedChange = { enabled ->
+                        haptic()
+                        viewModel.updateSendReadReceiptsToOthers(enabled)
+                    },
                 )
             }
 
@@ -2221,7 +2354,10 @@ private fun SettingsScreen(
                 }
                 Switch(
                     checked = state.showReadReceiptsFromOthers,
-                    onCheckedChange = viewModel::updateShowReadReceiptsFromOthers,
+                    onCheckedChange = { enabled ->
+                        haptic()
+                        viewModel.updateShowReadReceiptsFromOthers(enabled)
+                    },
                 )
             }
         }
@@ -2258,7 +2394,10 @@ private fun SettingsScreen(
                 }
                 Switch(
                     checked = state.notificationsEnabled,
-                    onCheckedChange = viewModel::updateNotificationsEnabled,
+                    onCheckedChange = { enabled ->
+                        haptic()
+                        viewModel.updateNotificationsEnabled(enabled)
+                    },
                 )
             }
 
@@ -2291,7 +2430,10 @@ private fun SettingsScreen(
                 Switch(
                     checked = state.notificationRealtimeEnabled,
                     enabled = state.notificationsEnabled,
-                    onCheckedChange = viewModel::updateNotificationRealtimeEnabled,
+                    onCheckedChange = { enabled ->
+                        haptic()
+                        viewModel.updateNotificationRealtimeEnabled(enabled)
+                    },
                 )
             }
 
@@ -2309,7 +2451,10 @@ private fun SettingsScreen(
                 NotificationContentVisibility.entries.forEach { option ->
                     FilterChip(
                         selected = state.notificationContentVisibility == option.key,
-                        onClick = { viewModel.updateNotificationContentVisibility(option.key) },
+                        onClick = {
+                            haptic()
+                            viewModel.updateNotificationContentVisibility(option.key)
+                        },
                         label = { Text(option.label) },
                     )
                 }
@@ -2343,7 +2488,10 @@ private fun SettingsScreen(
                 }
                 Switch(
                     checked = state.notificationPrivacyModeOverride,
-                    onCheckedChange = viewModel::updateNotificationPrivacyModeOverride,
+                    onCheckedChange = { enabled ->
+                        haptic()
+                        viewModel.updateNotificationPrivacyModeOverride(enabled)
+                    },
                 )
             }
 
@@ -2361,7 +2509,10 @@ private fun SettingsScreen(
                 NotificationLockscreenVisibility.entries.forEach { option ->
                     FilterChip(
                         selected = state.notificationLockscreenVisibility == option.key,
-                        onClick = { viewModel.updateNotificationLockscreenVisibility(option.key) },
+                        onClick = {
+                            haptic()
+                            viewModel.updateNotificationLockscreenVisibility(option.key)
+                        },
                         label = { Text(option.label) },
                     )
                 }
@@ -2389,7 +2540,10 @@ private fun SettingsScreen(
                 }
                 Switch(
                     checked = state.notificationGroupPreviewEnabled,
-                    onCheckedChange = viewModel::updateNotificationGroupPreviewEnabled,
+                    onCheckedChange = { enabled ->
+                        haptic()
+                        viewModel.updateNotificationGroupPreviewEnabled(enabled)
+                    },
                 )
             }
 
@@ -2415,7 +2569,10 @@ private fun SettingsScreen(
                 }
                 Switch(
                     checked = state.notificationSoundEnabled,
-                    onCheckedChange = viewModel::updateNotificationSoundEnabled,
+                    onCheckedChange = { enabled ->
+                        haptic()
+                        viewModel.updateNotificationSoundEnabled(enabled)
+                    },
                 )
             }
 
@@ -2441,7 +2598,10 @@ private fun SettingsScreen(
                 }
                 Switch(
                     checked = state.notificationVibrationEnabled,
-                    onCheckedChange = viewModel::updateNotificationVibrationEnabled,
+                    onCheckedChange = { enabled ->
+                        haptic()
+                        viewModel.updateNotificationVibrationEnabled(enabled)
+                    },
                 )
             }
         }
@@ -2464,7 +2624,10 @@ private fun SettingsScreen(
                 NotrusThemeMode.entries.forEach { mode ->
                     FilterChip(
                         selected = state.themeMode == mode.key,
-                        onClick = { viewModel.updateThemeMode(mode.key) },
+                        onClick = {
+                            haptic()
+                            viewModel.updateThemeMode(mode.key)
+                        },
                         label = { Text(mode.label) },
                     )
                 }
@@ -2493,7 +2656,10 @@ private fun SettingsScreen(
                 NotrusColorTheme.entries.forEach { theme ->
                     FilterChip(
                         selected = state.colorThemePreset == theme.key,
-                        onClick = { viewModel.updateColorTheme(theme.key) },
+                        onClick = {
+                            haptic()
+                            viewModel.updateColorTheme(theme.key)
+                        },
                         label = { Text(theme.label) },
                     )
                 }
@@ -2532,7 +2698,45 @@ private fun SettingsScreen(
                 }
                 Switch(
                     checked = state.visualEffectsEnabled,
-                    onCheckedChange = viewModel::updateVisualEffects,
+                    onCheckedChange = { enabled ->
+                        haptic()
+                        viewModel.updateVisualEffects(enabled)
+                    },
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = "Haptic feedback",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = if (state.hapticFeedbackEnabled) {
+                            "On. Subtle touch feedback confirms send, archive, delete, selection, and security actions."
+                        } else {
+                            "Off. Notrus keeps all visual confirmations but stops in-app haptic feedback."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = state.hapticFeedbackEnabled,
+                    onCheckedChange = { enabled ->
+                        haptic()
+                        viewModel.updateHapticFeedback(enabled)
+                    },
                 )
             }
         }
@@ -2577,6 +2781,7 @@ private fun SettingsScreen(
             )
             FilledTonalButton(
                 onClick = {
+                    haptic(NotrusHaptic.Success)
                     focusManager.clearFocus(force = true)
                     onExportArchive()
                 },
@@ -2599,6 +2804,7 @@ private fun SettingsScreen(
             )
             FilledTonalButton(
                 onClick = {
+                    haptic(NotrusHaptic.Success)
                     focusManager.clearFocus(force = true)
                     onImportArchive()
                 },
@@ -2634,6 +2840,7 @@ private fun SettingsScreen(
             )
             FilledTonalButton(
                 onClick = {
+                    haptic(NotrusHaptic.Success)
                     focusManager.clearFocus(force = true)
                     onExportChatBackup()
                 },
@@ -2656,6 +2863,7 @@ private fun SettingsScreen(
             )
             FilledTonalButton(
                 onClick = {
+                    haptic(NotrusHaptic.Success)
                     focusManager.clearFocus(force = true)
                     onImportChatBackup()
                 },
@@ -3518,27 +3726,29 @@ private fun HighlightedMessageText(
 
     val highlightBackground = MaterialTheme.colorScheme.tertiaryContainer
     val highlightForeground = MaterialTheme.colorScheme.onTertiaryContainer
-    val highlighted = buildAnnotatedString {
-        val sourceLower = text.lowercase(Locale.getDefault())
-        val queryLower = trimmedQuery.lowercase(Locale.getDefault())
-        var cursor = 0
-        while (cursor < text.length) {
-            val next = sourceLower.indexOf(queryLower, startIndex = cursor)
-            if (next < 0) {
-                append(text.substring(cursor))
-                break
+    val highlighted = remember(text, trimmedQuery, highlightBackground, highlightForeground) {
+        buildAnnotatedString {
+            val sourceLower = text.lowercase(Locale.getDefault())
+            val queryLower = trimmedQuery.lowercase(Locale.getDefault())
+            var cursor = 0
+            while (cursor < text.length) {
+                val next = sourceLower.indexOf(queryLower, startIndex = cursor)
+                if (next < 0) {
+                    append(text.substring(cursor))
+                    break
+                }
+                append(text.substring(cursor, next))
+                withStyle(
+                    SpanStyle(
+                        background = highlightBackground,
+                        color = highlightForeground,
+                        fontWeight = FontWeight.Bold,
+                    ),
+                ) {
+                    append(text.substring(next, next + trimmedQuery.length))
+                }
+                cursor = next + trimmedQuery.length
             }
-            append(text.substring(cursor, next))
-            withStyle(
-                SpanStyle(
-                    background = highlightBackground,
-                    color = highlightForeground,
-                    fontWeight = FontWeight.Bold,
-                ),
-            ) {
-                append(text.substring(next, next + trimmedQuery.length))
-            }
-            cursor = next + trimmedQuery.length
         }
     }
 
@@ -3557,11 +3767,17 @@ private fun MessageBubble(
     searchQuery: String,
     searchMatchActive: Boolean,
     showReadReceipts: Boolean,
+    hapticsEnabled: Boolean,
     onSaveAttachment: (SecureAttachmentReference) -> Unit,
     onDeleteMessage: () -> Unit,
     onDeleteForEveryone: () -> Unit,
     onEditMessage: (String) -> Unit,
 ) {
+    val hapticView = LocalView.current
+    fun haptic(type: NotrusHaptic = NotrusHaptic.Light) {
+        hapticView.performNotrusHaptic(hapticsEnabled, type)
+    }
+
     val bubbleColor by animateColorAsState(
         targetValue = when {
             message.status != "ok" -> MaterialTheme.colorScheme.errorContainer.copy(alpha = if (enhancedVisuals) 0.84f else 1f)
@@ -3616,6 +3832,7 @@ private fun MessageBubble(
                     onClick = {
                         val trimmed = editText.trim()
                         editDialogVisible = false
+                        haptic(NotrusHaptic.Success)
                         onEditMessage(trimmed)
                     },
                 ) {
@@ -3649,7 +3866,13 @@ private fun MessageBubble(
                 .widthIn(max = 520.dp)
                 .clip(BubbleShape)
                 .background(bubbleColor)
-                .animateContentSize(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing))
+                .combinedClickable(
+                    onClick = {},
+                    onLongClick = {
+                        haptic(NotrusHaptic.Medium)
+                        infoDialogVisible = true
+                    },
+                )
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -3733,7 +3956,10 @@ private fun MessageBubble(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
-                                    TextButton(onClick = { onSaveAttachment(attachment) }) {
+                                    TextButton(onClick = {
+                                        haptic()
+                                        onSaveAttachment(attachment)
+                                    }) {
                                         Text("Save")
                                     }
                                 }
@@ -3769,7 +3995,10 @@ private fun MessageBubble(
                 }
                 var actionsExpanded by remember { mutableStateOf(false) }
                 Box(modifier = Modifier.align(if (isLocal) Alignment.End else Alignment.Start)) {
-                    IconButton(onClick = { actionsExpanded = true }) {
+                    IconButton(onClick = {
+                        haptic(NotrusHaptic.Medium)
+                        actionsExpanded = true
+                    }) {
                         Icon(Icons.Rounded.MoreVert, contentDescription = "Message actions")
                     }
                     DropdownMenu(
@@ -3780,6 +4009,7 @@ private fun MessageBubble(
                             text = { Text("Message info") },
                             leadingIcon = { Icon(Icons.Rounded.Info, contentDescription = null) },
                             onClick = {
+                                haptic(NotrusHaptic.Medium)
                                 actionsExpanded = false
                                 infoDialogVisible = true
                             },
@@ -3788,6 +4018,7 @@ private fun MessageBubble(
                             DropdownMenuItem(
                                 text = { Text("Edit") },
                                 onClick = {
+                                    haptic()
                                     actionsExpanded = false
                                     editText = message.body
                                     editDialogVisible = true
@@ -3797,6 +4028,7 @@ private fun MessageBubble(
                                 text = { Text("Delete for everyone") },
                                 leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
                                 onClick = {
+                                    haptic(NotrusHaptic.Warning)
                                     actionsExpanded = false
                                     onDeleteForEveryone()
                                 },
@@ -3806,6 +4038,7 @@ private fun MessageBubble(
                             text = { Text("Delete locally") },
                             leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
                             onClick = {
+                                haptic(NotrusHaptic.Warning)
                                 actionsExpanded = false
                                 onDeleteMessage()
                             },

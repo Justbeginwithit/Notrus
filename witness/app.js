@@ -84,13 +84,25 @@ function short(value, length = 18) {
   return text.length > length ? `${text.slice(0, length)}...` : text;
 }
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+function clearChildren(element) {
+  element.replaceChildren();
+}
+
+function appendCell(row, text, className = "") {
+  const cell = document.createElement("td");
+  if (className) {
+    cell.className = className;
+  }
+  cell.textContent = String(text ?? "-");
+  row.append(cell);
+  return cell;
+}
+
+function createPill(text, kind) {
+  const pill = document.createElement("span");
+  pill.className = `pill ${kind}`;
+  pill.textContent = text;
+  return pill;
 }
 
 function endpoint(path) {
@@ -138,8 +150,12 @@ function renderLatest(latest) {
 }
 
 function renderChecks(latest) {
+  clearChildren(els.checksList);
   if (!latest) {
-    els.checksList.innerHTML = '<li class="muted">No observation loaded yet.</li>';
+    const item = document.createElement("li");
+    item.className = "muted";
+    item.textContent = "No observation loaded yet.";
+    els.checksList.append(item);
     return;
   }
 
@@ -168,32 +184,46 @@ function renderChecks(latest) {
     },
   ];
 
-  els.checksList.innerHTML = checks
-    .map((check) => `<li class="${check.ok ? "ok-text" : "warn-text"}">${escapeHtml(check.text)}</li>`)
-    .join("");
+  const items = checks.map((check) => {
+    const item = document.createElement("li");
+    item.className = check.ok ? "ok-text" : "warn-text";
+    item.textContent = check.text;
+    return item;
+  });
+  els.checksList.append(...items);
 }
 
 function renderHistory(history) {
+  clearChildren(els.historyBody);
   if (!Array.isArray(history) || history.length === 0) {
-    els.historyBody.innerHTML = '<tr><td colspan="5" class="muted">No history available.</td></tr>';
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 5;
+    cell.className = "muted";
+    cell.textContent = "No history available.";
+    row.append(cell);
+    els.historyBody.append(row);
     els.historyCount.textContent = "0 entries";
     return;
   }
 
   els.historyCount.textContent = `${history.length} entries`;
-  els.historyBody.innerHTML = history
+  const rows = history
     .slice()
     .reverse()
-    .map((entry) => `
-      <tr>
-        <td class="mono">${escapeHtml(entry.entryCount ?? "-")}</td>
-        <td class="mono">${escapeHtml(entry.observedAt || "-")}</td>
-        <td class="mono">${escapeHtml(entry.transparencySigner?.keyId || "-")}</td>
-        <td class="mono break" title="${escapeHtml(entry.transparencyHead || "")}">${escapeHtml(short(entry.transparencyHead, 28))}</td>
-        <td>${entry.transparencySignature ? '<span class="pill ok">present</span>' : '<span class="pill warn">missing</span>'}</td>
-      </tr>
-    `)
-    .join("");
+    .map((entry) => {
+      const row = document.createElement("tr");
+      appendCell(row, entry.entryCount ?? "-", "mono");
+      appendCell(row, entry.observedAt || "-", "mono");
+      appendCell(row, entry.transparencySigner?.keyId || "-", "mono");
+      const headCell = appendCell(row, short(entry.transparencyHead, 28), "mono break");
+      headCell.title = String(entry.transparencyHead || "");
+      const signatureCell = document.createElement("td");
+      signatureCell.append(entry.transparencySignature ? createPill("present", "ok") : createPill("missing", "warn"));
+      row.append(signatureCell);
+      return row;
+    });
+  els.historyBody.append(...rows);
 }
 
 async function loadHealth() {

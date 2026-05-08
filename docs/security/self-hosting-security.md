@@ -40,7 +40,7 @@ Witness origin: https://witness.notrus.cloud
 
 Witness behavior, check endpoints, healthy output, and warning signs are documented in [witness-transparency.md](witness-transparency.md).
 
-If the witness is publicly exposed, set `WITNESS_ADMIN_TOKEN` so detailed history endpoints require `X-Notrus-Witness-Admin-Token`. Keep the public `/api/witness/head` endpoint available for clients unless you also add client-side witness-token support.
+If the witness is publicly exposed, set `WITNESS_ADMIN_TOKEN` so detailed history endpoints are usable by operators through `X-Notrus-Witness-Admin-Token`. Without this token configured, witness history/admin endpoints fail closed. Keep the public `/api/witness/head` endpoint available for clients unless you also add client-side witness-token support.
 
 ## DuckDNS + Caddy
 

@@ -268,7 +268,7 @@ async function main() {
       `/api/witness/log?relayOrigin=${encodeURIComponent(relayOrigin)}`,
     );
     if (publicWitnessLog.statusCode !== 401) {
-      throw new Error("Witness history log should require read-only admin authorization when configured.");
+      throw new Error("Witness history log should require read-only admin authorization.");
     }
 
     const adminWitnessLog = await request(

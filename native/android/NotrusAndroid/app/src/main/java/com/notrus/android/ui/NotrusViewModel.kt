@@ -168,6 +168,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             notificationSoundEnabled = settings.getBoolean(NotrusNotificationPrefs.KEY_NOTIFICATION_SOUND_ENABLED, true),
             notificationVibrationEnabled = settings.getBoolean(NotrusNotificationPrefs.KEY_NOTIFICATION_VIBRATION_ENABLED, true),
             visualEffectsEnabled = settings.getBoolean(KEY_VISUAL_EFFECTS_ENABLED, defaultEnhancedVisualsEnabled),
+            hapticFeedbackEnabled = settings.getBoolean(KEY_HAPTIC_FEEDBACK_ENABLED, true),
             colorThemePreset = settings.getString(
                 KEY_COLOR_THEME_PRESET,
                 NotrusColorTheme.Default.key,
@@ -303,6 +304,11 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
     fun updateVisualEffects(enabled: Boolean) {
         state = state.copy(visualEffectsEnabled = enabled, errorMessage = null)
         settings.edit().putBoolean(KEY_VISUAL_EFFECTS_ENABLED, enabled).apply()
+    }
+
+    fun updateHapticFeedback(enabled: Boolean) {
+        state = state.copy(hapticFeedbackEnabled = enabled, errorMessage = null)
+        settings.edit().putBoolean(KEY_HAPTIC_FEEDBACK_ENABLED, enabled).apply()
     }
 
     fun updateColorTheme(themeKey: String) {
@@ -2658,12 +2664,14 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             )
             persistTransparencyPinIfNeeded(transparency)
             val usersById = (sync.users + storedRecord.savedContacts).associateBy { it.id }
-            val materialized = materializeThreads(
-                identity = workingIdentity,
-                relayThreads = sync.threads,
-                usersById = usersById,
-                threadRecords = storedRecord.threadRecords,
-            )
+            val materialized = withContext(Dispatchers.Default) {
+                materializeThreads(
+                    identity = workingIdentity,
+                    relayThreads = sync.threads,
+                    usersById = usersById,
+                    threadRecords = storedRecord.threadRecords,
+                )
+            }
             val updatedRecord = storedRecord.copy(
                 identity = materialized.identity,
                 savedContacts = mergedUsers,
@@ -4614,6 +4622,7 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         private const val DefaultStatusMessage = "Android native client ready."
         private const val KEY_PRIVACY_MODE_ENABLED = "privacy_mode_enabled"
         private const val KEY_VISUAL_EFFECTS_ENABLED = "visual_effects_enabled"
+        private const val KEY_HAPTIC_FEEDBACK_ENABLED = "haptic_feedback_enabled"
         private const val KEY_COLOR_THEME_PRESET = "color_theme_preset"
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_SEND_READ_RECEIPTS_TO_OTHERS = "send_read_receipts_to_others"

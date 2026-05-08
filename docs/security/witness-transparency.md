@@ -31,7 +31,7 @@ Witness graphical console:
 https://witness.notrus.cloud/witness
 ```
 
-The console shows public witness health and latest observed relay head without a token. Detailed history and read-only summary actions require `X-Notrus-Witness-Admin-Token` when `WITNESS_ADMIN_TOKEN` is configured.
+The console shows public witness health and latest observed relay head without a token. Detailed history and read-only summary actions require `X-Notrus-Witness-Admin-Token`. If `WITNESS_ADMIN_TOKEN` is not configured, those history/admin endpoints fail closed.
 
 Witness health:
 
@@ -45,7 +45,7 @@ Latest observed relay transparency head:
 https://witness.notrus.cloud/api/witness/head?relayOrigin=https://relay.notrus.cloud
 ```
 
-Observed witness history. This is a read-only operator endpoint and should require `X-Notrus-Witness-Admin-Token` when `WITNESS_ADMIN_TOKEN` is configured:
+Observed witness history. This is a read-only operator endpoint and requires `X-Notrus-Witness-Admin-Token`:
 
 ```text
 https://witness.notrus.cloud/api/witness/log?relayOrigin=https://relay.notrus.cloud

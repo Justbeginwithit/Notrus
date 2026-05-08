@@ -75,6 +75,7 @@ final class AppModel: ObservableObject {
     @Published var macNotificationsEnabled: Bool
     @Published var macNotificationContentVisibility: MacNotificationContentVisibility
     @Published var macNotificationGroupPreviewEnabled: Bool
+    @Published var hapticFeedbackEnabled: Bool
     @Published var contactSecurityState = ContactSecurityState(version: 1, contacts: [:], events: [])
     @Published var localProfiles: [LocalIdentity] = []
     @Published var localDeviceInventory = LocalDeviceInventory.empty
@@ -127,6 +128,7 @@ final class AppModel: ObservableObject {
     private let macNotificationsEnabledKey = "NotrusMac.notificationsEnabled"
     private let macNotificationContentVisibilityKey = "NotrusMac.notificationContentVisibility"
     private let macNotificationGroupPreviewEnabledKey = "NotrusMac.notificationGroupPreviewEnabled"
+    private let hapticFeedbackKey = "NotrusMac.hapticFeedbackEnabled"
     private let selectedThreadKey = "NotrusMac.selectedThreadID"
     private let groupEpochRotationInterval = 12
     private let configuredProtocolPolicy = ProtocolPolicyMode(
@@ -138,6 +140,15 @@ final class AppModel: ObservableObject {
     private var transparencySignerPins: [String: String]
     private var appInstanceId: String?
     private var currentDeviceDescriptor: DeviceDescriptor?
+
+    private func publishIfChanged<Value: Equatable>(
+        _ keyPath: ReferenceWritableKeyPath<AppModel, Value>,
+        _ value: Value
+    ) {
+        if self[keyPath: keyPath] != value {
+            self[keyPath: keyPath] = value
+        }
+    }
     private var relaySession: RelaySession?
     private var lastSentReadReceiptByThread: [String: String] = [:]
     private var cachedRelayHealth: RelayHealth?
@@ -175,6 +186,7 @@ final class AppModel: ObservableObject {
             rawValue: UserDefaults.standard.string(forKey: macNotificationContentVisibilityKey) ?? ""
         ) ?? .hidden
         self.macNotificationGroupPreviewEnabled = UserDefaults.standard.bool(forKey: macNotificationGroupPreviewEnabledKey)
+        self.hapticFeedbackEnabled = UserDefaults.standard.object(forKey: hapticFeedbackKey) as? Bool ?? true
         self.selectedThreadID = UserDefaults.standard.string(forKey: selectedThreadKey)
         self.transparencyPins = Self.loadPinnedHeads()
         self.transparencySignerPins = Self.loadPinnedSignerKeys()
@@ -819,6 +831,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func persistHapticFeedbackPreference() {
+        UserDefaults.standard.set(hapticFeedbackEnabled, forKey: hapticFeedbackKey)
+    }
+
     func setMacAppActive(_ active: Bool) {
         macAppActive = active
     }
@@ -1162,12 +1178,12 @@ final class AppModel: ObservableObject {
         try persistThreadStore()
         try persistSecurityState()
 
-        users = directory
-        currentUser = lookup[identity.id]
-        linkedDevices = deviceSnapshot.devices.sorted { $0.updatedAt > $1.updatedAt }
-        linkedDeviceEvents = deviceSnapshot.deviceEvents.sorted { $0.createdAt > $1.createdAt }
-        threads = visibleThreads
-        archivedThreads = archived
+        publishIfChanged(\.users, directory)
+        publishIfChanged(\.currentUser, lookup[identity.id])
+        publishIfChanged(\.linkedDevices, deviceSnapshot.devices.sorted { $0.updatedAt > $1.updatedAt })
+        publishIfChanged(\.linkedDeviceEvents, deviceSnapshot.deviceEvents.sorted { $0.createdAt > $1.createdAt })
+        publishIfChanged(\.threads, visibleThreads)
+        publishIfChanged(\.archivedThreads, archived)
         lastSuccessfulSyncAt = NotrusCrypto.isoNow()
 
         if selectedThreadID == nil {

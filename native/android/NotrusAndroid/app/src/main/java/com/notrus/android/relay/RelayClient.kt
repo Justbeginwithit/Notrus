@@ -12,7 +12,6 @@ import com.notrus.android.model.DeviceRevokeResponse
 import com.notrus.android.model.Jwk
 import com.notrus.android.model.LocalIdentity
 import com.notrus.android.model.PublicMlsKeyPackage
-import com.notrus.android.model.PublicSignalBundle
 import com.notrus.android.model.RelayAbuseControls
 import com.notrus.android.model.RelayMlsBootstrap
 import com.notrus.android.model.RelayMlsWelcomeEnvelope
@@ -33,6 +32,8 @@ import com.notrus.android.model.RegisterResponse
 import com.notrus.android.model.TransparencyEntry
 import com.notrus.android.model.TransparencySignerInfo
 import com.notrus.android.model.WitnessObservation
+import com.notrus.android.serialization.NotrusJsonCodecs.jsonToSignalBundle
+import com.notrus.android.serialization.NotrusJsonCodecs.signalBundleToJson
 import java.io.BufferedReader
 import java.io.IOException
 import java.io.InputStreamReader
@@ -96,7 +97,7 @@ class RelayClient(
             .put("prekeyFingerprint", identity.prekeyFingerprint)
             .put("prekeyPublicJwk", jwk(identity.prekeyPublicJwk))
             .put("prekeySignature", identity.prekeySignature)
-            .put("signalBundle", identity.standardsSignalBundle?.let(::signalBundleJson))
+            .put("signalBundle", identity.standardsSignalBundle?.let(::signalBundleToJson))
 
         deviceDescriptor?.let { body.put("device", deviceJson(it)) }
 
@@ -124,7 +125,7 @@ class RelayClient(
             .put("recoveryFingerprint", request.recoveryFingerprint)
             .put("recoveryPublicJwk", jwk(request.recoveryPublicJwk))
             .put("recoverySignature", request.recoverySignature)
-            .put("signalBundle", request.signalBundle?.let(::signalBundleJson))
+            .put("signalBundle", request.signalBundle?.let(::signalBundleToJson))
             .put("signingPublicJwk", jwk(request.signingPublicJwk))
             .put("userId", request.userId)
             .put("username", request.username)
@@ -548,7 +549,7 @@ class RelayClient(
             prekeySignature = nullableString(json, "prekeySignature"),
             signingPublicJwk = json.optJSONObject("signingPublicJwk")?.let(::jsonJwk),
             encryptionPublicJwk = json.optJSONObject("encryptionPublicJwk")?.let(::jsonJwk),
-            signalBundle = json.optJSONObject("signalBundle")?.let(::parseSignalBundle),
+            signalBundle = json.optJSONObject("signalBundle")?.let(::jsonToSignalBundle),
         )
 
     private fun parseThreads(array: JSONArray?): List<RelayThread> {
@@ -762,23 +763,6 @@ class RelayClient(
         }
     }
 
-    private fun jsonInt32(json: JSONObject, key: String, defaultValue: Int): Int {
-        if (!json.has(key) || json.isNull(key)) {
-            return defaultValue
-        }
-        val raw = json.opt(key) ?: return defaultValue
-        val longValue = when (raw) {
-            is Number -> raw.toLong()
-            is String -> raw.toLongOrNull() ?: return defaultValue
-            else -> return defaultValue
-        }
-        return if (longValue in Int.MIN_VALUE.toLong()..0xFFFF_FFFFL) {
-            longValue.toInt()
-        } else {
-            defaultValue
-        }
-    }
-
     private fun parseTransparencySigner(json: JSONObject?): TransparencySignerInfo? {
         val value = json ?: return null
         val algorithm = value.optString("algorithm").ifBlank { return null }
@@ -812,39 +796,10 @@ class RelayClient(
         return events
     }
 
-    private fun signalBundleJson(bundle: PublicSignalBundle): JSONObject =
-        JSONObject()
-            .put("deviceId", bundle.deviceId)
-            .put("identityKey", bundle.identityKey)
-            .put("kyberPreKeyId", bundle.kyberPreKeyId)
-            .put("kyberPreKeyPublic", bundle.kyberPreKeyPublic)
-            .put("kyberPreKeySignature", bundle.kyberPreKeySignature)
-            .put("preKeyId", bundle.preKeyId)
-            .put("preKeyPublic", bundle.preKeyPublic)
-            .put("registrationId", bundle.registrationId)
-            .put("signedPreKeyId", bundle.signedPreKeyId)
-            .put("signedPreKeyPublic", bundle.signedPreKeyPublic)
-            .put("signedPreKeySignature", bundle.signedPreKeySignature)
-
     private fun mlsKeyPackageJson(bundle: PublicMlsKeyPackage): JSONObject =
         JSONObject()
             .put("ciphersuite", bundle.ciphersuite)
             .put("keyPackage", bundle.keyPackage)
-
-    private fun parseSignalBundle(json: JSONObject): PublicSignalBundle =
-        PublicSignalBundle(
-            deviceId = jsonInt32(json, "deviceId", 1),
-            identityKey = json.optString("identityKey"),
-            kyberPreKeyId = jsonInt32(json, "kyberPreKeyId", 1),
-            kyberPreKeyPublic = json.optString("kyberPreKeyPublic"),
-            kyberPreKeySignature = json.optString("kyberPreKeySignature"),
-            preKeyId = jsonInt32(json, "preKeyId", 1),
-            preKeyPublic = json.optString("preKeyPublic"),
-            registrationId = jsonInt32(json, "registrationId", 1),
-            signedPreKeyId = jsonInt32(json, "signedPreKeyId", 1),
-            signedPreKeyPublic = json.optString("signedPreKeyPublic"),
-            signedPreKeySignature = json.optString("signedPreKeySignature"),
-        )
 
     private fun parseMlsBootstrap(json: JSONObject): RelayMlsBootstrap {
         val welcomes = mutableListOf<RelayMlsWelcomeEnvelope>()

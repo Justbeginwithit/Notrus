@@ -218,6 +218,7 @@ Current native-client boundary:
 - macOS live sync subscribes to authenticated relay events, reconnects with a silent periodic fallback, and can post local hidden-by-default notifications after local sync/decrypt while Notrus is still running.
 - Android and macOS now distinguish delivered/read state through relay delivery receipts, optional read receipts, and message info views for group receipt detail.
 - Message info includes exact sent, delivered, and read timestamps where available. Read receipts are separately controlled for sending read confirmations to others and for showing read confirmations received from others.
+- Android and macOS include an optional Haptic feedback setting for subtle local confirmation of sends, message actions, archive/delete/mute, privacy/read-receipt toggles, export/import success, and important warnings. Haptics are never the only state indicator.
 - Local message search and cross-device message edit/delete remain stable-track features. Search must stay local-only, and edit/delete must use authenticated tombstone/edited events rather than silently rewriting history.
 
 ## Recovery And Chat Backup
@@ -273,6 +274,7 @@ npm run test:attestation-service
 npm run test:attestation-enforcement
 npm run test:release-governance
 npm run test:security-suite
+npm run test:stable-polish-gate
 ```
 
 Native checks:

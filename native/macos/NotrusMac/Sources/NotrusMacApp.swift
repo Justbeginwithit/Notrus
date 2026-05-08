@@ -8,6 +8,21 @@ private extension Notification.Name {
     static let notrusOpenThreadFromNotification = Notification.Name("NotrusMac.OpenThreadFromNotification")
 }
 
+enum NotrusHapticFeedback {
+    static func perform(
+        _ pattern: NSHapticFeedbackManager.FeedbackPattern = .generic,
+        enabled: Bool
+    ) {
+        guard enabled else { return }
+        NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .default)
+    }
+}
+
+private func statusMessageNeedsSuccessHaptic(_ message: String) -> Bool {
+    let lowercased = message.lowercased()
+    return ["exported ", "imported ", "restored ", "saved "].contains { lowercased.contains($0) }
+}
+
 final class NotrusMacNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     static let shared = NotrusMacNotificationDelegate()
 
@@ -240,6 +255,16 @@ struct RootView: View {
             }
         } message: {
             Text(model.errorMessage ?? "Unknown error")
+        }
+        .onChange(of: model.errorMessage) { message in
+            if message != nil {
+                NotrusHapticFeedback.perform(.levelChange, enabled: model.hapticFeedbackEnabled)
+            }
+        }
+        .onChange(of: model.statusMessage) { message in
+            if statusMessageNeedsSuccessHaptic(message) {
+                NotrusHapticFeedback.perform(.generic, enabled: model.hapticFeedbackEnabled)
+            }
         }
         .onChange(of: scenePhase) { newPhase in
             guard lockOnBackground else {
@@ -1356,6 +1381,7 @@ struct ProtocolBadge: View {
 
 struct ConversationView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let thread: ConversationThread
     @State private var messageSearchText = ""
     @State private var activeSearchMatchIndex = 0
@@ -1375,6 +1401,10 @@ struct ConversationView: View {
     }
 
     var body: some View {
+        let matches = messageSearchMatches
+        let matchSet = Set(matches)
+        let activeMatchId = matches[safe: activeSearchMatchIndex]
+
         VStack(alignment: .leading, spacing: 18) {
             ConversationHeader(thread: thread)
 
@@ -1400,8 +1430,8 @@ struct ConversationView: View {
                 VStack(spacing: 10) {
                     ConversationMessageSearchBar(
                         query: $messageSearchText,
-                        currentMatch: messageSearchMatches.isEmpty ? 0 : activeSearchMatchIndex + 1,
-                        matchCount: messageSearchMatches.count,
+                        currentMatch: matches.isEmpty ? 0 : activeSearchMatchIndex + 1,
+                        matchCount: matches.count,
                         previous: {
                             moveSearchSelection(delta: -1, using: scrollProxy)
                         },
@@ -1416,9 +1446,8 @@ struct ConversationView: View {
                     )
 
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 12) {
+                        LazyVStack(alignment: .leading, spacing: 12) {
                             ForEach(thread.messages) { message in
-                                let activeMatchId = messageSearchMatches[safe: activeSearchMatchIndex]
                                 MessageBubble(
                                     message: message,
                                     isCurrentUser: message.senderId == model.currentIdentity?.id,
@@ -1427,8 +1456,10 @@ struct ConversationView: View {
                                     messageInfoText: model.messageInfoText(for: message, in: thread),
                                     searchQuery: messageSearchText,
                                     searchMatchActive: activeMatchId == message.id,
-                                    searchMatchVisible: messageSearchMatches.contains(message.id),
+                                    searchMatchVisible: matchSet.contains(message.id),
+                                    hapticsEnabled: model.hapticFeedbackEnabled,
                                     saveAttachment: { reference in
+                                        NotrusHapticFeedback.perform(.generic, enabled: model.hapticFeedbackEnabled)
                                         Task {
                                             await model.saveAttachment(reference, in: thread)
                                         }
@@ -1480,14 +1511,17 @@ struct ConversationView: View {
                 canSend: model.canSendMessage,
                 supported: thread.supported,
                 chooseAttachments: {
+                    NotrusHapticFeedback.perform(.alignment, enabled: model.hapticFeedbackEnabled)
                     Task {
                         await model.chooseAttachments()
                     }
                 },
                 removeAttachment: { attachmentId in
+                    NotrusHapticFeedback.perform(.alignment, enabled: model.hapticFeedbackEnabled)
                     model.removePendingAttachment(attachmentId)
                 }
             ) {
+                NotrusHapticFeedback.perform(.generic, enabled: model.hapticFeedbackEnabled)
                 Task {
                     await model.sendMessage()
                 }
@@ -1500,9 +1534,20 @@ struct ConversationView: View {
         guard !thread.messages.isEmpty else {
             return
         }
-        DispatchQueue.main.async {
-            if animated {
+        Task { @MainActor in
+            await Task.yield()
+            let shouldAnimate = animated && !reduceMotion
+            if shouldAnimate {
                 withAnimation(.easeOut(duration: 0.22)) {
+                    proxy.scrollTo(bottomAnchorId, anchor: .bottom)
+                }
+            } else {
+                proxy.scrollTo(bottomAnchorId, anchor: .bottom)
+            }
+
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            if shouldAnimate {
+                withAnimation(.easeOut(duration: 0.16)) {
                     proxy.scrollTo(bottomAnchorId, anchor: .bottom)
                 }
             } else {
@@ -1534,8 +1579,15 @@ struct ConversationView: View {
         guard let messageId = messageSearchMatches[safe: activeSearchMatchIndex] else {
             return
         }
-        withAnimation(.easeInOut(duration: 0.22)) {
+        let action = {
             proxy.scrollTo(messageId, anchor: .center)
+        }
+        if reduceMotion {
+            action()
+        } else {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                action()
+            }
         }
     }
 }
@@ -1624,6 +1676,7 @@ struct ConversationHeader: View {
                 Spacer(minLength: 8)
                 ProtocolBadge(label: thread.protocolLabel, supported: thread.supported)
                 Button {
+                    NotrusHapticFeedback.perform(.generic, enabled: model.hapticFeedbackEnabled)
                     Task {
                         if model.isThreadArchived(thread.id) {
                             await model.restoreConversation(thread.id)
@@ -1639,6 +1692,7 @@ struct ConversationHeader: View {
                 .help(model.isThreadArchived(thread.id) ? "Restore conversation" : "Archive conversation")
                 .disabled(model.isBusy)
                 Button {
+                    NotrusHapticFeedback.perform(.alignment, enabled: model.hapticFeedbackEnabled)
                     model.toggleConversationMuted(thread.id)
                 } label: {
                     Image(systemName: model.isThreadMuted(thread.id) ? "bell.slash.fill" : "bell")
@@ -1648,6 +1702,7 @@ struct ConversationHeader: View {
                 .help(model.isThreadMuted(thread.id) ? "Unmute notifications" : "Mute notifications")
                 .disabled(model.isBusy)
                 Button {
+                    NotrusHapticFeedback.perform(.levelChange, enabled: model.hapticFeedbackEnabled)
                     Task {
                         await model.resetConversationSession(thread.id)
                     }
@@ -1659,6 +1714,7 @@ struct ConversationHeader: View {
                 .help("Reset secure session and publish fresh pre-key bundle")
                 .disabled(model.isBusy)
                 Button {
+                    NotrusHapticFeedback.perform(.levelChange, enabled: model.hapticFeedbackEnabled)
                     Task {
                         await model.deleteConversationLocally(thread.id)
                     }
@@ -1727,6 +1783,7 @@ struct MessageBubble: View {
     let searchQuery: String
     let searchMatchActive: Bool
     let searchMatchVisible: Bool
+    let hapticsEnabled: Bool
     let saveAttachment: (SecureAttachmentReference) -> Void
     let deleteMessage: () -> Void
     let deleteMessageForEveryone: () -> Void
@@ -1827,18 +1884,22 @@ struct MessageBubble: View {
             .frame(maxWidth: 680, alignment: .leading)
             .contextMenu {
                 Button("Message Info") {
+                    NotrusHapticFeedback.perform(.alignment, enabled: hapticsEnabled)
                     messageInfoPresented = true
                 }
                 if isCurrentUser && message.status != "deleted-everyone" {
                     Button("Edit Message") {
+                        NotrusHapticFeedback.perform(.generic, enabled: hapticsEnabled)
                         editText = message.body
                         editPresented = true
                     }
                     Button("Delete For Everyone", role: .destructive) {
+                        NotrusHapticFeedback.perform(.levelChange, enabled: hapticsEnabled)
                         deleteMessageForEveryone()
                     }
                 }
                 Button("Delete Locally", role: .destructive) {
+                    NotrusHapticFeedback.perform(.levelChange, enabled: hapticsEnabled)
                     deleteMessage()
                 }
             }
@@ -1878,6 +1939,7 @@ struct MessageBubble: View {
                                 return
                             }
                             editPresented = false
+                            NotrusHapticFeedback.perform(.generic, enabled: hapticsEnabled)
                             editMessage(trimmed)
                         }
                         .keyboardShortcut(.defaultAction)
@@ -2498,6 +2560,7 @@ struct AccountCenterSheet: View {
                             Toggle(isOn: Binding(
                                 get: { model.privacyModeEnabled },
                                 set: { enabled in
+                                    NotrusHapticFeedback.perform(.alignment, enabled: model.hapticFeedbackEnabled)
                                     model.privacyModeEnabled = enabled
                                     model.persistPrivacyMode()
                                 }
@@ -2516,6 +2579,7 @@ struct AccountCenterSheet: View {
                             Toggle(isOn: Binding(
                                 get: { model.sendReadReceiptsToOthers },
                                 set: { enabled in
+                                    NotrusHapticFeedback.perform(.alignment, enabled: model.hapticFeedbackEnabled)
                                     model.sendReadReceiptsToOthers = enabled
                                     model.persistReadReceiptsPreference()
                                 }
@@ -2534,6 +2598,7 @@ struct AccountCenterSheet: View {
                             Toggle(isOn: Binding(
                                 get: { model.showReadReceiptsFromOthers },
                                 set: { enabled in
+                                    NotrusHapticFeedback.perform(.alignment, enabled: model.hapticFeedbackEnabled)
                                     model.showReadReceiptsFromOthers = enabled
                                     model.persistReadReceiptsPreference()
                                 }
@@ -2550,8 +2615,28 @@ struct AccountCenterSheet: View {
                             .toggleStyle(.switch)
 
                             Toggle(isOn: Binding(
+                                get: { model.hapticFeedbackEnabled },
+                                set: { enabled in
+                                    NotrusHapticFeedback.perform(.alignment, enabled: model.hapticFeedbackEnabled)
+                                    model.hapticFeedbackEnabled = enabled
+                                    model.persistHapticFeedbackPreference()
+                                }
+                            )) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Haptic feedback")
+                                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(NotrusPalette.ink)
+                                    Text(model.hapticFeedbackEnabled ? "Uses subtle trackpad feedback for sends, actions, deletes, and important warnings when this Mac supports it." : "Keeps visual confirmations but disables in-app haptic feedback.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .toggleStyle(.switch)
+
+                            Toggle(isOn: Binding(
                                 get: { model.macNotificationsEnabled },
                                 set: { enabled in
+                                    NotrusHapticFeedback.perform(.alignment, enabled: model.hapticFeedbackEnabled)
                                     model.macNotificationsEnabled = enabled
                                     model.persistMacNotificationPreferences()
                                 }
@@ -2570,6 +2655,7 @@ struct AccountCenterSheet: View {
                             Picker("Notification content", selection: Binding(
                                 get: { model.macNotificationContentVisibility },
                                 set: { visibility in
+                                    NotrusHapticFeedback.perform(.alignment, enabled: model.hapticFeedbackEnabled)
                                     model.macNotificationContentVisibility = visibility
                                     model.persistMacNotificationPreferences()
                                 }
@@ -2584,6 +2670,7 @@ struct AccountCenterSheet: View {
                             Toggle(isOn: Binding(
                                 get: { model.macNotificationGroupPreviewEnabled },
                                 set: { enabled in
+                                    NotrusHapticFeedback.perform(.alignment, enabled: model.hapticFeedbackEnabled)
                                     model.macNotificationGroupPreviewEnabled = enabled
                                     model.persistMacNotificationPreferences()
                                 }

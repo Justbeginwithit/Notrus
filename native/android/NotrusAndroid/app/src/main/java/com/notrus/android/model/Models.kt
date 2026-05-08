@@ -555,6 +555,7 @@ data class AppUiState(
     val notificationSoundEnabled: Boolean = true,
     val notificationVibrationEnabled: Boolean = true,
     val visualEffectsEnabled: Boolean = true,
+    val hapticFeedbackEnabled: Boolean = true,
     val colorThemePreset: String = "ocean",
     val themeMode: String = "system",
     val sendReadReceiptsToOthers: Boolean = true,

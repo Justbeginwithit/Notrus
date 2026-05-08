@@ -2,9 +2,14 @@
 
 ## Unreleased
 
+- Added a stable-release polish gate covering Android/macOS performance, animation, UI, UX, loading, and perceived-quality requirements before stable.
+- Added configurable subtle haptic feedback on Android and macOS for sends, message actions, archive/delete/mute, privacy/read-receipt toggles, export/import success, and important warnings.
+- Improved Android chat performance by moving sync thread materialization off the UI thread, keeping message lazy-list rows keyed/content-typed, memoizing local search highlighting, and removing full content-size animation from message bubbles to reduce keyboard/list jitter.
+- Improved macOS chat performance by rendering long message histories with `LazyVStack`, avoiding republishing unchanged sync lists, computing message-search match sets once per render, respecting Reduce Motion, and re-scrolling after layout settles so the newest synced message is visible.
+- Added `npm run test:stable-polish-gate` as a static regression gate for stable-polish invariants.
 - Moved the default hosted relay from the old ngrok URL to the stable Cloudflare-backed `https://relay.notrus.cloud` endpoint across Android, macOS, docs, and operator tooling.
 - Added the public witness endpoint `https://witness.notrus.cloud` and a graphical witness console at `https://witness.notrus.cloud/witness`.
-- Added a read-only witness operator model: the client-safe witness head endpoint stays public, while witness history and summary endpoints require `X-Notrus-Witness-Admin-Token` when configured.
+- Added a read-only witness operator model: the client-safe witness head endpoint stays public, while witness history and summary endpoints require `X-Notrus-Witness-Admin-Token` and fail closed when no witness admin token is configured.
 - Added a relay operator console naming refresh with the stable hosted console link `https://relay.notrus.cloud/admin`.
 - Added an endpoint provider guide covering Cloudflare Named Tunnel, Cloudflare Quick Tunnel, ngrok, DuckDNS + Caddy, and VPS/dedicated-host options, including current practical limits and recommended use cases.
 - Added Cloudflare Tunnel routing for separate relay and witness hostnames through the same named tunnel.

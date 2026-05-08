@@ -319,7 +319,7 @@ export function createWitnessServer() {
       }
 
       if (request.method === "GET" && url.pathname === "/api/witness/log") {
-        if (WITNESS_ADMIN_TOKEN && !requireWitnessAdmin(request, response)) {
+        if (!requireWitnessAdmin(request, response)) {
           return;
         }
 
