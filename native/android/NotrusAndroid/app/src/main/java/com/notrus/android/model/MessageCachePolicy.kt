@@ -102,7 +102,7 @@ object MessageCachePolicy {
         if (cached.hidden) {
             return 3
         }
-        if (cached.status == "ok" && cached.body.isNotBlank()) {
+        if (cached.status == "ok" && (cached.body.isNotBlank() || cached.attachments.isNotEmpty())) {
             return 3
         }
         if (cached.status == "missing-local-state" && cached.body.isNotBlank()) {

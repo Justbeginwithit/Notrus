@@ -2,6 +2,7 @@ node_modules
 data/store.json
 data/witness-store.json
 data/transparency-signing-key.json
+data/attachment-chunks/
 data/xiaomi-firmware-watch/
 .secrets/
 .notrus-local.env

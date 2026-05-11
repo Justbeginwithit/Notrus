@@ -3943,7 +3943,7 @@ final class AppModel: ObservableObject {
     private func canSkipLocalDecrypt(_ cached: CachedMessageState?) -> Bool {
         guard let cached else { return false }
         if cached.hidden { return true }
-        if cached.status == "ok", !cached.body.isEmpty { return true }
+        if cached.status == "ok", !cached.body.isEmpty || !cached.attachments.isEmpty { return true }
         if cached.status == "missing-local-state", !cached.body.isEmpty { return true }
         return false
     }

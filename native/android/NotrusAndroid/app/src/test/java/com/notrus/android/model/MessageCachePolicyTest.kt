@@ -67,4 +67,52 @@ class MessageCachePolicyTest {
         assertFalse(MessageCachePolicy.isArchived(record))
         assertFalse(MessageCachePolicy.isLocallyDeleted(record))
     }
+
+    @Test
+    fun attachmentOnlyMessagesAreReusableLocalPlaintext() {
+        val cached = CachedMessageState(
+            attachments = listOf(
+                SecureAttachmentReference(
+                    attachmentKey = "key",
+                    byteLength = 12,
+                    fileName = "photo.jpg",
+                    id = "att-1",
+                    mediaType = "image/jpeg",
+                    sha256 = "sha",
+                ),
+            ),
+            body = "",
+            status = "ok",
+        )
+
+        assertTrue(MessageCachePolicy.canSkipLocalDecrypt(cached))
+    }
+
+    @Test
+    fun attachmentOnlyCacheBeatsLaterReplayFailure() {
+        val cached = CachedMessageState(
+            attachments = listOf(
+                SecureAttachmentReference(
+                    attachmentKey = "key",
+                    byteLength = 12,
+                    fileName = "photo.jpg",
+                    id = "att-1",
+                    mediaType = "image/jpeg",
+                    sha256 = "sha",
+                ),
+            ),
+            body = "",
+            status = "ok",
+        )
+        val replayFailure = CachedMessageState(
+            body = "Unable to decrypt the Signal message: message with old counter 3 / 2",
+            status = "invalid",
+        )
+
+        val merged = MessageCachePolicy.mergeCachedStates(cached, replayFailure)
+
+        assertEquals("ok", merged.status)
+        assertEquals(1, merged.attachments.size)
+        assertEquals("", merged.body)
+    }
 }
