@@ -807,13 +807,17 @@ struct MessagePostResponse: Codable {
 
 struct AttachmentUploadRequest: Codable, Hashable {
     let byteLength: Int
-    let ciphertext: String
+    let ciphertext: String?
     let createdAt: String
     let id: String
-    let iv: String
+    let iv: String?
     let senderId: String?
     let sha256: String
     let threadId: String?
+    let transport: String?
+    let chunkSize: Int?
+    let chunkCount: Int?
+    let chunks: [AttachmentChunkRecord]
     let transportPadding: String?
 }
 
@@ -822,15 +826,92 @@ struct AttachmentUploadResponse: Codable {
     let attachmentId: String
 }
 
+struct AttachmentChunkRecord: Codable, Hashable {
+    let byteLength: Int
+    let ciphertext: String?
+    let index: Int
+    let iv: String
+    let sha256: String
+}
+
+struct AttachmentChunkUploadResponse: Codable {
+    let ok: Bool
+    let attachmentId: String
+    let index: Int
+}
+
 struct RelayAttachment: Codable, Hashable {
     let byteLength: Int
-    let ciphertext: String
+    let ciphertext: String?
     let createdAt: String
     let id: String
-    let iv: String
+    let iv: String?
     let senderId: String
     let sha256: String
     let threadId: String
+    let transport: String?
+    let chunkSize: Int?
+    let chunkCount: Int?
+    let chunks: [AttachmentChunkRecord]
+
+    init(
+        byteLength: Int,
+        ciphertext: String? = nil,
+        createdAt: String,
+        id: String,
+        iv: String? = nil,
+        senderId: String,
+        sha256: String,
+        threadId: String,
+        transport: String? = nil,
+        chunkSize: Int? = nil,
+        chunkCount: Int? = nil,
+        chunks: [AttachmentChunkRecord] = []
+    ) {
+        self.byteLength = byteLength
+        self.ciphertext = ciphertext
+        self.createdAt = createdAt
+        self.id = id
+        self.iv = iv
+        self.senderId = senderId
+        self.sha256 = sha256
+        self.threadId = threadId
+        self.transport = transport
+        self.chunkSize = chunkSize
+        self.chunkCount = chunkCount
+        self.chunks = chunks
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case byteLength
+        case ciphertext
+        case createdAt
+        case id
+        case iv
+        case senderId
+        case sha256
+        case threadId
+        case transport
+        case chunkSize
+        case chunkCount
+        case chunks
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        byteLength = try container.decode(Int.self, forKey: .byteLength)
+        ciphertext = try container.decodeIfPresent(String.self, forKey: .ciphertext)
+        createdAt = try container.decode(String.self, forKey: .createdAt)
+        id = try container.decode(String.self, forKey: .id)
+        iv = try container.decodeIfPresent(String.self, forKey: .iv)
+        senderId = try container.decode(String.self, forKey: .senderId)
+        sha256 = try container.decode(String.self, forKey: .sha256)
+        threadId = try container.decode(String.self, forKey: .threadId)
+        transport = try container.decodeIfPresent(String.self, forKey: .transport)
+        chunkSize = try container.decodeIfPresent(Int.self, forKey: .chunkSize)
+        chunkCount = try container.decodeIfPresent(Int.self, forKey: .chunkCount)
+        chunks = try container.decodeIfPresent([AttachmentChunkRecord].self, forKey: .chunks) ?? []
+    }
 }
 
 struct SecureAttachmentReference: Codable, Hashable, Identifiable {
@@ -963,7 +1044,7 @@ extension OutboundMessage {
 
 extension AttachmentUploadRequest {
     func relayTransportForm() -> AttachmentUploadRequest {
-        let visibleSize = ciphertext.count + iv.count + sha256.count
+        let visibleSize = (ciphertext?.count ?? 0) + (iv?.count ?? 0) + sha256.count
         return AttachmentUploadRequest(
             byteLength: byteLength,
             ciphertext: ciphertext,
@@ -973,6 +1054,10 @@ extension AttachmentUploadRequest {
             senderId: nil,
             sha256: sha256,
             threadId: nil,
+            transport: transport,
+            chunkSize: chunkSize,
+            chunkCount: chunkCount,
+            chunks: chunks,
             transportPadding: transportPaddingFill(visibleSize: max(visibleSize, 1))
         )
     }

@@ -11,7 +11,7 @@ Notrus protects message and attachment content from the relay, but it does not e
 - Message delivery: opaque mailbox handle, delivery capability use, encrypted wire message, message kind, message size, and timing.
 - Delivery/read receipts: recipient account id, thread id, last delivered/read message id, and timestamp needed for user-visible receipt state.
 - Sync: scoped users and threads needed by the authenticated account.
-- Attachments: encrypted attachment blob, size, ciphertext integrity data, upload/fetch timing, and access-control state.
+- Attachments: encrypted attachment manifests/chunks, size, ciphertext integrity data, upload/fetch timing, and access-control state.
 - Event streaming: authenticated listener timing and generic sync-required events.
 - Notification registration: hashed wake-up registration identifier, platform, registration mode, and device association.
 - Account reset, device revoke, and admin actions: event timing and state changes needed for safety and abuse handling.

@@ -415,6 +415,21 @@ struct RelayClient {
         )
     }
 
+    func uploadAttachmentChunk(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        attachmentId: String,
+        chunk: AttachmentChunkRecord
+    ) async throws -> AttachmentChunkUploadResponse {
+        try await send(
+            "/api/mailboxes/\(mailboxHandle)/attachments/\(attachmentId)/chunks",
+            method: "POST",
+            body: chunk,
+            authorizationToken: deliveryCapability,
+            decode: AttachmentChunkUploadResponse.self
+        )
+    }
+
     func fetchAttachment(
         mailboxHandle: String,
         deliveryCapability: String,
@@ -424,6 +439,19 @@ struct RelayClient {
             "/api/mailboxes/\(mailboxHandle)/attachments/\(attachmentId)",
             authorizationToken: deliveryCapability,
             decode: RelayAttachment.self
+        )
+    }
+
+    func fetchAttachmentChunk(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        attachmentId: String,
+        index: Int
+    ) async throws -> AttachmentChunkRecord {
+        try await send(
+            "/api/mailboxes/\(mailboxHandle)/attachments/\(attachmentId)/chunks/\(index)",
+            authorizationToken: deliveryCapability,
+            decode: AttachmentChunkRecord.self
         )
     }
 

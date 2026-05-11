@@ -7,7 +7,7 @@ The relay operator can provide availability, routing, retention, abuse controls,
 - Account and device records.
 - Public identity material.
 - Thread membership and delivery timing.
-- Ciphertext queues and encrypted attachment blobs.
+- Ciphertext queues and encrypted attachment manifests/chunks.
 - Notification registration hashes.
 - Rate-limit and abuse-control state.
 - Admin block, unblock, and delete state if admin API is enabled.

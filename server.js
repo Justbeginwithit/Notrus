@@ -34,6 +34,9 @@ const SECRET_DIR = env("NOTRUS_SECRET_DIR")
 const STORE_PATH = env("NOTRUS_STORE_PATH")
   ? path.resolve(env("NOTRUS_STORE_PATH"))
   : path.join(DATA_DIR, "store.json");
+const ATTACHMENT_CHUNK_DIR = env("NOTRUS_ATTACHMENT_CHUNK_DIR")
+  ? path.resolve(env("NOTRUS_ATTACHMENT_CHUNK_DIR"))
+  : path.join(DATA_DIR, "attachment-chunks");
 const TRANSPARENCY_KEY_PATH = env("NOTRUS_TRANSPARENCY_KEY_PATH")
   ? path.resolve(env("NOTRUS_TRANSPARENCY_KEY_PATH"))
   : path.join(SECRET_DIR, "transparency-signing-key.json");
@@ -60,6 +63,10 @@ const DIRECTORY_SEARCH_LIMIT = Number(process.env.DIRECTORY_SEARCH_LIMIT || 10);
 const DIRECTORY_SEARCH_MIN_LENGTH = Number(process.env.DIRECTORY_SEARCH_MIN_LENGTH || 3);
 const MESSAGE_RETENTION_MS = Number(process.env.MESSAGE_RETENTION_MS || 14 * 24 * 60 * 60 * 1000);
 const ATTACHMENT_RETENTION_MS = Number(process.env.ATTACHMENT_RETENTION_MS || 14 * 24 * 60 * 60 * 1000);
+const MAX_ATTACHMENT_BYTES = Number(process.env.MAX_ATTACHMENT_BYTES || 1024 * 1024 * 1024);
+const ATTACHMENT_CHUNK_TRANSPORT = "chunked-aes-gcm-v1";
+const ATTACHMENT_CHUNK_MAX_BODY_BYTES = Number(process.env.ATTACHMENT_CHUNK_MAX_BODY_BYTES || 6_000_000);
+const ATTACHMENT_CHUNK_MAX_PLAINTEXT_BYTES = Number(process.env.ATTACHMENT_CHUNK_MAX_PLAINTEXT_BYTES || 4 * 1024 * 1024);
 const REPORT_RETENTION_MS = Number(process.env.REPORT_RETENTION_MS || 7 * 24 * 60 * 60 * 1000);
 const DEVICE_EVENT_RETENTION_MS = Number(process.env.DEVICE_EVENT_RETENTION_MS || 30 * 24 * 60 * 60 * 1000);
 const SESSION_TOKEN_TTL_MS = Number(process.env.SESSION_TOKEN_TTL_MS || 15 * 60 * 1000);
@@ -427,15 +434,15 @@ function queuePersist() {
   return persistQueue;
 }
 
-async function readJsonBody(request) {
+async function readJsonBody(request, { maxBytes = 1_000_000 } = {}) {
   const chunks = [];
   let totalBytes = 0;
 
   for await (const chunk of request) {
     totalBytes += chunk.length;
 
-    if (totalBytes > 1_000_000) {
-      throw new Error("Request body exceeded the 1 MB limit.");
+    if (totalBytes > maxBytes) {
+      throw new Error(`Request body exceeded the ${maxBytes} byte limit.`);
     }
 
     chunks.push(chunk);
@@ -1095,6 +1102,35 @@ function isNonEmptyString(value, maxLength = 500) {
   return typeof value === "string" && value.trim().length > 0 && value.trim().length <= maxLength;
 }
 
+function isSafeAttachmentByteLength(value) {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value > 0 &&
+    value <= MAX_ATTACHMENT_BYTES
+  );
+}
+
+function attachmentStorageSegment(value) {
+  return createHash("sha256").update(String(value)).digest("hex");
+}
+
+function attachmentChunkPath(threadId, attachmentId, chunkIndex) {
+  return path.join(
+    ATTACHMENT_CHUNK_DIR,
+    attachmentStorageSegment(threadId),
+    attachmentStorageSegment(attachmentId),
+    `${chunkIndex}.json`
+  );
+}
+
+function removeAttachmentChunkDirectory(threadId, attachmentId) {
+  const directory = path.dirname(attachmentChunkPath(threadId, attachmentId, 0));
+  fs.rm(directory, { recursive: true, force: true }).catch((error) => {
+    console.warn("Failed to remove expired encrypted attachment chunks:", error.message);
+  });
+}
+
 function isSafeObjectKey(value, maxLength = 500) {
   if (!isNonEmptyString(value, maxLength)) {
     return false;
@@ -1389,6 +1425,39 @@ function normalizeUserRecord(user) {
   };
 }
 
+function normalizeAttachmentRecord(attachment) {
+  if (!attachment || typeof attachment !== "object") {
+    return attachment;
+  }
+
+  if (attachment.transport === ATTACHMENT_CHUNK_TRANSPORT) {
+    return {
+      ...attachment,
+      chunks: Array.isArray(attachment.chunks)
+        ? attachment.chunks
+            .map((chunk) => ({
+              byteLength:
+                typeof chunk?.byteLength === "number" && Number.isInteger(chunk.byteLength)
+                  ? chunk.byteLength
+                  : null,
+              index: typeof chunk?.index === "number" && Number.isInteger(chunk.index) ? chunk.index : null,
+              iv: isNonEmptyString(chunk?.iv, 400) ? chunk.iv.trim() : null,
+              sha256: isNonEmptyString(chunk?.sha256, 200) ? chunk.sha256.trim() : null,
+            }))
+            .filter((chunk) => chunk.index !== null && chunk.byteLength !== null && chunk.iv && chunk.sha256)
+        : [],
+      sha256: isNonEmptyString(attachment.sha256, 200) ? attachment.sha256.trim() : null,
+    };
+  }
+
+  return {
+    ...attachment,
+    ciphertext: isNonEmptyString(attachment.ciphertext, 8_000_000) ? attachment.ciphertext.trim() : null,
+    iv: isNonEmptyString(attachment.iv, 400) ? attachment.iv.trim() : null,
+    sha256: isNonEmptyString(attachment.sha256, 200) ? attachment.sha256.trim() : null,
+  };
+}
+
 function normalizeThreadRecord(thread) {
   if (!thread || typeof thread !== "object") {
     return thread;
@@ -1411,14 +1480,7 @@ function normalizeThreadRecord(thread) {
           ratchetPublicJwk: normalizePublicJwk(message.ratchetPublicJwk),
         }))
       : [],
-    attachments: Array.isArray(thread.attachments)
-      ? thread.attachments.map((attachment) => ({
-          ...attachment,
-          ciphertext: isNonEmptyString(attachment.ciphertext, 8_000_000) ? attachment.ciphertext.trim() : null,
-          iv: isNonEmptyString(attachment.iv, 400) ? attachment.iv.trim() : null,
-          sha256: isNonEmptyString(attachment.sha256, 200) ? attachment.sha256.trim() : null,
-        }))
-      : [],
+    attachments: Array.isArray(thread.attachments) ? thread.attachments.map(normalizeAttachmentRecord) : [],
   };
 }
 
@@ -2098,17 +2160,12 @@ function sanitizeAttachmentRecord(attachment, { senderId, threadId }) {
     !attachment ||
     !isNonEmptyString(attachment.id, 120) ||
     !isNonEmptyString(attachment.createdAt, 60) ||
-    !isNonEmptyString(attachment.iv, 400) ||
-    !isNonEmptyString(attachment.ciphertext, 8_000_000) ||
     !isNonEmptyString(attachment.sha256, 200)
   ) {
     return null;
   }
 
-  const byteLength =
-    typeof attachment.byteLength === "number" && Number.isInteger(attachment.byteLength) && attachment.byteLength > 0
-      ? attachment.byteLength
-      : null;
+  const byteLength = isSafeAttachmentByteLength(attachment.byteLength) ? attachment.byteLength : null;
   if (!byteLength) {
     return null;
   }
@@ -2117,6 +2174,82 @@ function sanitizeAttachmentRecord(attachment, { senderId, threadId }) {
   const attachmentThreadId = isNonEmptyString(attachment.threadId, 160) ? attachment.threadId.trim() : threadId;
 
   if (attachmentSenderId !== senderId || attachmentThreadId !== threadId) {
+    return null;
+  }
+
+  if (attachment.transport === ATTACHMENT_CHUNK_TRANSPORT) {
+    const chunkSize =
+      typeof attachment.chunkSize === "number" &&
+      Number.isInteger(attachment.chunkSize) &&
+      attachment.chunkSize > 0 &&
+      attachment.chunkSize <= ATTACHMENT_CHUNK_MAX_PLAINTEXT_BYTES
+        ? attachment.chunkSize
+        : null;
+    const chunkCount =
+      typeof attachment.chunkCount === "number" &&
+      Number.isInteger(attachment.chunkCount) &&
+      attachment.chunkCount > 0 &&
+      attachment.chunkCount <= Math.ceil(MAX_ATTACHMENT_BYTES / Math.max(1, ATTACHMENT_CHUNK_MAX_PLAINTEXT_BYTES))
+        ? attachment.chunkCount
+        : null;
+    const chunks = Array.isArray(attachment.chunks) ? attachment.chunks : null;
+    if (!chunkSize || !chunkCount || !chunks || chunks.length !== chunkCount) {
+      return null;
+    }
+
+    const sanitizedChunks = [];
+    let totalBytes = 0;
+    const seen = new Set();
+    for (const chunk of chunks) {
+      const index =
+        typeof chunk?.index === "number" && Number.isInteger(chunk.index) && chunk.index >= 0 && chunk.index < chunkCount
+          ? chunk.index
+          : null;
+      const chunkByteLength =
+        typeof chunk?.byteLength === "number" &&
+        Number.isInteger(chunk.byteLength) &&
+        chunk.byteLength > 0 &&
+        chunk.byteLength <= chunkSize
+          ? chunk.byteLength
+          : null;
+      if (
+        index === null ||
+        chunkByteLength === null ||
+        seen.has(index) ||
+        !isNonEmptyString(chunk.iv, 400) ||
+        !isNonEmptyString(chunk.sha256, 200)
+      ) {
+        return null;
+      }
+      seen.add(index);
+      totalBytes += chunkByteLength;
+      sanitizedChunks.push({
+        byteLength: chunkByteLength,
+        index,
+        iv: chunk.iv.trim(),
+        sha256: chunk.sha256.trim(),
+      });
+    }
+    sanitizedChunks.sort((left, right) => left.index - right.index);
+    if (totalBytes !== byteLength || sanitizedChunks.some((chunk, expectedIndex) => chunk.index !== expectedIndex)) {
+      return null;
+    }
+
+    return {
+      byteLength,
+      chunkCount,
+      chunkSize,
+      chunks: sanitizedChunks,
+      createdAt: attachment.createdAt.trim(),
+      id: attachment.id.trim(),
+      senderId: attachmentSenderId,
+      sha256: attachment.sha256.trim(),
+      threadId: attachmentThreadId,
+      transport: ATTACHMENT_CHUNK_TRANSPORT,
+    };
+  }
+
+  if (!isNonEmptyString(attachment.iv, 400) || !isNonEmptyString(attachment.ciphertext, 8_000_000)) {
     return null;
   }
 
@@ -2272,6 +2405,11 @@ function pruneExpiredArtifacts() {
 
     const keptAttachments = thread.attachments.filter((attachment) => !isExpired(attachment.createdAt, ATTACHMENT_RETENTION_MS));
     if (keptAttachments.length !== thread.attachments.length) {
+      for (const attachment of thread.attachments) {
+        if (isExpired(attachment.createdAt, ATTACHMENT_RETENTION_MS) && attachment.transport === ATTACHMENT_CHUNK_TRANSPORT) {
+          removeAttachmentChunkDirectory(thread.id, attachment.id);
+        }
+      }
       thread.attachments = keptAttachments;
       mutated = true;
     }
@@ -4351,7 +4489,7 @@ async function handleUploadAttachment(request, response, threadId, options = {})
 
   const attachment = sanitizeAttachmentRecord(body, { senderId, threadId });
   if (!attachment) {
-    sendError(request, response, 400, "Encrypted attachments must include senderId, threadId, createdAt, iv, ciphertext, sha256, and byteLength.");
+    sendError(request, response, 400, "Encrypted attachments must include a valid legacy ciphertext or a valid chunked manifest.");
     return;
   }
 
@@ -4388,6 +4526,120 @@ async function handleFetchAttachment(request, response, threadId, attachmentId, 
   }
 
   sendJson(request, response, 200, attachment);
+}
+
+function requireChunkedAttachment(request, response, thread, attachmentId) {
+  const attachment = thread.attachments.find((entry) => entry.id === attachmentId);
+  if (!attachment) {
+    sendError(request, response, 404, "Encrypted attachment not found.");
+    return null;
+  }
+  if (attachment.transport !== ATTACHMENT_CHUNK_TRANSPORT) {
+    sendError(request, response, 400, "This encrypted attachment does not use chunked transport.");
+    return null;
+  }
+  return attachment;
+}
+
+async function handleUploadAttachmentChunk(request, response, threadId, attachmentId, options = {}) {
+  const thread = getStoredThread(threadId);
+  if (!thread) {
+    sendError(request, response, 404, "Thread not found.");
+    return;
+  }
+
+  const senderId = options.forcedSenderId ?? "";
+  if (!thread.participantIds.includes(senderId)) {
+    sendError(request, response, 403, "Only participants may upload attachments for this thread.");
+    return;
+  }
+
+  const attachment = requireChunkedAttachment(request, response, thread, attachmentId);
+  if (!attachment) {
+    return;
+  }
+  if (attachment.senderId !== senderId) {
+    sendError(request, response, 403, "Only the attachment sender may upload encrypted chunks.");
+    return;
+  }
+
+  const body = await readJsonBody(request, { maxBytes: ATTACHMENT_CHUNK_MAX_BODY_BYTES });
+  const index =
+    typeof body.index === "number" && Number.isInteger(body.index) && body.index >= 0 && body.index < attachment.chunkCount
+      ? body.index
+      : null;
+  if (
+    index === null ||
+    !isNonEmptyString(body.iv, 400) ||
+    !isNonEmptyString(body.ciphertext, ATTACHMENT_CHUNK_MAX_BODY_BYTES) ||
+    !isNonEmptyString(body.sha256, 200)
+  ) {
+    sendError(request, response, 400, "Encrypted attachment chunks must include index, iv, ciphertext, and sha256.");
+    return;
+  }
+
+  const descriptor = attachment.chunks[index];
+  if (descriptor.iv !== body.iv.trim() || descriptor.sha256 !== body.sha256.trim()) {
+    sendError(request, response, 400, "Encrypted attachment chunk metadata does not match the manifest.");
+    return;
+  }
+
+  const chunkPath = attachmentChunkPath(threadId, attachmentId, index);
+  await fs.mkdir(path.dirname(chunkPath), { recursive: true });
+  await fs.writeFile(
+    chunkPath,
+    JSON.stringify({
+      ciphertext: body.ciphertext.trim(),
+      index,
+      iv: body.iv.trim(),
+      sha256: body.sha256.trim(),
+    }),
+    "utf8"
+  );
+  sendJson(request, response, 201, { ok: true, attachmentId, index });
+}
+
+async function handleFetchAttachmentChunk(request, response, threadId, attachmentId, chunkIndex, url, options = {}) {
+  const thread = getStoredThread(threadId);
+  if (!thread) {
+    sendError(request, response, 404, "Thread not found.");
+    return;
+  }
+
+  const userId = options.forcedUserId ?? url.searchParams.get("userId");
+  if (!isNonEmptyString(userId, 120) || !thread.participantIds.includes(userId)) {
+    sendError(request, response, 403, "Only thread participants may fetch encrypted attachment chunks.");
+    return;
+  }
+
+  const attachment = requireChunkedAttachment(request, response, thread, attachmentId);
+  if (!attachment) {
+    return;
+  }
+
+  const index = Number(chunkIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= attachment.chunkCount) {
+    sendError(request, response, 404, "Encrypted attachment chunk not found.");
+    return;
+  }
+
+  try {
+    const raw = await fs.readFile(attachmentChunkPath(threadId, attachmentId, index), "utf8");
+    const chunk = JSON.parse(raw);
+    sendJson(request, response, 200, {
+      byteLength: attachment.chunks[index].byteLength,
+      ciphertext: chunk.ciphertext,
+      index,
+      iv: chunk.iv,
+      sha256: chunk.sha256,
+    });
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      sendError(request, response, 404, "Encrypted attachment chunk not found.");
+      return;
+    }
+    throw error;
+  }
 }
 
 async function handlePrivacySync(request, response) {
@@ -5078,6 +5330,28 @@ async function handleFetchMailboxAttachment(request, response, mailboxHandle, at
   });
 }
 
+async function handleUploadMailboxAttachmentChunk(request, response, mailboxHandle, attachmentId) {
+  const capability = requireMailboxCapability(request, response, mailboxHandle);
+  if (!capability) {
+    return;
+  }
+
+  await handleUploadAttachmentChunk(request, response, capability.threadId, attachmentId, {
+    forcedSenderId: capability.userId,
+  });
+}
+
+async function handleFetchMailboxAttachmentChunk(request, response, mailboxHandle, attachmentId, chunkIndex, url) {
+  const capability = requireMailboxCapability(request, response, mailboxHandle);
+  if (!capability) {
+    return;
+  }
+
+  await handleFetchAttachmentChunk(request, response, capability.threadId, attachmentId, chunkIndex, url, {
+    forcedUserId: capability.userId,
+  });
+}
+
 async function requestListener(request, response) {
   try {
     const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
@@ -5335,6 +5609,32 @@ async function requestListener(request, response) {
     const mailboxAttachmentUploadMatch = pathname.match(/^\/api\/mailboxes\/([^/]+)\/attachments$/);
     if (request.method === "POST" && mailboxAttachmentUploadMatch) {
       await handleUploadMailboxAttachment(request, response, decodeURIComponent(mailboxAttachmentUploadMatch[1]));
+      return;
+    }
+
+    const mailboxAttachmentChunkUploadMatch = pathname.match(/^\/api\/mailboxes\/([^/]+)\/attachments\/([^/]+)\/chunks$/);
+    if (request.method === "POST" && mailboxAttachmentChunkUploadMatch) {
+      await handleUploadMailboxAttachmentChunk(
+        request,
+        response,
+        decodeURIComponent(mailboxAttachmentChunkUploadMatch[1]),
+        decodeURIComponent(mailboxAttachmentChunkUploadMatch[2])
+      );
+      return;
+    }
+
+    const mailboxAttachmentChunkFetchMatch = pathname.match(
+      /^\/api\/mailboxes\/([^/]+)\/attachments\/([^/]+)\/chunks\/([^/]+)$/
+    );
+    if (request.method === "GET" && mailboxAttachmentChunkFetchMatch) {
+      await handleFetchMailboxAttachmentChunk(
+        request,
+        response,
+        decodeURIComponent(mailboxAttachmentChunkFetchMatch[1]),
+        decodeURIComponent(mailboxAttachmentChunkFetchMatch[2]),
+        decodeURIComponent(mailboxAttachmentChunkFetchMatch[3]),
+        url
+      );
       return;
     }
 

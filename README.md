@@ -210,7 +210,7 @@ Android distribution posture:
 Current native-client boundary:
 
 - direct chats work across macOS and Android
-- encrypted mailbox attachments on the standards direct path work on both native clients
+- encrypted mailbox attachments on the standards direct path work on both native clients, using chunked encrypted transport for files up to 1 GB per attachment
 - standards-group messaging works across macOS and Android through native MLS or compatible fanout transport, depending on client state
 - both clients can read and send compatible standards-group traffic on the current relay policy path
 - groups currently support up to 32 members by default; 3 to 12 members is the recommended beta test range

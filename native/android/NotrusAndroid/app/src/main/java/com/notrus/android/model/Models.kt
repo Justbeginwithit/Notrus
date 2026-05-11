@@ -158,13 +158,17 @@ data class RelayMessage(
 
 data class AttachmentUploadRequest(
     val byteLength: Int,
-    val ciphertext: String,
+    val ciphertext: String? = null,
     val createdAt: String,
     val id: String,
-    val iv: String,
+    val iv: String? = null,
     val senderId: String? = null,
     val sha256: String,
     val threadId: String? = null,
+    val transport: String? = null,
+    val chunkSize: Int? = null,
+    val chunkCount: Int? = null,
+    val chunks: List<AttachmentChunkRecord> = emptyList(),
     val transportPadding: String? = null,
 )
 
@@ -173,15 +177,33 @@ data class AttachmentUploadResponse(
     val attachmentId: String,
 )
 
+data class AttachmentChunkRecord(
+    val byteLength: Int,
+    val index: Int,
+    val iv: String,
+    val sha256: String,
+    val ciphertext: String? = null,
+)
+
+data class AttachmentChunkUploadResponse(
+    val ok: Boolean,
+    val attachmentId: String,
+    val index: Int,
+)
+
 data class RelayAttachment(
     val byteLength: Int,
-    val ciphertext: String,
+    val ciphertext: String? = null,
     val createdAt: String,
     val id: String,
-    val iv: String,
+    val iv: String? = null,
     val senderId: String,
     val sha256: String,
     val threadId: String,
+    val transport: String? = null,
+    val chunkSize: Int? = null,
+    val chunkCount: Int? = null,
+    val chunks: List<AttachmentChunkRecord> = emptyList(),
 )
 
 data class RelayThread(

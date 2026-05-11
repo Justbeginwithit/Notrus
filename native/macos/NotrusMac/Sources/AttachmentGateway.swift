@@ -23,7 +23,7 @@ enum AttachmentGatewayError: LocalizedError {
 }
 
 enum AttachmentGateway {
-    static let maxAttachmentBytes = 25 * 1024 * 1024
+    static let maxAttachmentBytes = 1024 * 1024 * 1024
 
     static func importAttachments() throws -> [LocalAttachmentDraft] {
         let panel = NSOpenPanel()
@@ -67,6 +67,12 @@ enum AttachmentGateway {
     }
 
     static func saveAttachment(data: Data, reference: SecureAttachmentReference) throws {
+        let url = try destinationURL(for: reference)
+        try data.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    static func destinationURL(for reference: SecureAttachmentReference) throws -> URL {
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = sanitizedFileName(reference.fileName)
@@ -75,9 +81,7 @@ enum AttachmentGateway {
         guard panel.runModal() == .OK, let url = panel.url else {
             throw AttachmentGatewayError.saveCancelled
         }
-
-        try data.write(to: url, options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        return url
     }
 
     static func sanitizedFileName(_ raw: String) -> String {

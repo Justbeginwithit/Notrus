@@ -30,6 +30,17 @@ enum NotrusCryptoError: LocalizedError {
     }
 }
 
+struct SealedAttachmentChunkFile {
+    let descriptor: AttachmentChunkRecord
+    let url: URL
+}
+
+struct SealedFileAttachment {
+    let request: AttachmentUploadRequest
+    let reference: SecureAttachmentReference
+    let chunkFiles: [SealedAttachmentChunkFile]
+}
+
 enum SigningPrivateKeyHandle {
     case secureEnclave(SecureEnclave.P256.Signing.PrivateKey)
     case software(P256.Signing.PrivateKey)
@@ -78,6 +89,10 @@ enum KeyAgreementPrivateKeyHandle {
 
 enum NotrusCrypto {
     static let messagePadBuckets = [256, 512, 1024, 2048, 4096]
+    static let maxAttachmentBytes = 1024 * 1024 * 1024
+    static let legacyInlineAttachmentMaxBytes = 4 * 1024 * 1024
+    static let attachmentChunkPlaintextBytes = 4 * 1024 * 1024
+    static let attachmentChunkedTransport = "chunked-aes-gcm-v1"
 
     static func createSignedPrekey(signingKey: SigningPrivateKeyHandle, userId: String) throws -> (
         createdAt: String,
@@ -519,6 +534,10 @@ enum NotrusCrypto {
                 senderId: senderId,
                 sha256: sha256,
                 threadId: threadId,
+                transport: nil,
+                chunkSize: nil,
+                chunkCount: nil,
+                chunks: [],
                 transportPadding: nil
             ),
             reference: SecureAttachmentReference(
@@ -532,8 +551,127 @@ enum NotrusCrypto {
         )
     }
 
+    static func sealAttachmentToChunkFiles(
+        url: URL,
+        declaredByteLength: Int,
+        outputDirectory: URL,
+        fileName: String = "attachment.bin",
+        mediaType: String = "application/octet-stream",
+        senderId: String,
+        threadId: String
+    ) throws -> SealedFileAttachment {
+        guard declaredByteLength <= maxAttachmentBytes else {
+            throw NotrusCryptoError.unsupportedPayload
+        }
+
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        let attachmentKey = randomData(count: 32)
+        let symmetricKey = SymmetricKey(data: attachmentKey)
+        let attachmentId = UUID().uuidString.lowercased()
+        let createdAt = isoNow()
+        let input = try FileHandle(forReadingFrom: url)
+        defer { try? input.close() }
+
+        var descriptors: [AttachmentChunkRecord] = []
+        var chunkFiles: [SealedAttachmentChunkFile] = []
+        var totalBytes = 0
+        var index = 0
+        let encoder = JSONEncoder()
+
+        while true {
+            let chunkData = try input.read(upToCount: attachmentChunkPlaintextBytes) ?? Data()
+            if chunkData.isEmpty {
+                break
+            }
+            totalBytes += chunkData.count
+            guard totalBytes <= maxAttachmentBytes else {
+                throw NotrusCryptoError.unsupportedPayload
+            }
+
+            let iv = randomData(count: 12)
+            let sealed = try AES.GCM.seal(
+                chunkData,
+                using: symmetricKey,
+                nonce: .init(data: iv),
+                authenticating: attachmentChunkAad(
+                    attachmentId: attachmentId,
+                    chunkIndex: index,
+                    createdAt: createdAt,
+                    senderId: senderId,
+                    threadId: threadId
+                )
+            )
+            guard let combined = sealed.combined else {
+                throw NotrusCryptoError.malformedCiphertext
+            }
+            let ciphertext = combined.dropFirst(12)
+            let sha256 = SHA256.hash(data: combined).map { String(format: "%02x", $0) }.joined()
+            let descriptor = AttachmentChunkRecord(
+                byteLength: chunkData.count,
+                ciphertext: nil,
+                index: index,
+                iv: combined.prefix(12).base64EncodedString(),
+                sha256: sha256
+            )
+            let upload = AttachmentChunkRecord(
+                byteLength: chunkData.count,
+                ciphertext: ciphertext.base64EncodedString(),
+                index: index,
+                iv: descriptor.iv,
+                sha256: sha256
+            )
+            let chunkURL = outputDirectory.appendingPathComponent("\(index).json")
+            try encoder.encode(upload).write(to: chunkURL, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: chunkURL.path)
+            descriptors.append(descriptor)
+            chunkFiles.append(SealedAttachmentChunkFile(descriptor: descriptor, url: chunkURL))
+            index += 1
+        }
+
+        guard totalBytes > 0 else {
+            throw NotrusCryptoError.unsupportedPayload
+        }
+        guard declaredByteLength <= 0 || declaredByteLength == totalBytes else {
+            throw NotrusCryptoError.unsupportedPayload
+        }
+
+        let manifestSha256 = chunkedManifestSha256(descriptors)
+        return SealedFileAttachment(
+            request: AttachmentUploadRequest(
+                byteLength: totalBytes,
+                ciphertext: nil,
+                createdAt: createdAt,
+                id: attachmentId,
+                iv: nil,
+                senderId: senderId,
+                sha256: manifestSha256,
+                threadId: threadId,
+                transport: attachmentChunkedTransport,
+                chunkSize: attachmentChunkPlaintextBytes,
+                chunkCount: descriptors.count,
+                chunks: descriptors,
+                transportPadding: nil
+            ),
+            reference: SecureAttachmentReference(
+                id: attachmentId,
+                attachmentKey: attachmentKey.base64EncodedString(),
+                byteLength: totalBytes,
+                mediaType: mediaType.isEmpty ? "application/octet-stream" : mediaType,
+                fileName: fileName,
+                sha256: manifestSha256
+            ),
+            chunkFiles: chunkFiles
+        )
+    }
+
     static func openAttachment(_ attachment: RelayAttachment, reference: SecureAttachmentReference) throws -> Data {
-        let combined = try base64Data(attachment.iv) + base64Data(attachment.ciphertext)
+        guard attachment.transport != attachmentChunkedTransport else {
+            throw NotrusCryptoError.unsupportedPayload
+        }
+        guard let iv = attachment.iv, let ciphertext = attachment.ciphertext else {
+            throw NotrusCryptoError.malformedCiphertext
+        }
+        let combined = try base64Data(iv) + base64Data(ciphertext)
         let digest = SHA256.hash(data: combined).map { String(format: "%02x", $0) }.joined()
         guard digest == reference.sha256 else {
             throw NotrusCryptoError.invalidEnvelopeSignature
@@ -553,6 +691,55 @@ enum NotrusCrypto {
             return unpadded
         }
         return plaintext
+    }
+
+    static func verifyChunkedManifest(_ attachment: RelayAttachment, reference: SecureAttachmentReference) throws {
+        guard attachment.transport == attachmentChunkedTransport else {
+            throw NotrusCryptoError.unsupportedPayload
+        }
+        guard attachment.sha256 == reference.sha256 else {
+            throw NotrusCryptoError.invalidEnvelopeSignature
+        }
+        guard chunkedManifestSha256(attachment.chunks) == reference.sha256 else {
+            throw NotrusCryptoError.invalidEnvelopeSignature
+        }
+    }
+
+    static func openAttachmentChunk(
+        _ chunk: AttachmentChunkRecord,
+        manifest: RelayAttachment,
+        reference: SecureAttachmentReference
+    ) throws -> Data {
+        guard manifest.transport == attachmentChunkedTransport else {
+            throw NotrusCryptoError.unsupportedPayload
+        }
+        guard let ciphertext = chunk.ciphertext else {
+            throw NotrusCryptoError.malformedCiphertext
+        }
+        let combined = try base64Data(chunk.iv) + base64Data(ciphertext)
+        let digest = SHA256.hash(data: combined).map { String(format: "%02x", $0) }.joined()
+        guard digest == chunk.sha256 else {
+            throw NotrusCryptoError.invalidEnvelopeSignature
+        }
+        guard manifest.chunks.indices.contains(chunk.index) else {
+            throw NotrusCryptoError.invalidEnvelopeSignature
+        }
+        let expected = manifest.chunks[chunk.index]
+        guard expected.iv == chunk.iv, expected.sha256 == chunk.sha256 else {
+            throw NotrusCryptoError.invalidEnvelopeSignature
+        }
+        let sealedBox = try AES.GCM.SealedBox(combined: combined)
+        return try AES.GCM.open(
+            sealedBox,
+            using: SymmetricKey(data: try base64Data(reference.attachmentKey)),
+            authenticating: attachmentChunkAad(
+                attachmentId: manifest.id,
+                chunkIndex: chunk.index,
+                createdAt: manifest.createdAt,
+                senderId: manifest.senderId,
+                threadId: manifest.threadId
+            )
+        )
     }
 
     static func jwk(from x963: Data) throws -> JWK {
@@ -836,6 +1023,24 @@ enum NotrusCrypto {
             ],
             options: [.sortedKeys]
         )
+    }
+
+    static func attachmentChunkAad(
+        attachmentId: String,
+        chunkIndex: Int,
+        createdAt: String,
+        senderId: String,
+        threadId: String
+    ) -> Data {
+        Data("{\"attachmentId\":\(jsonString(attachmentId)),\"chunkIndex\":\(chunkIndex),\"createdAt\":\(jsonString(createdAt)),\"kind\":\"notrus-attachment-chunk\",\"senderId\":\(jsonString(senderId)),\"threadId\":\(jsonString(threadId))}".utf8)
+    }
+
+    static func chunkedManifestSha256(_ chunks: [AttachmentChunkRecord]) -> String {
+        let manifest = chunks.sorted { $0.index < $1.index }.map { chunk in
+            "\(chunk.index)\n\(chunk.byteLength)\n\(chunk.iv)\n\(chunk.sha256)\n"
+        }.joined()
+        let source = "notrus-chunked-aes-gcm-v1\n\(manifest)"
+        return SHA256.hash(data: Data(source.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     static func padAttachmentPayload(data: Data) throws -> (serialized: Data, paddingBucket: Int) {

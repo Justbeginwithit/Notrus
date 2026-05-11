@@ -25,6 +25,8 @@ The relay operator API is disabled by default. If enabled, it requires a long ra
 
 Configure message, attachment, report, and device-event retention for the deployment. Shorter retention reduces post-compromise exposure but can affect usability.
 
+Encrypted attachments use chunked relay storage by default. Operators can tune `MAX_ATTACHMENT_BYTES`, `ATTACHMENT_CHUNK_MAX_BODY_BYTES`, `ATTACHMENT_CHUNK_MAX_PLAINTEXT_BYTES`, and `NOTRUS_ATTACHMENT_CHUNK_DIR`; the default client path supports up to 1 GB per attachment.
+
 ## Boundary
 
 Self-hosting reduces dependency on a third-party relay operator. It does not remove metadata visible to the relay.

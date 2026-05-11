@@ -6,6 +6,8 @@ import com.notrus.android.model.AccountResetResponse
 import com.notrus.android.model.AccountDeleteResponse
 import com.notrus.android.model.AttachmentUploadRequest
 import com.notrus.android.model.AttachmentUploadResponse
+import com.notrus.android.model.AttachmentChunkRecord
+import com.notrus.android.model.AttachmentChunkUploadResponse
 import com.notrus.android.model.ClientIntegrityReport
 import com.notrus.android.model.DeviceDescriptor
 import com.notrus.android.model.DeviceRevokeResponse
@@ -346,22 +348,67 @@ class RelayClient(
         deliveryCapability: String,
         attachment: AttachmentUploadRequest,
     ): String = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("byteLength", attachment.byteLength)
+            .put("createdAt", attachment.createdAt)
+            .put("id", attachment.id)
+            .put("senderId", attachment.senderId)
+            .put("sha256", attachment.sha256)
+            .put("threadId", attachment.threadId)
+            .put("transportPadding", attachment.transportPadding)
+
+        attachment.ciphertext?.let { body.put("ciphertext", it) }
+        attachment.iv?.let { body.put("iv", it) }
+        attachment.transport?.let { body.put("transport", it) }
+        attachment.chunkSize?.let { body.put("chunkSize", it) }
+        attachment.chunkCount?.let { body.put("chunkCount", it) }
+        if (attachment.chunks.isNotEmpty()) {
+            body.put(
+                "chunks",
+                JSONArray().apply {
+                    attachment.chunks.forEach { chunk ->
+                        put(
+                            JSONObject()
+                                .put("byteLength", chunk.byteLength)
+                                .put("index", chunk.index)
+                                .put("iv", chunk.iv)
+                                .put("sha256", chunk.sha256)
+                        )
+                    }
+                }
+            )
+        }
         val response = request(
             "/api/mailboxes/$mailboxHandle/attachments",
             method = "POST",
             authorizationToken = deliveryCapability,
-            body = JSONObject()
-                .put("byteLength", attachment.byteLength)
-                .put("ciphertext", attachment.ciphertext)
-                .put("createdAt", attachment.createdAt)
-                .put("id", attachment.id)
-                .put("iv", attachment.iv)
-                .put("senderId", attachment.senderId)
-                .put("sha256", attachment.sha256)
-                .put("threadId", attachment.threadId)
-                .put("transportPadding", attachment.transportPadding)
+            body = body,
         )
         parseAttachmentUploadResponse(response).attachmentId
+    }
+
+    suspend fun uploadAttachmentChunk(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        attachmentId: String,
+        chunk: AttachmentChunkRecord,
+    ): AttachmentChunkUploadResponse = withContext(Dispatchers.IO) {
+        val response = request(
+            "/api/mailboxes/$mailboxHandle/attachments/$attachmentId/chunks",
+            method = "POST",
+            authorizationToken = deliveryCapability,
+            body = JSONObject()
+                .put("byteLength", chunk.byteLength)
+                .put("ciphertext", chunk.ciphertext)
+                .put("index", chunk.index)
+                .put("iv", chunk.iv)
+                .put("sha256", chunk.sha256)
+        )
+        AttachmentChunkUploadResponse(
+            ok = response.optBoolean("ok", false),
+            attachmentId = response.optString("attachmentId"),
+            index = response.optInt("index", -1),
+        )
     }
 
     suspend fun fetchAttachment(
@@ -374,6 +421,19 @@ class RelayClient(
             authorizationToken = deliveryCapability,
         )
         parseRelayAttachment(response)
+    }
+
+    suspend fun fetchAttachmentChunk(
+        mailboxHandle: String,
+        deliveryCapability: String,
+        attachmentId: String,
+        index: Int,
+    ): AttachmentChunkRecord = withContext(Dispatchers.IO) {
+        val response = request(
+            "/api/mailboxes/$mailboxHandle/attachments/$attachmentId/chunks/$index",
+            authorizationToken = deliveryCapability,
+        )
+        parseAttachmentChunkRecord(response, includeCiphertext = true)
     }
 
     suspend fun revokeDevice(
@@ -687,16 +747,34 @@ class RelayClient(
             attachmentId = json.optString("attachmentId"),
         )
 
+    private fun parseAttachmentChunkRecord(json: JSONObject, includeCiphertext: Boolean = false): AttachmentChunkRecord =
+        AttachmentChunkRecord(
+            byteLength = json.optInt("byteLength", 0),
+            ciphertext = if (includeCiphertext) json.optString("ciphertext").ifBlank { null } else null,
+            index = json.optInt("index", -1),
+            iv = json.optString("iv"),
+            sha256 = json.optString("sha256"),
+        )
+
     private fun parseRelayAttachment(json: JSONObject): RelayAttachment =
         RelayAttachment(
             byteLength = json.optInt("byteLength", 0),
-            ciphertext = json.optString("ciphertext"),
+            ciphertext = json.optString("ciphertext").ifBlank { null },
             createdAt = json.optString("createdAt"),
             id = json.optString("id"),
-            iv = json.optString("iv"),
+            iv = json.optString("iv").ifBlank { null },
             senderId = json.optString("senderId"),
             sha256 = json.optString("sha256"),
             threadId = json.optString("threadId"),
+            transport = json.optString("transport").ifBlank { null },
+            chunkSize = json.takeIf { it.has("chunkSize") && !it.isNull("chunkSize") }?.optInt("chunkSize"),
+            chunkCount = json.takeIf { it.has("chunkCount") && !it.isNull("chunkCount") }?.optInt("chunkCount"),
+            chunks = buildList {
+                val chunksJson = json.optJSONArray("chunks") ?: JSONArray()
+                for (index in 0 until chunksJson.length()) {
+                    chunksJson.optJSONObject(index)?.let { add(parseAttachmentChunkRecord(it)) }
+                }
+            },
         )
 
     private fun requireSessionToken(): String =

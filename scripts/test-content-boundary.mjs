@@ -108,6 +108,18 @@ async function encryptAttachment(plaintext, { attachmentId, senderId, threadId }
   };
 }
 
+function encryptedChunk(index, byteLength = 32) {
+  const iv = randomBytes(12);
+  const ciphertext = randomBytes(byteLength + 16);
+  return {
+    byteLength,
+    ciphertext: ciphertext.toString("base64"),
+    index,
+    iv: iv.toString("base64"),
+    sha256: createHash("sha256").update(Buffer.concat([iv, ciphertext])).digest("hex"),
+  };
+}
+
 async function run({ origin, storePath }) {
   const suffix = randomBytes(4).toString("hex");
   const alice = identity(`contentalice${suffix}`);
@@ -189,6 +201,61 @@ async function run({ origin, storePath }) {
   );
   assert.equal(fetchedAttachment.ciphertext, sealedAttachment.ciphertext, "Fetched attachment ciphertext should match upload.");
 
+  const chunkedAttachmentId = `content-chunked-${suffix}`;
+  const firstChunk = encryptedChunk(0, 64);
+  const secondChunk = encryptedChunk(1, 48);
+  const manifestSha256 = createHash("sha256")
+    .update(`${firstChunk.sha256}:${secondChunk.sha256}`)
+    .digest("hex");
+  await expectOk(origin, `/api/mailboxes/${aliceThread.mailboxHandle}/attachments`, {
+    method: "POST",
+    token: aliceThread.deliveryCapability,
+    body: {
+      byteLength: firstChunk.byteLength + secondChunk.byteLength,
+      chunkCount: 2,
+      chunkSize: 64,
+      chunks: [
+        {
+          byteLength: firstChunk.byteLength,
+          index: firstChunk.index,
+          iv: firstChunk.iv,
+          sha256: firstChunk.sha256,
+        },
+        {
+          byteLength: secondChunk.byteLength,
+          index: secondChunk.index,
+          iv: secondChunk.iv,
+          sha256: secondChunk.sha256,
+        },
+      ],
+      createdAt: isoNow(),
+      id: chunkedAttachmentId,
+      sha256: manifestSha256,
+      transport: "chunked-aes-gcm-v1",
+    },
+  });
+  for (const chunk of [firstChunk, secondChunk]) {
+    await expectOk(origin, `/api/mailboxes/${aliceThread.mailboxHandle}/attachments/${chunkedAttachmentId}/chunks`, {
+      method: "POST",
+      token: aliceThread.deliveryCapability,
+      body: chunk,
+    });
+  }
+  const fetchedChunkedManifest = await expectOk(
+    origin,
+    `/api/mailboxes/${bobThread.mailboxHandle}/attachments/${chunkedAttachmentId}`,
+    { token: bobThread.deliveryCapability }
+  );
+  assert.equal(fetchedChunkedManifest.transport, "chunked-aes-gcm-v1", "Chunked attachment manifest should round-trip.");
+  assert.equal(fetchedChunkedManifest.ciphertext, undefined, "Chunked attachment manifest should not inline ciphertext.");
+  assert.equal(fetchedChunkedManifest.chunks.length, 2, "Chunked attachment manifest should include chunk descriptors.");
+  const fetchedChunk = await expectOk(
+    origin,
+    `/api/mailboxes/${bobThread.mailboxHandle}/attachments/${chunkedAttachmentId}/chunks/1`,
+    { token: bobThread.deliveryCapability }
+  );
+  assert.equal(fetchedChunk.ciphertext, secondChunk.ciphertext, "Fetched encrypted chunk should match upload.");
+
   const unauthorizedFetch = await request(
     origin,
     `/api/mailboxes/${bobThread.mailboxHandle}/attachments/${attachmentId}`,
@@ -200,6 +267,7 @@ async function run({ origin, storePath }) {
     const store = await readFile(storePath, "utf8");
     assert.equal(store.includes(plaintextAttachment.toString("utf8")), false, "Relay store contains plaintext attachment data.");
     assert.equal(store.includes(sealedAttachment.ciphertext), true, "Relay store should contain only encrypted attachment material.");
+    assert.equal(store.includes(firstChunk.ciphertext), false, "Relay store should not inline chunked attachment payloads.");
   }
 
   console.log("content-boundary: relay stored ciphertext-only message and attachment material");

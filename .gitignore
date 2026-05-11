@@ -4,6 +4,8 @@ data/witness-store.json
 data/transparency-signing-key.json
 data/xiaomi-firmware-watch/
 .secrets/
+.notrus-local.env
+.notrus-stack/
 config/release/approvals.json
 dist
 .DS_Store

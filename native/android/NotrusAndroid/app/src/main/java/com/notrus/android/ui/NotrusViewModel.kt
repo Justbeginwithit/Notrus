@@ -54,6 +54,7 @@ import com.notrus.android.security.TransparencyVerifier
 import com.notrus.android.security.VaultStore
 import com.notrus.android.ui.theme.NotrusColorTheme
 import com.notrus.android.ui.theme.NotrusThemeMode
+import java.io.File
 import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -412,8 +413,8 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
             state = state.copy(errorMessage = "Open a conversation before adding attachments on Android.")
             return
         }
-        if (!thread.supported || thread.protocol != DIRECT_PROTOCOL) {
-            state = state.copy(errorMessage = "Android attachment send is currently available on standards direct chats only.")
+        if (!thread.supported || thread.protocol !in setOf(DIRECT_PROTOCOL, GROUP_PROTOCOL)) {
+            state = state.copy(errorMessage = "Android attachment send is available on standards direct and group chats only.")
             return
         }
         if (state.pendingAttachments.size >= MAX_PENDING_ATTACHMENT_DRAFTS) {
@@ -471,9 +472,21 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
                     deliveryCapability = deliveryCapability,
                     attachmentId = reference.id,
                 )
-                val plaintext = AttachmentCrypto.openAttachment(encrypted, reference)
                 applicationContext.contentResolver.openOutputStream(destinationUri, "w")?.use { output ->
-                    output.write(plaintext)
+                    if (encrypted.transport == AttachmentCrypto.ChunkedTransport) {
+                        AttachmentCrypto.verifyChunkedManifest(encrypted, reference)
+                        encrypted.chunks.sortedBy { it.index }.forEach { descriptor ->
+                            val chunk = relayClient().fetchAttachmentChunk(
+                                mailboxHandle = mailboxHandle,
+                                deliveryCapability = deliveryCapability,
+                                attachmentId = reference.id,
+                                index = descriptor.index,
+                            )
+                            output.write(AttachmentCrypto.openAttachmentChunk(encrypted, chunk, reference))
+                        }
+                    } else {
+                        output.write(AttachmentCrypto.openAttachment(encrypted, reference))
+                    }
                 } ?: error("Android could not open the selected destination.")
                 state = state.copy(
                     isBusy = false,
@@ -2500,24 +2513,79 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         }
         return buildList {
             for (draft in pendingAttachments) {
-                val plaintext = readAttachmentBytes(
-                    uri = Uri.parse(draft.uri),
-                    expectedName = draft.fileName,
+                if (draft.byteLength in 1..AttachmentCrypto.LegacyInlineMaxPlaintextBytes) {
+                    val plaintext = withContext(Dispatchers.IO) {
+                        readAttachmentBytes(
+                            uri = Uri.parse(draft.uri),
+                            expectedName = draft.fileName,
+                            maxBytes = AttachmentCrypto.LegacyInlineMaxPlaintextBytes,
+                        )
+                    }
+                    val sealedAttachment = AttachmentCrypto.sealAttachment(
+                        data = plaintext,
+                        fileName = draft.fileName,
+                        mediaType = draft.mediaType,
+                        senderId = identity.id,
+                        threadId = threadId,
+                    )
+                    applyPrivacyDelayIfEnabled(PrivacyDelayKind.Delivery)
+                    relayClient().uploadAttachment(
+                        mailboxHandle = mailboxHandle,
+                        deliveryCapability = deliveryCapability,
+                        attachment = sealedAttachment.request,
+                    )
+                    add(sealedAttachment.reference)
+                    continue
+                }
+
+                val tempDirectory = File(
+                    applicationContext.cacheDir,
+                    "notrus-attachment-chunks/${UUID.randomUUID().toString().lowercase()}",
                 )
-                val sealedAttachment = AttachmentCrypto.sealAttachment(
-                    data = plaintext,
-                    fileName = draft.fileName,
-                    mediaType = draft.mediaType,
-                    senderId = identity.id,
-                    threadId = threadId,
-                )
-                applyPrivacyDelayIfEnabled(PrivacyDelayKind.Delivery)
-                relayClient().uploadAttachment(
-                    mailboxHandle = mailboxHandle,
-                    deliveryCapability = deliveryCapability,
-                    attachment = sealedAttachment.request,
-                )
-                add(sealedAttachment.reference)
+                try {
+                    val sealedAttachment = withContext(Dispatchers.IO) {
+                        applicationContext.contentResolver.openInputStream(Uri.parse(draft.uri))?.use { input ->
+                            AttachmentCrypto.sealAttachmentToChunkFiles(
+                                input = input,
+                                declaredByteLength = draft.byteLength.takeIf { it > 0 }?.toLong(),
+                                outputDirectory = tempDirectory,
+                                fileName = draft.fileName,
+                                mediaType = draft.mediaType,
+                                senderId = identity.id,
+                                threadId = threadId,
+                            )
+                        } ?: error("Android could not open ${draft.fileName}.")
+                    }
+                    applyPrivacyDelayIfEnabled(PrivacyDelayKind.Delivery)
+                    relayClient().uploadAttachment(
+                        mailboxHandle = mailboxHandle,
+                        deliveryCapability = deliveryCapability,
+                        attachment = sealedAttachment.request,
+                    )
+                    sealedAttachment.chunkFiles.sortedBy { it.descriptor.index }.forEach { chunkFile ->
+                        val chunk = withContext(Dispatchers.IO) {
+                            AttachmentCrypto.readEncryptedChunkFile(chunkFile.file)
+                        }
+                        relayClient().uploadAttachmentChunk(
+                            mailboxHandle = mailboxHandle,
+                            deliveryCapability = deliveryCapability,
+                            attachmentId = sealedAttachment.reference.id,
+                            chunk = chunk,
+                        )
+                    }
+                    add(sealedAttachment.reference)
+                } catch (error: Throwable) {
+                    val message = error.message.orEmpty()
+                    if (message.contains("Encrypted attachments must include", ignoreCase = true)) {
+                        throw IllegalStateException(
+                            "This relay is still running the old attachment API. Restart/update the relay before sending attachments above ${AttachmentCrypto.LegacyInlineMaxPlaintextBytes / (1024 * 1024)} MB.",
+                            error,
+                        )
+                    }
+                    throw error
+                } finally {
+                    tempDirectory.deleteRecursively()
+                }
             }
         }
     }
@@ -4248,12 +4316,12 @@ class NotrusViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
-    private fun readAttachmentBytes(uri: Uri, expectedName: String): ByteArray {
+    private fun readAttachmentBytes(uri: Uri, expectedName: String, maxBytes: Int = Int.MAX_VALUE): ByteArray {
         val bytes = applicationContext.contentResolver.openInputStream(uri)?.use { stream ->
             stream.readBytes()
         } ?: error("Android could not open $expectedName.")
-        if (bytes.size > AttachmentCrypto.MaxAttachmentSizeBytes) {
-            error("$expectedName exceeds Android's ${AttachmentCrypto.MaxAttachmentSizeBytes / (1024 * 1024)} MB attachment limit.")
+        if (bytes.size > maxBytes) {
+            error("$expectedName exceeds Android's ${maxBytes / (1024 * 1024)} MB inline attachment compatibility limit.")
         }
         return bytes
     }

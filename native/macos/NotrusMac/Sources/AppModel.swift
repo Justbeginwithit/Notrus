@@ -2258,21 +2258,62 @@ final class AppModel: ObservableObject {
             var attachments: [SecureAttachmentReference] = []
             attachments.reserveCapacity(pendingAttachments.count)
             for draft in pendingAttachments {
-                let data = try Data(contentsOf: draft.url)
-                let sealed = try NotrusCrypto.sealAttachment(
-                    data: data,
-                    fileName: draft.fileName,
-                    mediaType: draft.mediaType,
-                    senderId: currentIdentity.id,
-                    threadId: thread.id
-                )
-                let route = try routingState(for: thread)
-                _ = try await currentRelayClient.uploadAttachment(
-                    mailboxHandle: route.mailboxHandle,
-                    deliveryCapability: route.deliveryCapability,
-                    attachment: sealed.request.relayTransportForm()
-                )
-                attachments.append(sealed.reference)
+                if draft.byteLength > 0 && draft.byteLength <= NotrusCrypto.legacyInlineAttachmentMaxBytes {
+                    let data = try Data(contentsOf: draft.url)
+                    let sealed = try NotrusCrypto.sealAttachment(
+                        data: data,
+                        fileName: draft.fileName,
+                        mediaType: draft.mediaType,
+                        senderId: currentIdentity.id,
+                        threadId: thread.id
+                    )
+                    let route = try routingState(for: thread)
+                    _ = try await currentRelayClient.uploadAttachment(
+                        mailboxHandle: route.mailboxHandle,
+                        deliveryCapability: route.deliveryCapability,
+                        attachment: sealed.request.relayTransportForm()
+                    )
+                    attachments.append(sealed.reference)
+                    continue
+                }
+
+                let tempDirectory = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("notrus-attachment-chunks")
+                    .appendingPathComponent(UUID().uuidString.lowercased())
+                defer { try? FileManager.default.removeItem(at: tempDirectory) }
+                do {
+                    let sealed = try NotrusCrypto.sealAttachmentToChunkFiles(
+                        url: draft.url,
+                        declaredByteLength: draft.byteLength,
+                        outputDirectory: tempDirectory,
+                        fileName: draft.fileName,
+                        mediaType: draft.mediaType,
+                        senderId: currentIdentity.id,
+                        threadId: thread.id
+                    )
+                    let route = try routingState(for: thread)
+                    _ = try await currentRelayClient.uploadAttachment(
+                        mailboxHandle: route.mailboxHandle,
+                        deliveryCapability: route.deliveryCapability,
+                        attachment: sealed.request.relayTransportForm()
+                    )
+                    let decoder = JSONDecoder()
+                    for chunkFile in sealed.chunkFiles.sorted(by: { $0.descriptor.index < $1.descriptor.index }) {
+                        let chunk = try decoder.decode(AttachmentChunkRecord.self, from: Data(contentsOf: chunkFile.url))
+                        _ = try await currentRelayClient.uploadAttachmentChunk(
+                            mailboxHandle: route.mailboxHandle,
+                            deliveryCapability: route.deliveryCapability,
+                            attachmentId: sealed.reference.id,
+                            chunk: chunk
+                        )
+                    }
+                    attachments.append(sealed.reference)
+                } catch {
+                    if error.localizedDescription.localizedCaseInsensitiveContains("Encrypted attachments must include") {
+                        throw RelayClientError.requestFailed("This relay is still running the old attachment API. Restart/update the relay before sending attachments above \(NotrusCrypto.legacyInlineAttachmentMaxBytes / (1024 * 1024)) MB.")
+                    }
+                    throw error
+                }
             }
 
             let payload = MessagePayload(
@@ -2924,8 +2965,27 @@ final class AppModel: ObservableObject {
                 deliveryCapability: route.deliveryCapability,
                 attachmentId: reference.id,
             )
-            let data = try NotrusCrypto.openAttachment(encrypted, reference: reference)
-            try AttachmentGateway.saveAttachment(data: data, reference: reference)
+            if encrypted.transport == NotrusCrypto.attachmentChunkedTransport {
+                try NotrusCrypto.verifyChunkedManifest(encrypted, reference: reference)
+                let destinationURL = try AttachmentGateway.destinationURL(for: reference)
+                try? FileManager.default.removeItem(at: destinationURL)
+                FileManager.default.createFile(atPath: destinationURL.path, contents: nil)
+                let handle = try FileHandle(forWritingTo: destinationURL)
+                defer { try? handle.close() }
+                for descriptor in encrypted.chunks.sorted(by: { $0.index < $1.index }) {
+                    let chunk = try await currentRelayClient.fetchAttachmentChunk(
+                        mailboxHandle: route.mailboxHandle,
+                        deliveryCapability: route.deliveryCapability,
+                        attachmentId: reference.id,
+                        index: descriptor.index
+                    )
+                    try handle.write(contentsOf: NotrusCrypto.openAttachmentChunk(chunk, manifest: encrypted, reference: reference))
+                }
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destinationURL.path)
+            } else {
+                let data = try NotrusCrypto.openAttachment(encrypted, reference: reference)
+                try AttachmentGateway.saveAttachment(data: data, reference: reference)
+            }
             statusMessage = "Saved decrypted attachment to the location you chose."
         } catch {
             errorMessage = error.localizedDescription
